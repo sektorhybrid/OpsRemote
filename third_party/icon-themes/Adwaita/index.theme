@@ -1,0 +1,33 @@
+[Icon Theme]
+Name=Adwaita
+Comment=Subset of Adwaita 51.0 for OpsRemote
+Directories=scalable/actions,scalable/apps,scalable/places,scalable/mimetypes
+
+[scalable/actions]
+Size=48
+MinSize=8
+MaxSize=512
+Type=Scalable
+Context=Actions
+
+[scalable/apps]
+Size=48
+MinSize=8
+MaxSize=512
+Type=Scalable
+Context=Apps
+
+[scalable/places]
+Size=48
+MinSize=8
+MaxSize=512
+Type=Scalable
+Context=Places
+
+[scalable/mimetypes]
+Size=48
+MinSize=8
+MaxSize=512
+Type=Scalable
+Context=Mimetypes
+

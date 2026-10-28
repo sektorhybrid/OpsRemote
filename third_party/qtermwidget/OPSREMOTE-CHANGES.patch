@@ -1,0 +1,473 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index b507aff..a330a03 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,3 +1,4 @@
++# Modified for OpsRemote by Thanos Athanasopoulos, 2026 (see OPSREMOTE-CHANGES.md).
+ cmake_minimum_required(VERSION 3.18.0 FATAL_ERROR)
+ # CMP0000: Call the cmake_minimum_required() command at the beginning of the top-level
+ # CMakeLists.txt file even before calling the project() command.
+@@ -17,6 +18,10 @@ option(BUILD_EXAMPLE "Build example application. Default OFF." OFF)
+ option(QTERMWIDGET_USE_UTEMPTER "Uses libutempter on Linux or libulog on FreeBSD for login records." OFF)
+ option(QTERMWIDGET_BUILD_PYTHON_BINDING "Build python binding" OFF)
+ option(USE_UTF8PROC "Use libutf8proc for better Unicode support. Default OFF" OFF)
++# OpsRemote addition: Windows has no wcwidth(), so it needs utf8proc.
++if(WIN32)
++    set(USE_UTF8PROC ON)
++endif()
+ 
+ 
+ # just change version for releases
+@@ -108,6 +113,15 @@ set(UI
+     lib/SearchBar.ui
+ )
+ 
++# OpsRemote addition: no Unix pseudo-terminals on Windows; the Pty in
++# lib/PtyWindows.* provides the same interface.
++if(WIN32)
++    list(REMOVE_ITEM SRCS lib/kpty.cpp lib/kptydevice.cpp lib/kptyprocess.cpp lib/Pty.cpp)
++    list(APPEND SRCS lib/PtyWindows.cpp)
++    list(REMOVE_ITEM HDRS lib/kptydevice.h lib/kptyprocess.h lib/Pty.h)
++    list(APPEND HDRS lib/PtyWindows.h)
++endif()
++
+ # for distribution
+ set(HDRS_DISTRIB
+     lib/qtermwidget.h
+diff --git a/lib/BlockArray.cpp b/lib/BlockArray.cpp
+index bd413a1..b67c95e 100644
+--- a/lib/BlockArray.cpp
++++ b/lib/BlockArray.cpp
+@@ -1,3 +1,4 @@
++// Modified for OpsRemote by Thanos Athanasopoulos, 2026 (see OPSREMOTE-CHANGES.md).
+ /*
+     This file is part of Konsole, an X terminal.
+     Copyright (C) 2000 by Stephan Kulow <coolo@kde.org>
+@@ -27,7 +28,9 @@
+ #include "BlockArray.h"
+ 
+ // System
++#ifndef _WIN32
+ #include <sys/mman.h>
++#endif
+ #include <sys/param.h>
+ #include <unistd.h>
+ #include <cstdio>
+@@ -35,6 +38,11 @@
+ 
+ using namespace Konsole;
+ 
++#ifdef _WIN32
++// OpsRemote addition: Windows has no getpagesize().
++static int getpagesize() { return 4096; }
++#endif
++
+ static int blocksize = 0;
+ 
+ BlockArray::BlockArray()
+@@ -151,12 +159,24 @@ const Block * BlockArray::at(size_t i)
+     Q_ASSERT(j < size);
+     unmap();
+ 
++#ifdef _WIN32
++    // OpsRemote addition: no mmap on Windows; read the block instead
++    // (unmap() frees it).
++    Block * block = new Block();
++    if (lseek(ion, j * blocksize, SEEK_SET) < 0
++        || read(ion, block, blocksize) != blocksize) {
++        perror("read");
++        delete block;
++        return nullptr;
++    }
++#else
+     Block * block = (Block *)mmap(nullptr, blocksize, PROT_READ, MAP_PRIVATE, ion, j * blocksize);
+ 
+     if (block == (Block *)-1) {
+         perror("mmap");
+         return nullptr;
+     }
++#endif
+ 
+     lastmap = block;
+     lastmap_index = i;
+@@ -167,10 +187,14 @@ const Block * BlockArray::at(size_t i)
+ void BlockArray::unmap()
+ {
+     if (lastmap) {
++#ifdef _WIN32
++        delete lastmap;
++#else
+         int res = munmap((char *)lastmap, blocksize);
+         if (res < 0) {
+             perror("munmap");
+         }
++#endif
+     }
+     lastmap = nullptr;
+     lastmap_index = size_t(-1);
+diff --git a/lib/History.cpp b/lib/History.cpp
+index cdc5e0a..4248938 100644
+--- a/lib/History.cpp
++++ b/lib/History.cpp
+@@ -1,3 +1,4 @@
++// Modified for OpsRemote by Thanos Athanasopoulos, 2026 (see OPSREMOTE-CHANGES.md).
+ /*
+     This file is part of Konsole, an X terminal.
+     Copyright 1997,1998 by Lars Doelle <lars.doelle@on-line.de>
+@@ -27,7 +28,9 @@
+ #include <cstdlib>
+ #include <cstdio>
+ #include <sys/types.h>
++#ifndef _WIN32
+ #include <sys/mman.h>
++#endif
+ #include <unistd.h>
+ #include <cerrno>
+ 
+@@ -113,6 +116,11 @@ void HistoryFile::map()
+ {
+     Q_ASSERT( fileMap == nullptr );
+ 
++#ifdef _WIN32
++    // OpsRemote addition: no mmap on Windows; always use the
++    // read-lseek combination.
++    readWriteBalance = 0;
++#else
+     fileMap = (char*)mmap( nullptr , length , PROT_READ , MAP_PRIVATE , ion , 0 );
+ 
+     //if mmap'ing fails, fall back to the read-lseek combination
+@@ -122,12 +130,15 @@ void HistoryFile::map()
+             fileMap = nullptr;
+             //qDebug() << __FILE__ << __LINE__ << ": mmap'ing history failed.  errno = " << errno;
+     }
++#endif
+ }
+ 
+ void HistoryFile::unmap()
+ {
++#ifndef _WIN32
+     int result = munmap( fileMap , length );
+     Q_ASSERT( result == 0 ); Q_UNUSED( result )
++#endif
+ 
+     fileMap = nullptr;
+ }
+diff --git a/lib/History.h b/lib/History.h
+index 155bb7f..d5ad1a3 100644
+--- a/lib/History.h
++++ b/lib/History.h
+@@ -1,3 +1,4 @@
++// Modified for OpsRemote by Thanos Athanasopoulos, 2026 (see OPSREMOTE-CHANGES.md).
+ /*
+     This file is part of Konsole, an X terminal.
+     Copyright 1997,1998 by Lars Doelle <lars.doelle@on-line.de>
+@@ -34,8 +35,12 @@
+ #include "BlockArray.h"
+ #include "Character.h"
+ 
+-// map
++// map (OpsRemote addition: Windows has no mmap)
++#ifdef _WIN32
++#include <cstdlib>
++#else
+ #include <sys/mman.h>
++#endif
+ 
+ namespace Konsole
+ {
+@@ -297,16 +302,27 @@ public:
+ 
+   CompactHistoryBlock(){
+     blockLength = 4096*64; // 256kb
++#ifdef _WIN32
++    // OpsRemote addition: no anonymous mmap on Windows; calloc gives
++    // the same zero-filled block.
++    head = (quint8*) calloc(1, blockLength);
++    Q_ASSERT(head != nullptr);
++#else
+     head = (quint8*) mmap(nullptr, blockLength, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1, 0);
+     //head = (quint8*) malloc(blockLength);
+     Q_ASSERT(head != MAP_FAILED);
++#endif
+     tail = blockStart = head;
+     allocCount=0;
+   }
+ 
+   virtual ~CompactHistoryBlock(){
++#ifdef _WIN32
++    free(blockStart);
++#else
+     //free(blockStart);
+     munmap(blockStart, blockLength);
++#endif
+   }
+ 
+   virtual unsigned int remaining(){ return blockStart+blockLength-tail;}
+diff --git a/lib/Pty.h b/lib/Pty.h
+index 5e5c476..eb5c1ca 100644
+--- a/lib/Pty.h
++++ b/lib/Pty.h
+@@ -1,3 +1,4 @@
++// Modified for OpsRemote by Thanos Athanasopoulos, 2026 (see OPSREMOTE-CHANGES.md).
+ /*
+  * This file is a part of QTerminal - http://gitorious.org/qterminal
+  *
+@@ -31,6 +32,12 @@
+ #ifndef PTY_H
+ #define PTY_H
+ 
++// OpsRemote addition: Windows has no Unix pseudo-terminals; it uses
++// the Pty in PtyWindows.h, which offers the same interface.
++#ifdef _WIN32
++#include "PtyWindows.h"
++#else
++
+ // Qt
+ #include <QStringList>
+ #include <QVector>
+@@ -218,4 +225,6 @@ Q_OBJECT
+ 
+ }
+ 
++#endif // _WIN32
++
+ #endif // PTY_H
+diff --git a/lib/PtyWindows.cpp b/lib/PtyWindows.cpp
+new file mode 100644
+index 0000000..6c86983
+--- /dev/null
++++ b/lib/PtyWindows.cpp
+@@ -0,0 +1,38 @@
++/*
++    SPDX-License-Identifier: LGPL-2.0-or-later
++    SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
++
++    OpsRemote addition to QTermWidget (LGPL-2.0-or-later).
++    See PtyWindows.h.
++*/
++
++#include "Pty.h"
++
++using namespace Konsole;
++
++Pty::Pty(QObject *parent)
++    : QProcess(parent)
++{
++}
++
++Pty::Pty(int, QObject *parent)
++    : QProcess(parent)
++{
++}
++
++Pty::~Pty() = default;
++
++int Pty::start(const QString &, const QStringList &, const QStringList &, ulong, bool)
++{
++    return -1;
++}
++
++void Pty::setWindowSize(int lines, int cols)
++{
++    _windowLines = lines;
++    _windowColumns = cols;
++}
++
++void Pty::sendData(const char *, int)
++{
++}
+diff --git a/lib/PtyWindows.h b/lib/PtyWindows.h
+new file mode 100644
+index 0000000..11433d5
+--- /dev/null
++++ b/lib/PtyWindows.h
+@@ -0,0 +1,77 @@
++/*
++    SPDX-License-Identifier: LGPL-2.0-or-later
++    SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
++
++    OpsRemote addition to QTermWidget (LGPL-2.0-or-later, like the
++    rest of this library).
++
++    Windows replacement for Konsole's Unix Pty: the same interface, built on
++    QProcess, so Session and the emulation compile unchanged. It does not
++    start a local process yet (that will use ConPTY); terminals driven by an
++    external transport use startTerminalTeletype(), which needs no process.
++*/
++
++#ifndef PTYWINDOWS_H
++#define PTYWINDOWS_H
++
++#include <QByteArray>
++#include <QProcess>
++#include <QSize>
++#include <QStringList>
++
++namespace Konsole {
++
++// Stands in for KPtyDevice: there is no slave device on Windows.
++class PtyDevice
++{
++public:
++    int slaveFd() const { return -1; }
++    int masterFd() const { return -1; }
++    QByteArray ttyName() const { return {}; }
++};
++
++class Pty : public QProcess
++{
++    Q_OBJECT
++
++public:
++    explicit Pty(QObject *parent = nullptr);
++    explicit Pty(int ptyMasterFd, QObject *parent = nullptr);
++    ~Pty() override;
++
++    // Not supported yet on Windows; returns -1.
++    int start(const QString &program, const QStringList &arguments,
++              const QStringList &environment, ulong winid, bool addToUtmp);
++
++    void setEmptyPTYProperties() {}
++    void setWriteable(bool) {}
++    void setFlowControlEnabled(bool on) { _xonXoff = on; }
++    bool flowControlEnabled() const { return _xonXoff; }
++    void setWindowSize(int lines, int cols);
++    QSize windowSize() const { return {_windowColumns, _windowLines}; }
++    void setErase(char erase) { _eraseChar = erase; }
++    char erase() const { return _eraseChar; }
++    void setInitialWorkingDirectory(const QString &dir) { setWorkingDirectory(dir); }
++    int foregroundProcessGroup() const { return 0; }
++    void closePty() {}
++    PtyDevice *pty() const { return &_device; }
++
++public slots:
++    void setUtf8Mode(bool) {}
++    void lockPty(bool) {}
++    void sendData(const char *buffer, int length);
++
++signals:
++    void receivedData(const char *buffer, int length);
++
++private:
++    int _windowColumns = 0;
++    int _windowLines = 0;
++    char _eraseChar = 0;
++    bool _xonXoff = true;
++    mutable PtyDevice _device;
++};
++
++}
++
++#endif // PTYWINDOWS_H
+diff --git a/lib/Session.cpp b/lib/Session.cpp
+index 734673e..5a9d666 100644
+--- a/lib/Session.cpp
++++ b/lib/Session.cpp
+@@ -1,3 +1,4 @@
++// Modified for OpsRemote by Thanos Athanasopoulos, 2026 (see OPSREMOTE-CHANGES.md).
+ /*
+     This file is part of Konsole
+ 
+@@ -40,6 +41,16 @@
+ #include <QRegularExpression>
+ 
+ #include "Pty.h"
++
++#ifdef _WIN32
++// OpsRemote addition: signal numbers used by close(); see sendSignal().
++#ifndef SIGHUP
++#define SIGHUP 1
++#endif
++#ifndef SIGKILL
++#define SIGKILL 9
++#endif
++#endif
+ //#include "kptyprocess.h"
+ #include "TerminalCharacterDecoder.h"
+ #include "TerminalDisplay.h"
+@@ -579,7 +590,15 @@ bool Session::sendSignal(int signal)
+         return false;
+     }
+ 
++#ifdef _WIN32
++    // OpsRemote addition: Windows has no POSIX signals; end the
++    // process instead.
++    Q_UNUSED(signal);
++    _shellProcess->kill();
++    int result = 0;
++#else
+     int result = ::kill(static_cast<pid_t>(_shellProcess->processId()), signal);
++#endif
+ 
+      if ( result == 0 )
+      {
+diff --git a/lib/qtermwidget.cpp b/lib/qtermwidget.cpp
+index bd5ed5d..abbd0a1 100644
+--- a/lib/qtermwidget.cpp
++++ b/lib/qtermwidget.cpp
+@@ -1,3 +1,4 @@
++// Modified for OpsRemote by Thanos Athanasopoulos, 2026 (see OPSREMOTE-CHANGES.md).
+ /*  Copyright (C) 2008 e_k (e_k@users.sourceforge.net)
+ 
+     This library is free software; you can redistribute it and/or
+@@ -384,6 +385,9 @@ void QTermWidget::init(int startnow)
+     m_impl->m_session->addView(m_impl->m_terminalDisplay);
+ 
+     connect(m_impl->m_session, SIGNAL(resizeRequest(QSize)), this, SLOT(setSize(QSize)));
++    // OpsRemote addition: report screen size changes (terminalSizeChanged).
++    connect(m_impl->m_session->emulation(), &Emulation::imageSizeChanged,
++            this, &QTermWidget::terminalSizeChanged);
+     connect(m_impl->m_session, SIGNAL(finished()), this, SLOT(sessionFinished()));
+     connect(m_impl->m_session, &Session::titleChanged, this, &QTermWidget::titleChanged);
+     connect(m_impl->m_session, &Session::currentDirectoryChanged, this, &QTermWidget::currentDirectoryChanged);
+@@ -764,6 +768,12 @@ int QTermWidget::getPtySlaveFd() const
+     return m_impl->m_session->getPtySlaveFd();
+ }
+ 
++// OpsRemote addition: output from an external transport such as SSH.
++void QTermWidget::receiveData(const char *data, int size)
++{
++    m_impl->m_session->emulation()->receiveData(data, size);
++}
++
+ QString QTermWidget::getPtyName() const
+ {
+     return m_impl->m_session->getPtyName();
+diff --git a/lib/qtermwidget.h b/lib/qtermwidget.h
+index f9b9979..957d16e 100644
+--- a/lib/qtermwidget.h
++++ b/lib/qtermwidget.h
+@@ -1,3 +1,4 @@
++// Modified for OpsRemote by Thanos Athanasopoulos, 2026 (see OPSREMOTE-CHANGES.md).
+ /*  Copyright (C) 2008 e_k (e_k@users.sourceforge.net)
+ 
+     This library is free software; you can redistribute it and/or
+@@ -66,6 +67,14 @@ public:
+      */
+     void startTerminalTeletype() override;
+ 
++    /**
++     * OpsRemote addition: feed output from an external transport
++     * (for example an SSH channel) directly into the emulation. Use with
++     * startTerminalTeletype(); unlike writing to getPtySlaveFd(), this never
++     * blocks and does not pass through the local PTY line discipline.
++     */
++    void receiveData(const char *data, int size);
++
+     int getShellPID() override;
+ 
+     /**
+@@ -316,6 +325,13 @@ signals:
+      */
+     void receivedData(const QString &text);
+ 
++    /**
++     * OpsRemote addition: emitted when the emulation's screen size
++     * changes (widget resize or font zoom), so an external transport can
++     * forward the new window size to the remote side.
++     */
++    void terminalSizeChanged(int lines, int columns);
++
+ public slots:
+     // Copy selection to clipboard
+     void copyClipboard();
