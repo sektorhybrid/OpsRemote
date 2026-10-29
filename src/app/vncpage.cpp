@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "vncpage.h"
+#include "jumphost.h"
 #include "sessionendedpanel.h"
 
 #include <QApplication>
@@ -222,8 +223,8 @@ VncPage::VncPage(const VncPageSettings &settings, QWidget *parent)
 VncPage::~VncPage()
 {
     m_settings.connection.password.fill(QChar(0));
-    if (m_settings.tunnel)
-        m_settings.tunnel->password.fill(QChar(0));
+    for (auto &jump : m_settings.jumps)
+        jump.password.fill(QChar(0));
     stopTunnel();
     // Closing the tab must not wait for the connection to end.
     m_session->retire();
@@ -242,82 +243,34 @@ void VncPage::start()
 {
     m_connectScale = scale();
     const auto &connection = m_settings.connection;
-    if (!m_settings.tunnel || connection.options.listen == 1) {
+    if (m_settings.jumps.empty() || connection.options.listen == 1) {
         startVnc(connection.host, connection.port);
         return;
     }
-    // Through SSH: the tunnel's local port stands in for the server.
+    // Through jump hosts: the chain's local port stands in for the server.
     stopTunnel();
-    auto tunnel = *m_settings.tunnel;
-    tunnel.forwardHost = connection.host;
-    tunnel.forwardPort = connection.port;
-    m_tunnel = new SshSession(this);
-    connect(m_tunnel, &SshSession::statusMessage, this, [this](const QString &message) {
-        showOverlay(QStringLiteral("SSH tunnel: %1").arg(message), false);
+    m_tunnel = new JumpChain(this);
+    connect(m_tunnel, &JumpChain::statusMessage, this, [this](const QString &message) {
+        showOverlay(message, false);
     });
-    connect(m_tunnel, &SshSession::hostKeyVerificationRequired, this,
-            [this](SshHostKeyStatus status, const QString &keyType, const QString &fingerprint) {
-                QMessageBox box(this);
-                const bool changed = status == SshHostKeyStatus::Changed;
-                box.setIcon(changed ? QMessageBox::Warning : QMessageBox::Question);
-                box.setWindowTitle(QStringLiteral("SSH Tunnel Host Key"));
-                box.setText(changed ? QStringLiteral("The host key of %1 has CHANGED.")
-                                          .arg(m_settings.tunnel->host)
-                                    : QStringLiteral("The authenticity of %1 can't be established.")
-                                          .arg(m_settings.tunnel->host));
-                box.setInformativeText(QStringLiteral("%1 key fingerprint:\n%2\n\nOnly connect if "
-                                                      "this matches the server's published key.")
-                                           .arg(keyType, fingerprint));
-                auto *trust = box.addButton(QStringLiteral("Trust and Connect"), QMessageBox::AcceptRole);
-                auto *once = box.addButton(QStringLiteral("Connect Once"), QMessageBox::AcceptRole);
-                box.addButton(QStringLiteral("Disconnect"), QMessageBox::RejectRole);
-                box.setDefaultButton(changed ? once : trust);
-                box.exec();
-                if (!m_tunnel)
-                    return;
-                m_tunnel->answerHostKey(box.clickedButton() == trust  ? SshHostKeyDecision::AcceptAndSave
-                                        : box.clickedButton() == once ? SshHostKeyDecision::AcceptOnce
-                                                                      : SshHostKeyDecision::Reject);
-            });
-    connect(m_tunnel, &SshSession::inputRequired, this,
-            [this](const QString &instruction, const QStringList &prompts, const QList<bool> &echo) {
-                QStringList answers;
-                for (qsizetype i = 0; i < prompts.size(); ++i) {
-                    bool ok = false;
-                    const QString answer = QInputDialog::getText(
-                        this, QStringLiteral("SSH Tunnel Log On"),
-                        instruction.isEmpty() ? prompts[i] : instruction + QStringLiteral("\n") + prompts[i],
-                        echo.value(i) ? QLineEdit::Normal : QLineEdit::Password, QString(), &ok);
-                    if (!ok) {
-                        if (m_tunnel)
-                            m_tunnel->cancelPrompts();
-                        return;
-                    }
-                    answers.append(answer);
-                }
-                if (m_tunnel)
-                    m_tunnel->answerPrompts(answers);
-            });
-    connect(m_tunnel, &SshSession::forwardReady, this, [this](quint16 localPort) {
-        qInfo("VNC: SSH tunnel ready on local port %u", localPort);
+    connect(m_tunnel, &JumpChain::ready, this, [this](quint16 localPort) {
         startVnc(QStringLiteral("127.0.0.1"), localPort);
     });
-    connect(m_tunnel, &SshSession::disconnected, this, [this](const QString &reason, bool error) {
+    connect(m_tunnel, &JumpChain::failed, this, [this](const QString &reason, bool error) {
         if (m_connected)
             return; // the VNC connection reports its own end
         stopTunnel();
         m_session->disconnectFromHost();
-        showOverlay(QStringLiteral("SSH tunnel: %1").arg(reason), true, error);
+        showOverlay(reason, true, error);
     });
-    showOverlay(QStringLiteral("Opening an SSH tunnel through %1…").arg(tunnel.host), false);
-    m_tunnel->connectToHost(tunnel);
+    m_tunnel->open(m_settings.jumps, connection.host, connection.port);
 }
 
 void VncPage::startVnc(const QString &targetHost, quint16 port)
 {
     auto connection = m_settings.connection;
     if (m_tunnel)
-        connection.label = QStringLiteral("%1:%2 through SSH").arg(connection.host).arg(connection.port);
+        connection.label = QStringLiteral("%1:%2 through a jump host").arg(connection.host).arg(connection.port);
     connection.host = targetHost;
     connection.port = port;
     m_session->connectToHost(connection);
@@ -503,6 +456,23 @@ void VncPage::releaseAllKeys()
     for (const quint32 keysym : std::as_const(m_pressedKeys))
         m_session->sendKey(keysym, false);
     m_pressedKeys.clear();
+}
+
+void VncPage::refreshScreen()
+{
+    if (!m_connected)
+        return;
+    m_lastRefresh.start();
+    m_session->requestFullUpdate();
+}
+
+// Coming back to the tab (a dialog closed, another tab or window was in
+// front): some servers leave stale areas, so ask for the whole screen.
+void VncPage::focusInEvent(QFocusEvent *event)
+{
+    QWidget::focusInEvent(event);
+    if (!m_lastRefresh.isValid() || m_lastRefresh.elapsed() > 1000)
+        refreshScreen();
 }
 
 void VncPage::focusOutEvent(QFocusEvent *event)

@@ -6,11 +6,13 @@
 #include "rdpsession.h"
 #include "remotescreenpage.h"
 
+#include <QPointer>
 #include <QSet>
 
 class QLabel;
 class QProgressBar;
 class QPushButton;
+class JumpChain;
 class SessionEndedPanel;
 class QTimer;
 
@@ -50,6 +52,7 @@ protected:
     bool focusNextPrevChild(bool) override { return false; }
 
 private:
+    void stopJumpChain();
     void start();
     // ended: the session is over; offers Reconnect and Close Tab.
     void showOverlay(const QString &text, bool ended, bool error = false);
@@ -76,6 +79,7 @@ private:
     QLabel *m_overlayText = nullptr;
     SessionEndedPanel *m_endedPanel = nullptr;
     bool m_connected = false;
+    QPointer<JumpChain> m_jumpChain;
     bool m_started = false;
     bool m_resizeSupported = false;
     // Waits until the tab stops changing size before resizing the desktop.

@@ -32,7 +32,8 @@ if pgrep -f "scripts/internal/make-package.sh" > /dev/null; then
     echo "A package build is running; deploy again when it has finished." >&2
     exit 1
 fi
-for file in OpsRemote.sh OpsRemote.bat linux-x86_64.tar.zst windows-x86_64.tar.zst; do
+for file in legacy/OpsRemote.sh legacy/OpsRemote.bat compressed/linux-x86_64.tar.zst \
+    compressed/windows-x86_64.tar.zst; do
     [[ -f "${PACKAGE}/${file}" ]] || { echo "${PACKAGE}/${file} is missing; run ./scripts/build-and-run.sh package-all." >&2; exit 1; }
 done
 
@@ -84,15 +85,15 @@ Remove-Item (Join-Path \$root 'pt-deploy.tar.gz')
 echo "==> Checking the deployed package"
 remote_ps "
 \$package = \"\$env:USERPROFILE\\${VM_DIR}\\OpsRemote\"
-'linux id:    ' + (Get-Content (Join-Path \$package 'linux-x86_64.id'))
-'windows id:  ' + (Get-Content (Join-Path \$package 'windows-x86_64.id'))
+'linux id:    ' + (Get-Content (Join-Path \$package 'compressed\\linux-x86_64.id'))
+'windows id:  ' + (Get-Content (Join-Path \$package 'compressed\\windows-x86_64.id'))
 'settings:    ' + ((Get-ChildItem (Join-Path \$package 'settings') | ForEach-Object Name) -join ', ')
 \$env:QT_QPA_PLATFORM = 'offscreen'
 \$env:OPSREMOTE_TEST_CLOSE_MS = '5000'
-\$id = Get-Content (Join-Path \$package 'windows-x86_64.id')
+\$id = Get-Content (Join-Path \$package 'compressed\\windows-x86_64.id')
 # Check while it runs: with 'remove the unpacked program when closing' on,
 # the copy is gone again after exit.
-\$launcher = Start-Process -FilePath cmd.exe -ArgumentList '/c', ([char]34 + (Join-Path \$package 'OpsRemote.bat') + [char]34) -WindowStyle Hidden -PassThru
+\$launcher = Start-Process -FilePath cmd.exe -ArgumentList '/c', ([char]34 + (Join-Path \$package 'legacy\\OpsRemote.bat') + [char]34) -WindowStyle Hidden -PassThru
 \$process = \$null
 for (\$i = 0; \$i -lt 60 -and -not \$process; \$i++) {
     Start-Sleep -Milliseconds 500
@@ -104,4 +105,4 @@ if (\$process) { \$process | ForEach-Object { if (-not \$_.WaitForExit(30000)) {
 Start-Sleep 5
 if (Get-Process OpsRemote -ErrorAction SilentlyContinue) { 'WARNING: a OpsRemote process is still running' }
 "
-echo "    local ids:   linux $(cat "${PACKAGE}/linux-x86_64.id"), windows $(cat "${PACKAGE}/windows-x86_64.id")"
+echo "    local ids:   linux $(cat "${PACKAGE}/compressed/linux-x86_64.id"), windows $(cat "${PACKAGE}/compressed/windows-x86_64.id")"

@@ -1,0 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
+// The launcher's icon in Explorer and on shortcuts.
+IDI_ICON1 ICON "../../../src/app/resources/opsremote.ico"

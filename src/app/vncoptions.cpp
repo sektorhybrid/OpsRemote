@@ -60,7 +60,6 @@ VncOptions VncOptions::overriddenBy(const VncOptions &session) const
     number(result.autoReconnect, session.autoReconnect);
     number(result.highDpi, session.highDpi);
     number(result.allMonitors, session.allMonitors);
-    text(result.sshTunnel, session.sshTunnel);
     // Session only.
     result.listen = session.listen;
     result.listenPort = session.listenPort;
@@ -81,7 +80,6 @@ VncOptions VncOptions::builtIn()
     options.autoReconnect = 1;
     options.highDpi = 1;
     options.allMonitors = 0;
-    options.sshTunnel = QStringLiteral("none");
     return options;
 }
 
@@ -180,7 +178,6 @@ void vncOptionsToYaml(const VncOptions &options, YAML::Node &node)
     flag("auto_reconnect", options.autoReconnect);
     flag("high_dpi", options.highDpi);
     flag("all_monitors", options.allMonitors);
-    text("ssh_tunnel", options.sshTunnel);
     flag("listen", options.listen);
     if (options.listenPort > 0)
         node["listen_port"] = options.listenPort;
@@ -234,7 +231,6 @@ void saveVncDefaults(const VncOptions &options)
 }
 
 VncOptionsEditor::VncOptionsEditor(const VncOptions &value, const VncOptions &defaults,
-                                   const QList<QPair<QString, QString>> &sshSessions,
                                    QWidget *parent)
     : QWidget(parent), m_defaults(VncOptions::builtIn().overriddenBy(defaults))
 {
@@ -289,30 +285,11 @@ VncOptionsEditor::VncOptionsEditor(const VncOptions &value, const VncOptions &de
                                             "and the other way round."),
                              value.clipboard, m_defaults.clipboard);
     m_encryption = makeBox(vncEncryptionChoices(), value.encryption, m_defaults.encryption);
-    m_encryption->setToolTip(QStringLiteral("Plain VNC is not encrypted; an SSH tunnel encrypts "
+    m_encryption->setToolTip(QStringLiteral("Plain VNC is not encrypted; a jump host encrypts "
                                             "any server."));
     m_autoReconnect = makeSwitch(QStringLiteral("Reconnect automatically if the network drops"),
                                  QStringLiteral("Tries again for about half a minute."),
                                  value.autoReconnect, m_defaults.autoReconnect);
-
-    m_sshTunnel = new QComboBox(this);
-    m_sshTunnel->setEditable(true);
-    m_sshTunnel->setToolTip(QStringLiteral("Connect through an SSH server: one of your saved SSH "
-                                           "sessions, or user@host[:port]. The VNC host is then "
-                                           "as seen from that server (often localhost)."));
-    const QString defaultTunnel = m_defaults.sshTunnel == QStringLiteral("none")
-                                      ? QStringLiteral("none")
-                                      : m_defaults.sshTunnel;
-    m_sshTunnel->addItem(QStringLiteral("Default (%1)").arg(defaultTunnel), QString());
-    m_sshTunnel->addItem(QStringLiteral("None (connect directly)"), QStringLiteral("none"));
-    for (const auto &[id, label] : sshSessions)
-        m_sshTunnel->addItem(label, QStringLiteral("session:") + id);
-    const int known = m_sshTunnel->findData(value.sshTunnel);
-    if (known >= 0)
-        m_sshTunnel->setCurrentIndex(known);
-    else
-        m_sshTunnel->setEditText(value.sshTunnel);
-    connect(m_sshTunnel, &QComboBox::currentTextChanged, this, &VncOptionsEditor::changed);
 
     m_listen = makeSwitch(QStringLiteral("Wait for the server to connect (listen mode)"),
                           QStringLiteral("Reverse VNC: the remote computer connects to this one, "
@@ -353,7 +330,6 @@ VncOptionsEditor::VncOptionsEditor(const VncOptions &value, const VncOptions &de
     auto *connection = section(QStringLiteral("Connection"));
     connection->addRow(QStringLiteral("Encryption:"), m_encryption);
     connection->addRow(QString(), m_autoReconnect);
-    connection->addRow(QStringLiteral("SSH tunnel:"), m_sshTunnel);
     connection->addRow(QString(), m_listen);
     connection->addRow(QStringLiteral("Listen on port:"), m_listenPort);
     connection->addRow(QStringLiteral("Repeater:"), m_repeater);
@@ -378,11 +354,6 @@ VncOptions VncOptionsEditor::value() const
     options.autoReconnect = switchValue(m_autoReconnect, m_defaults.autoReconnect);
     options.highDpi = switchValue(m_highDpi, m_defaults.highDpi);
     options.allMonitors = switchValue(m_allMonitors, m_defaults.allMonitors);
-    // A listed choice stores its value; typed text is stored as written.
-    const int index = m_sshTunnel->currentIndex();
-    options.sshTunnel = index >= 0 && m_sshTunnel->itemText(index) == m_sshTunnel->currentText()
-                            ? m_sshTunnel->itemData(index).toString()
-                            : m_sshTunnel->currentText().trimmed();
     options.listen = m_listen->isChecked() ? 1 : -1;
     options.listenPort = m_listen->isChecked() && m_listenPort->value() != 5500 ? m_listenPort->value() : 0;
     options.repeater = m_repeater->text().trimmed();

@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "rdppage.h"
+#include "jumphost.h"
 #include "sessionendedpanel.h"
 
 #include <QApplication>
@@ -321,6 +322,7 @@ RdpPage::RdpPage(const RdpConnectionSettings &settings, QWidget *parent)
         m_pointerShape = QImage();
         m_pointerHidden = false;
         updateCursor();
+        stopJumpChain();
         showOverlay(reason, true, error);
         emit statusMessage(QStringLiteral("%1: %2").arg(m_settings.host, reason));
     });
@@ -383,6 +385,9 @@ RdpPage::RdpPage(const RdpConnectionSettings &settings, QWidget *parent)
 RdpPage::~RdpPage()
 {
     m_settings.password.fill(QChar(0));
+    for (auto &jump : m_settings.jumps)
+        jump.password.fill(QChar(0));
+    stopJumpChain();
     // Closing the tab must not wait for FreeRDP to return.
     m_session->retire();
 }
@@ -412,7 +417,44 @@ void RdpPage::start()
     m_settings.scale = scale();
     m_connectScale = m_settings.scale;
     showOverlay(QStringLiteral("Connecting to %1…").arg(m_settings.host), false);
-    m_session->connectToHost(m_settings);
+    if (m_settings.jumps.empty()) {
+        m_session->connectToHost(m_settings);
+        return;
+    }
+
+    // Through jump hosts: the chain's local port stands in for the server.
+    stopJumpChain();
+    m_jumpChain = new JumpChain(this);
+    connect(m_jumpChain, &JumpChain::statusMessage, this, [this](const QString &message) {
+        showOverlay(message, false);
+    });
+    connect(m_jumpChain, &JumpChain::ready, this, [this](quint16 localPort) {
+        auto settings = m_settings;
+        settings.certificateName = QStringLiteral("%1:%2").arg(m_settings.host).arg(m_settings.port);
+        settings.host = QStringLiteral("127.0.0.1");
+        settings.port = localPort;
+        settings.jumps.clear();
+        showOverlay(QStringLiteral("Connecting to %1…").arg(m_settings.host), false);
+        m_session->connectToHost(settings);
+        settings.password.fill(QChar(0));
+    });
+    connect(m_jumpChain, &JumpChain::failed, this, [this](const QString &reason, bool error) {
+        if (m_connected)
+            return; // the RDP connection reports its own end
+        stopJumpChain();
+        showOverlay(reason, true, error);
+    });
+    // FreeRDP may connect again (another security mode, automatic reconnect).
+    m_jumpChain->open(m_settings.jumps, m_settings.host, m_settings.port, false);
+}
+
+void RdpPage::stopJumpChain()
+{
+    if (!m_jumpChain)
+        return;
+    m_jumpChain->disconnect(this);
+    m_jumpChain->deleteLater();
+    m_jumpChain = nullptr;
 }
 
 void RdpPage::showOverlay(const QString &text, bool ended, bool error)

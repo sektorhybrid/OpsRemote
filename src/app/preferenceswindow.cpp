@@ -2,13 +2,20 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "preferenceswindow.h"
+#include "availabilitynote.h"
+#include "localresources.h"
+#include "systemcredentials.h"
 #include "appdirs.h"
 #include "icons.h"
 #include "mainwindow.h"
 #include "masterpassworddialog.h"
 #include "preferences.h"
 #include "rdpoptions.h"
+#include "proxy.h"
 #include "vncoptions.h"
+#include "ftpoptions.h"
+#include "rshoptions.h"
+#include "xdmcp.h"
 #include "terminalappearance.h"
 
 #include <QApplication>
@@ -37,6 +44,7 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QPushButton>
+#include <QStandardItemModel>
 #include <QScrollArea>
 #include <QSpinBox>
 #include <QStackedWidget>
@@ -45,7 +53,11 @@
 #include <QRegularExpression>
 #include <QSet>
 #include <QTabWidget>
+#include <QStyledItemDelegate>
+#include <QPainterPath>
 #include <QTimer>
+
+#include <optional>
 #include <QUrl>
 #include <QVBoxLayout>
 
@@ -291,6 +303,79 @@ private:
     QList<SettingsCard *> m_cards;
 };
 
+// One look in the Looks list: a small preview of its colours, the name
+// (bold when in use) and what it sets.
+class LookDelegate final : public QStyledItemDelegate
+{
+public:
+    enum Role { NameRole = Qt::UserRole + 1, DescriptionRole, InUseRole, ColorsRole };
+    using QStyledItemDelegate::QStyledItemDelegate;
+
+    QSize sizeHint(const QStyleOptionViewItem &option, const QModelIndex &) const override
+    {
+        return {200, option.fontMetrics.height() * 2 + 18};
+    }
+
+    void paint(QPainter *painter, const QStyleOptionViewItem &option,
+               const QModelIndex &index) const override
+    {
+        QStyleOptionViewItem base(option);
+        initStyleOption(&base, index);
+        base.text.clear();
+        base.icon = QIcon();
+        option.widget->style()->drawControl(QStyle::CE_ItemViewItem, &base, painter, option.widget);
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing);
+        const QRect rect = option.rect.adjusted(8, 6, -8, -6);
+        // Preview: window colour, a panel in the base colour with a line of
+        // text, and the accent.
+        const auto colors = index.data(ColorsRole).toList();
+        const QRectF tile(rect.left(), rect.top(), 52, rect.height());
+        // With two variants (light, dark) the dark one fills the lower right.
+        for (qsizetype variant = 0; variant + 3 < colors.size(); variant += 4) {
+            painter->save();
+            if (variant > 0) {
+                QPainterPath half;
+                half.moveTo(tile.topRight());
+                half.lineTo(tile.bottomRight());
+                half.lineTo(tile.bottomLeft());
+                half.closeSubpath();
+                painter->setClipPath(half);
+            }
+            painter->setPen(QPen(option.palette.color(QPalette::Mid), 1));
+            painter->setBrush(colors[variant].value<QColor>());
+            painter->drawRoundedRect(tile, 5, 5);
+            painter->setPen(Qt::NoPen);
+            painter->setBrush(colors[variant + 1].value<QColor>());
+            painter->drawRoundedRect(tile.adjusted(6, 6, -6, -6), 3, 3);
+            painter->setBrush(colors[variant + 2].value<QColor>());
+            painter->drawRoundedRect(QRectF(tile.left() + 10, tile.top() + 10, 20, 3), 1.5, 1.5);
+            painter->setBrush(colors[variant + 3].value<QColor>());
+            painter->drawRoundedRect(QRectF(tile.left() + 10, tile.bottom() - 13, 28, 4), 2, 2);
+            painter->restore();
+        }
+        const bool selected = option.state & QStyle::State_Selected;
+        const QColor text = option.palette.color(selected ? QPalette::HighlightedText : QPalette::Text);
+        QFont nameFont = option.font;
+        nameFont.setBold(true);
+        const QRect textRect = rect.adjusted(int(tile.width()) + 12, 0, 0, 0);
+        painter->setFont(nameFont);
+        painter->setPen(text);
+        QString name = index.data(NameRole).toString();
+        if (index.data(InUseRole).toBool())
+            name += QStringLiteral("  ✓ in use");
+        painter->drawText(textRect, Qt::AlignLeft | Qt::AlignTop, name);
+        painter->setFont(option.font);
+        QColor muted = text;
+        muted.setAlphaF(selected ? 0.85 : 0.65);
+        painter->setPen(muted);
+        painter->drawText(textRect, Qt::AlignLeft | Qt::AlignBottom,
+                          QFontMetrics(option.font).elidedText(index.data(DescriptionRole).toString(),
+                                                               Qt::ElideRight, textRect.width()));
+        painter->restore();
+    }
+};
+
 PreferencesWindow::PreferencesWindow(MainWindow *mainWindow)
     : QWidget(mainWindow, Qt::Window), m_mainWindow(mainWindow)
 {
@@ -323,10 +408,28 @@ PreferencesWindow::PreferencesWindow(MainWindow *mainWindow)
     m_pages = new QStackedWidget(this);
     layout->addWidget(m_pages, 1);
 
+    buildPages();
+    // A look changes many settings at once: show them all anew.
+    connect(m_mainWindow, &MainWindow::looksChanged, this, [this] {
+        QTimer::singleShot(0, this, &PreferencesWindow::rebuild);
+    });
+
+    connect(m_navigation, &QListWidget::currentRowChanged, m_pages, &QStackedWidget::setCurrentIndex);
+    connect(m_search, &QLineEdit::textChanged, this, &PreferencesWindow::filter);
+    m_navigation->setCurrentRow(0);
+}
+
+void PreferencesWindow::buildPages()
+{
+    beginCategory(QStringLiteral("appearance"), QStringLiteral("Appearance"),
+                  QStringLiteral("preferences-desktop-theme"), QStyle::SP_DesktopIcon);
     buildAppearancePage();
+    buildSessionListPage();
+    endCategory();
     beginCategory(QStringLiteral("terminal-category"), QStringLiteral("Terminal"),
                   QStringLiteral("utilities-terminal"), QStyle::SP_ComputerIcon);
     buildTerminalPage();
+    buildLocalShellPage();
     buildHighlightsPage();
     buildSnippetsPage();
     buildLoggingPage();
@@ -334,23 +437,60 @@ PreferencesWindow::PreferencesWindow(MainWindow *mainWindow)
     beginCategory(QStringLiteral("connections"), QStringLiteral("Connections"),
                   QStringLiteral("network-workgroup"), QStyle::SP_DriveNetIcon);
     buildSshPage();
+    buildProxyPage();
     buildRdpPage();
     buildVncPage();
     buildSftpPage();
+    buildFtpPage();
+    buildRshPage();
+    buildXdmcpPage();
+    buildRunCommandPage();
+    buildHttpRequestPage();
     endCategory();
     beginCategory(QStringLiteral("workspace"), QStringLiteral("Workspace"),
-                  QStringLiteral("preferences-system-windows"), QStyle::SP_TitleBarMaxButton);
+                  QStringLiteral("preferences-system"), QStyle::SP_TitleBarMaxButton);
     buildStartupPage();
     buildShortcutsPage();
     buildPresentationPage();
     endCategory();
+    beginCategory(QStringLiteral("security"), QStringLiteral("Security and vault"),
+                  QStringLiteral("security-high"), QStyle::SP_MessageBoxWarning);
     buildSecurityPage();
+    endCategory();
+    beginCategory(QStringLiteral("data"), QStringLiteral("Data and backup"),
+                  QStringLiteral("drive-removable-media"), QStyle::SP_DriveFDIcon);
     buildDataPage();
+    endCategory();
+    beginCategory(QStringLiteral("about"), QStringLiteral("About"),
+                  QStringLiteral("help-about"), QStyle::SP_MessageBoxInformation);
     buildAboutPage();
+    endCategory();
 
-    connect(m_navigation, &QListWidget::currentRowChanged, m_pages, &QStackedWidget::setCurrentIndex);
-    connect(m_search, &QLineEdit::textChanged, this, &PreferencesWindow::filter);
-    m_navigation->setCurrentRow(0);
+}
+
+// Keeps the category and tab that were showing.
+void PreferencesWindow::rebuild()
+{
+    const int row = m_navigation->currentRow();
+    QList<int> tabs;
+    for (const auto &category : std::as_const(m_categories))
+        tabs.append(category.tabs ? category.tabs->currentIndex() : 0);
+    const QSignalBlocker blocker(m_navigation);
+    m_navigation->clear();
+    while (m_pages->count() > 0) {
+        auto *page = m_pages->widget(0);
+        m_pages->removeWidget(page);
+        page->deleteLater();
+    }
+    m_categories.clear();
+    buildPages();
+    for (int index = 0; index < m_categories.size() && index < tabs.size(); ++index) {
+        if (m_categories[index].tabs)
+            m_categories[index].tabs->setCurrentIndex(tabs[index]);
+    }
+    m_navigation->setCurrentRow(qMax(0, row));
+    m_pages->setCurrentIndex(qMax(0, row));
+    filter(m_search->text());
 }
 
 void PreferencesWindow::showPage(const QString &id)
@@ -390,7 +530,9 @@ void PreferencesWindow::beginCategory(const QString &id, const QString &title,
     layout->addWidget(tabs, 1);
     m_pages->addWidget(container);
     m_navigation->addItem(new QListWidgetItem(
-        themedIcon(iconName, static_cast<QStyle::StandardPixmap>(fallbackIcon)), title));
+        fixedSizeIcon(themedIcon(iconName, static_cast<QStyle::StandardPixmap>(fallbackIcon)),
+                      m_navigation->iconSize()),
+        title));
     m_categories.append({id, tabs, {}});
     m_inCategory = true;
 }
@@ -413,7 +555,9 @@ SettingsPage *PreferencesWindow::addPage(const QString &id, const QString &title
     auto *page = new SettingsPage(id, title, true, m_pages);
     m_pages->addWidget(page);
     m_navigation->addItem(new QListWidgetItem(
-        themedIcon(iconName, static_cast<QStyle::StandardPixmap>(fallbackIcon)), title));
+        fixedSizeIcon(themedIcon(iconName, static_cast<QStyle::StandardPixmap>(fallbackIcon)),
+                      m_navigation->iconSize()),
+        title));
     m_categories.append({id, nullptr, {page}});
     return page;
 }
@@ -448,21 +592,186 @@ void PreferencesWindow::filter(const QString &text)
         m_navigation->setCurrentRow(firstVisible);
 }
 
+// Looks: ready-made combinations of the settings on the Interface and
+// Terminal tabs, and the user's own (up to MaximumUserLooks).
+void PreferencesWindow::buildLooksPage()
+{
+    auto *mainWindow = m_mainWindow;
+    auto *page = addPage(QStringLiteral("appearance-looks"), QStringLiteral("Looks"),
+                         QStringLiteral("preferences-desktop-theme"), QStyle::SP_DesktopIcon);
+    auto *card = page->addCard(QStringLiteral("Looks"));
+    auto *intro = new QLabel(QStringLiteral(
+        "A look sets the colours, style, icons, fonts, terminal colours and window border "
+        "together. Changing any of them by hand makes the appearance Custom; save it as a look "
+        "of your own to keep it."));
+    intro->setWordWrap(true);
+    card->addWideRow(intro, QStringLiteral("look theme preset"));
+
+    auto *content = new QWidget;
+    auto *layout = new QHBoxLayout(content);
+    layout->setContentsMargins(0, 0, 0, 0);
+    auto *list = new QListWidget(content);
+    list->setMinimumHeight(300);
+    list->setItemDelegate(new LookDelegate(list));
+    list->setSpacing(2);
+    layout->addWidget(list, 1);
+    auto *buttons = new QVBoxLayout;
+    auto *apply = new QPushButton(QStringLiteral("Apply"), content);
+    auto *save = new QPushButton(QStringLiteral("Save Current as…"), content);
+    auto *rename = new QPushButton(QStringLiteral("Rename…"), content);
+    auto *remove = new QPushButton(QStringLiteral("Delete"), content);
+    for (auto *button : {apply, save, rename, remove})
+        buttons->addWidget(button);
+    buttons->addStretch();
+    layout->addLayout(buttons);
+    card->addWideRow(content, QStringLiteral("look apply save rename delete custom"));
+    auto *current = new QLabel;
+    card->addWideRow(current, QStringLiteral("current look custom"));
+
+    const auto describe = [mainWindow](const Look &look) {
+        QString colours;
+        for (const auto &choice : mainWindow->colorThemeChoices()) {
+            if (choice.first == look.colorTheme)
+                colours = choice.second;
+        }
+        const QHash<QString, QString> styles{{QStringLiteral("opsremote"), QStringLiteral("OpsRemote style")},
+                                             {QStringLiteral("fusion"), QStringLiteral("Fusion")},
+                                             {QStringLiteral("windows11"), QStringLiteral("Windows 11")},
+                                             {QStringLiteral("windowsvista"), QStringLiteral("Windows Vista")},
+                                             {QStringLiteral("system"), QStringLiteral("System style")}};
+        const QString styleKey = look.style.isEmpty() ? QStringLiteral("system") : look.style.toLower();
+        QStringList parts{colours.isEmpty() ? look.colorTheme : colours,
+                          styles.value(styleKey, mainWindow->uiStyleLabel(look.style)),
+                          look.iconTheme.isEmpty() ? QStringLiteral("built-in icons") : look.iconTheme};
+        if (!look.terminalScheme.isEmpty())
+            parts.append(look.darkTerminalScheme.isEmpty()
+                             ? look.terminalScheme
+                             : QStringLiteral("%1 / %2").arg(look.terminalScheme, look.darkTerminalScheme));
+        return parts.join(QStringLiteral(" · "));
+    };
+    // Fills the list; the look in use is marked and selected.
+    const auto refresh = [mainWindow, list, current, describe] {
+        const QString selected = list->currentItem() ? list->currentItem()->data(Qt::UserRole).toString()
+                                                     : QString();
+        const QString active = mainWindow->matchingLookId();
+        list->clear();
+        for (const auto &look : mainWindow->looks()) {
+            const bool inUse = look.id == active;
+            auto *item = new QListWidgetItem(look.name, list);
+            item->setData(Qt::UserRole, look.id);
+            item->setData(LookDelegate::NameRole,
+                          look.isBuiltIn() ? look.name : look.name + QStringLiteral("  (yours)"));
+            item->setData(LookDelegate::DescriptionRole, describe(look));
+            item->setData(LookDelegate::InUseRole, inUse);
+            // A look that follows the OS shows its light and dark variants.
+            QVariantList colors;
+            const QStringList variants = look.colorTheme == QStringLiteral("auto")
+                                             ? QStringList{QStringLiteral("light"), QStringLiteral("dark")}
+                                             : QStringList{look.colorTheme};
+            for (const auto &variant : variants) {
+                const QPalette colours = mainWindow->paletteFor(variant, look.customColors);
+                colors << colours.color(QPalette::Window) << colours.color(QPalette::Base)
+                       << colours.color(QPalette::Text) << colours.color(QPalette::Highlight);
+            }
+            item->setData(LookDelegate::ColorsRole, colors);
+            if (look.id == (selected.isEmpty() ? active : selected))
+                list->setCurrentItem(item);
+        }
+        QString name = QStringLiteral("Custom");
+        for (const auto &look : mainWindow->looks()) {
+            if (look.id == active)
+                name = look.name;
+        }
+        current->setText(QStringLiteral("In use: <b>%1</b>").arg(name.toHtmlEscaped()));
+    };
+    const auto selectedLook = [mainWindow, list]() -> std::optional<Look> {
+        if (!list->currentItem())
+            return std::nullopt;
+        const auto id = list->currentItem()->data(Qt::UserRole).toString();
+        for (const auto &look : mainWindow->looks()) {
+            if (look.id == id)
+                return look;
+        }
+        return std::nullopt;
+    };
+    const auto updateButtons = [list, apply, rename, remove, save, selectedLook, mainWindow] {
+        const auto look = selectedLook();
+        apply->setEnabled(look.has_value());
+        rename->setEnabled(look && !look->isBuiltIn());
+        remove->setEnabled(look && !look->isBuiltIn());
+        int own = 0;
+        for (const auto &each : mainWindow->looks())
+            own += each.isBuiltIn() ? 0 : 1;
+        save->setEnabled(own < MaximumUserLooks);
+        save->setToolTip(own < MaximumUserLooks
+                             ? QString()
+                             : QStringLiteral("Up to %1 looks of your own; delete one first.")
+                                   .arg(MaximumUserLooks));
+        Q_UNUSED(list);
+    };
+    refresh();
+    updateButtons();
+    connect(list, &QListWidget::currentItemChanged, this, updateButtons);
+    connect(list, &QListWidget::itemDoubleClicked, apply, &QPushButton::click);
+    connect(apply, &QPushButton::clicked, this, [mainWindow, selectedLook] {
+        if (const auto look = selectedLook())
+            mainWindow->applyLook(*look);
+    });
+    connect(save, &QPushButton::clicked, this, [this, mainWindow] {
+        bool ok = false;
+        const QString name = QInputDialog::getText(this, QStringLiteral("Save Look"),
+                                                   QStringLiteral("Name of the look:"),
+                                                   QLineEdit::Normal, QString(), &ok)
+                                 .trimmed();
+        if (ok && !name.isEmpty() && !mainWindow->saveCurrentLookAs(name))
+            QMessageBox::information(this, QStringLiteral("Save Look"),
+                                     QStringLiteral("You can keep up to %1 looks of your own. "
+                                                    "Delete one first.").arg(MaximumUserLooks));
+    });
+    connect(rename, &QPushButton::clicked, this, [this, mainWindow, selectedLook] {
+        const auto look = selectedLook();
+        if (!look || look->isBuiltIn())
+            return;
+        bool ok = false;
+        const QString name = QInputDialog::getText(this, QStringLiteral("Rename Look"),
+                                                   QStringLiteral("Name of the look:"),
+                                                   QLineEdit::Normal, look->name, &ok)
+                                 .trimmed();
+        if (ok && !name.isEmpty())
+            mainWindow->renameLook(look->id, name);
+    });
+    connect(remove, &QPushButton::clicked, this, [this, mainWindow, selectedLook] {
+        const auto look = selectedLook();
+        if (look && !look->isBuiltIn()
+            && QMessageBox::question(this, QStringLiteral("Delete Look"),
+                                     QStringLiteral("Delete the look \"%1\"?").arg(look->name))
+                   == QMessageBox::Yes)
+            mainWindow->deleteLook(look->id);
+    });
+    // Settings changed one by one only move the "in use" mark.
+    connect(mainWindow, &MainWindow::appearanceChanged, list, [refresh, updateButtons] {
+        refresh();
+        updateButtons();
+    });
+}
+
 void PreferencesWindow::buildAppearancePage()
 {
     auto *mainWindow = m_mainWindow;
-    auto *page = addPage(QStringLiteral("appearance"), QStringLiteral("Appearance"),
+    buildLooksPage();
+    auto *page = addPage(QStringLiteral("appearance-interface"), QStringLiteral("Interface"),
                          QStringLiteral("preferences-desktop-theme"), QStyle::SP_DesktopIcon);
 
     // Colours and style
-    auto *colours = page->addCard(QStringLiteral("Colours"));
+    auto *colours = page->addCard(QStringLiteral("Colours and style"));
     auto *colourMode = new QComboBox;
     for (const auto &choice : mainWindow->colorThemeChoices())
         colourMode->addItem(choice.second, choice.first);
     colourMode->setCurrentIndex(qMax(0, colourMode->findData(mainWindow->colorTheme())));
     colours->addRow(QStringLiteral("Colour mode"),
                     QStringLiteral("Automatic follows your operating system's light or dark "
-                                   "setting and switches with it."),
+                                   "setting and switches with it. With a Kvantum style, System "
+                                   "uses the theme's own colours."),
                     colourMode, QStringLiteral("theme dark light palette automatic os"));
     auto *customButton = new QPushButton(QStringLiteral("Edit…"));
     colours->addRow(QStringLiteral("Custom colours"),
@@ -484,7 +793,7 @@ void PreferencesWindow::buildAppearancePage()
     auto *style = new QComboBox;
     style->addItem(QStringLiteral("System default"), QStringLiteral("system"));
     for (const auto &key : mainWindow->availableUiStyles())
-        style->addItem(key, key);
+        style->addItem(mainWindow->uiStyleLabel(key), key);
     style->setCurrentIndex(qMax(0, style->findData(mainWindow->uiStyle(), Qt::UserRole,
                                                    Qt::MatchFixedString)));
     colours->addRow(QStringLiteral("Style"),
@@ -493,6 +802,15 @@ void PreferencesWindow::buildAppearancePage()
     connect(style, &QComboBox::activated, this, [mainWindow, style] {
         mainWindow->setUiStyle(style->currentData().toString());
     });
+    auto *windowBorder = new ToggleSwitch;
+    windowBorder->setChecked(mainWindow->windowBorders());
+    colours->addRow(QStringLiteral("Window border"),
+                         QStringLiteral("A thin outline around every window, so overlapping "
+                                        "windows of the same colour stand apart."),
+                         windowBorder, QStringLiteral("frame edge outline shadow separate"));
+    connect(windowBorder, &QCheckBox::toggled, this,
+            [mainWindow](bool enabled) { mainWindow->setWindowBorders(enabled); });
+
 
     // Icons and text
     auto *iconsAndText = page->addCard(QStringLiteral("Icons and text"));
@@ -527,8 +845,8 @@ void PreferencesWindow::buildAppearancePage()
     fontLayout->addWidget(fontFamily);
     fontLayout->addWidget(fontSize);
     iconsAndText->addRow(QStringLiteral("Interface font"),
-                         QStringLiteral("Menus, panels, and dialogs. Terminals use the terminal "
-                                        "font below."),
+                         QStringLiteral("Menus, panels, and dialogs. Terminals have their own "
+                                        "font on the Terminal tab."),
                          fontControls, QStringLiteral("text size font family"));
     auto applyFont = [mainWindow, useSystemFont, fontFamily, fontSize] {
         fontFamily->setEnabled(!useSystemFont->isChecked());
@@ -545,6 +863,8 @@ void PreferencesWindow::buildAppearancePage()
     connect(fontSize, &QSpinBox::valueChanged, this, applyFont);
 
     // Terminal
+    page = addPage(QStringLiteral("appearance-terminal"), QStringLiteral("Terminal"),
+                   QStringLiteral("utilities-terminal"), QStyle::SP_ComputerIcon);
     auto *terminal = page->addCard(QStringLiteral("Terminal"));
     auto *editor = new TerminalAppearanceEditor(mainWindow->defaultTerminalAppearance(), false);
     editor->changed = [mainWindow, editor] {
@@ -563,17 +883,6 @@ void PreferencesWindow::buildAppearancePage()
                      darkScheme, QStringLiteral("terminal dark night automatic"));
     connect(darkScheme, &QComboBox::activated, this, [mainWindow, darkScheme] {
         mainWindow->setDarkTerminalColorScheme(darkScheme->currentData().toString());
-    });
-
-    auto *sessionList = page->addCard(QStringLiteral("Session list"));
-    auto *showHost = toggle(mainWindow->startupPreferences().showHostInList);
-    sessionList->addRow(QStringLiteral("Show the host after each session name"),
-                        QStringLiteral("For example \"web01 (192.0.2.30)\"."), showHost,
-                        QStringLiteral("ip address host name tree sessions"));
-    connect(showHost, &QCheckBox::toggled, this, [mainWindow](bool on) {
-        auto preferences = mainWindow->startupPreferences();
-        preferences.showHostInList = on;
-        mainWindow->setStartupPreferences(preferences);
     });
 }
 
@@ -734,6 +1043,26 @@ void PreferencesWindow::buildStartupPage()
     startup->addRow(QStringLiteral("Remember window size and position"), QString(), remember,
                     QStringLiteral("geometry maximized"));
     connectToggle(remember, &StartupPreferences::rememberWindow);
+    auto *single = toggle(current.singleInstance);
+    startup->addRow(QStringLiteral("Run only one copy of OpsRemote"),
+#ifdef Q_OS_LINUX
+                    QStringLiteral("Starting it again brings the open window to the front (on Wayland "
+                                   "only with the next setting on)."),
+#else
+                    QStringLiteral("Starting it again brings the open window to the front."),
+#endif
+                    single, QStringLiteral("instance single multiple second window"));
+    connectToggle(single, &StartupPreferences::singleInstance);
+#ifdef Q_OS_LINUX
+    auto *activation = toggle(current.waylandActivation);
+    startup->addRow(QStringLiteral("Bring windows to the front (Wayland)"),
+                    QStringLiteral("Lets OpsRemote raise its windows, such as the open window when it "
+                                   "is started again. On GNOME each time shows the busy pointer for "
+                                   "several seconds, after most menus and dialogs. Applies after a "
+                                   "restart."),
+                    activation, QStringLiteral("activation raise focus busy cursor pointer wayland gnome"));
+    connectToggle(activation, &StartupPreferences::waylandActivation);
+#endif
 
     auto *tabs = page->addCard(QStringLiteral("Tabs"));
     auto *title = choiceBox({{QStringLiteral("name"), QStringLiteral("Session name")},
@@ -1022,6 +1351,27 @@ void PreferencesWindow::buildSshPage()
     reconnect->addRow(QStringLiteral("Attempts"), QString(), attempts, QStringLiteral("retry"));
     bindSpin(this, attempts, update, &SshPreferences::reconnectAttempts);
 
+    auto *browser = page->addCard(QStringLiteral("File browser"));
+    auto *follow = toggle(current.followTerminalFolder);
+    browser->addRow(QStringLiteral("Follow the terminal's folder"),
+                    QStringLiteral("After each command, the Files pane shows the folder the "
+                                   "remote shell is in. Sessions can turn it on or off, and the "
+                                   "right-click menus of a terminal and its Files pane switch it "
+                                   "for that tab only."),
+                    follow, QStringLiteral("sftp cd directory cwd sync follow"));
+    bindToggle(this, follow, update, &SshPreferences::followTerminalFolder);
+    auto *fileTransfer = choiceBox(sshFileTransferChoices(), current.fileTransfer);
+    browser->addRow(QStringLiteral("File transfer"),
+                    QStringLiteral("How the file browser reaches a server's files. SCP suits devices "
+                                   "without SFTP (routers, switches, appliances). Sessions can "
+                                   "choose their own."),
+                    fileTransfer, QStringLiteral("sftp scp protocol files router switch"));
+    connect(fileTransfer, &QComboBox::activated, this, [update, fileTransfer] {
+        update([&](SshPreferences &preferences) {
+            preferences.fileTransfer = fileTransfer->currentData().toString();
+        });
+    });
+
     auto *keys = page->addCard(QStringLiteral("Keys"));
     auto *publicKeys = toggle(current.tryPublicKeys);
     keys->addRow(QStringLiteral("Use my SSH keys and agent"),
@@ -1029,6 +1379,33 @@ void PreferencesWindow::buildSshPage()
                                 "asking for a password."),
                  publicKeys, QStringLiteral("public key authentication agent id_ed25519 id_rsa"));
     bindToggle(this, publicKeys, update, &SshPreferences::tryPublicKeys);
+    auto *forwardAgent = toggle(current.forwardAgent);
+    keys->addRow(QStringLiteral("Forward my SSH agent"),
+                 QStringLiteral("Servers can use your local keys to log on further (ssh -A). "
+                                "Only for servers you trust; sessions can turn it on or off."),
+                 forwardAgent, QStringLiteral("agent forwarding -A"));
+    bindToggle(this, forwardAgent, update, &SshPreferences::forwardAgent);
+    auto *forwardX11 = toggle(current.forwardX11);
+    keys->addRow(QStringLiteral("Forward X11"),
+                 QStringLiteral("Graphical programs started on servers show on this computer "
+                                "(ssh -Y). Needs a local X server; on Windows VcXsrv or Xming. "
+                                "Only for servers you trust; sessions can turn it on or off."),
+                 forwardX11, QStringLiteral("x11 xorg display gui -X -Y vcxsrv xming"));
+    bindToggle(this, forwardX11, update, &SshPreferences::forwardX11);
+    keys->addWideRow(new AvailabilityNote(&LocalResources::x11Problem, [forwardX11](bool available) {
+        forwardX11->setEnabled(available || forwardX11->isChecked());
+    }), QStringLiteral("x11 xorg display"));
+#ifdef Q_OS_WIN
+    auto *agent = choiceBox({{QStringLiteral("auto"), QStringLiteral("Automatic")},
+                             {QStringLiteral("openssh"), QStringLiteral("OpenSSH agent")},
+                             {QStringLiteral("pageant"), QStringLiteral("Pageant (PuTTY)")}},
+                            current.agent);
+    keys->addRow(QStringLiteral("SSH agent"),
+                 QStringLiteral("Which agent forwarded requests go to. Automatic uses the Windows "
+                                "OpenSSH agent when it runs, otherwise Pageant."),
+                 agent, QStringLiteral("pageant putty agent openssh"));
+    bindChoice(this, agent, update, &SshPreferences::agent);
+#endif
     keys->addRow(QStringLiteral("Extra private key"),
                  QStringLiteral("Tried first. Keep it next to the program (for example in "
                                 "settings/) to carry it with you. Keys with a passphrase are not "
@@ -1090,6 +1467,27 @@ void PreferencesWindow::buildSshPage()
                                      .arg(QDir::toNativeSeparators(knownHostsPath())));
         reload();
     });
+}
+
+// The proxy for every SSH connection, unless a folder or session sets one.
+void PreferencesWindow::buildProxyPage()
+{
+    auto *page = addPage(QStringLiteral("proxy"), QStringLiteral("Proxy"),
+                         QStringLiteral("network-wired"), QStyle::SP_DriveNetIcon);
+    auto update = PREFERENCE_UPDATER(SshPreferences, sshPreferences, setSshPreferences);
+    auto *card = page->addCard(QStringLiteral("Proxy for SSH connections"));
+    auto *proxy = new ProxyEditor(m_mainWindow->sshPreferences().proxy, QString(), QString());
+    card->addRow(QString(), QString(), proxy, QStringLiteral("proxy http socks corporate firewall"));
+    connect(proxy, &ProxyEditor::changed, this, [update, proxy] {
+        update([&](SshPreferences &preferences) { preferences.proxy = proxy->value(); });
+    });
+    connect(proxy, &ProxyEditor::passwordEntered, this, [this, proxy] {
+        m_mainWindow->saveProxyPassword(proxy->value(), proxy->password());
+    });
+    card->addRow(QStringLiteral("Per folder and session"),
+                 QStringLiteral("Folders and sessions can choose their own proxy, or none, on "
+                                "their Proxy tab."),
+                 nullptr, QStringLiteral("override"));
 }
 
 void PreferencesWindow::buildVncPage()
@@ -1164,27 +1562,270 @@ void PreferencesWindow::buildVncPage()
 
     addChoice(connection, QStringLiteral("Encryption"),
               QStringLiteral("Plain VNC is not encrypted. Require refuses servers without TLS; an "
-                             "SSH tunnel encrypts any server."),
+                             "jump host encrypts any server."),
               vncEncryptionChoices(), current.encryption, QStringLiteral("tls vencrypt security vnc"),
               [](VncOptions &o, const QString &v) { o.encryption = v; });
     addSwitch(connection, QStringLiteral("Reconnect automatically"),
               QStringLiteral("If the network drops, tries again for about half a minute."),
               current.autoReconnect, QStringLiteral("reconnect network drop vnc"),
               [](VncOptions &o, int v) { o.autoReconnect = v; });
-    RdpChoices tunnels{{QStringLiteral("none"), QStringLiteral("None (connect directly)")}};
-    for (const auto &[id, label] : m_mainWindow->sshTunnelChoices())
-        tunnels.append({QStringLiteral("session:") + id, label});
-    addChoice(connection, QStringLiteral("SSH tunnel"),
-              QStringLiteral("Reach VNC servers through one of your saved SSH sessions; the VNC "
-                             "host is then as seen from that server. Sessions can choose their "
-                             "own."),
-              tunnels, current.sshTunnel, QStringLiteral("ssh tunnel forward jump vnc"),
-              [](VncOptions &o, const QString &v) { o.sshTunnel = v; });
     connection->addRow(QStringLiteral("Per session"),
                        QStringLiteral("Every VNC session can override these in its own settings "
                                       "(Sessions → Edit…), and can also listen for "
                                       "a reverse connection or use an UltraVNC repeater."),
                        nullptr, QStringLiteral("override listen reverse repeater"));
+}
+
+void PreferencesWindow::buildRshPage()
+{
+    auto *page = addPage(QStringLiteral("rlogin"), QStringLiteral("Rlogin and RSH"),
+                         QStringLiteral("utilities-terminal"), QStyle::SP_ComputerIcon);
+    const auto current = loadRshDefaults();
+    auto update = [](auto change) {
+        auto options = loadRshDefaults();
+        change(options);
+        saveRshDefaults(options);
+    };
+    auto *card = page->addCard(QStringLiteral("Connecting"));
+    auto *localUser = new QLineEdit(current.localUser);
+    localUser->setPlaceholderText(currentUserName());
+    card->addRow(QStringLiteral("Local user name"),
+                 QStringLiteral("Sent as your name on this computer; the server's .rhosts or hosts.equiv "
+                                "decide whether it lets you in without a password. Empty: this account's."),
+                 localUser, QStringLiteral("rhosts hosts.equiv trust"));
+    connect(localUser, &QLineEdit::editingFinished, this, [update, localUser] {
+        update([&](RshOptions &o) { o.localUser = localUser->text().trimmed(); });
+    });
+    auto *sourcePort = choiceBox(rshSourcePortChoices(), current.sourcePort);
+    card->addRow(QStringLiteral("Source port"),
+                 QStringLiteral("Most servers accept only a reserved port (below 1024). Windows lets "
+                                "anyone use one; Linux and macOS only an administrator."),
+                 sourcePort, QStringLiteral("privileged reserved 1023"));
+    connect(sourcePort, &QComboBox::activated, this, [update, sourcePort] {
+        update([&](RshOptions &o) { o.sourcePort = sourcePort->currentData().toString(); });
+    });
+    auto *note = page->addCard(QStringLiteral("Security"));
+    auto *text = new QLabel(QStringLiteral(
+        "Rlogin and RSH send everything, passwords included, unencrypted, and trust the source "
+        "address. Use them only on networks you trust, for equipment that has nothing better."));
+    text->setWordWrap(true);
+    note->addRow(QStringLiteral("Not encrypted"), QString(), text, QStringLiteral("insecure plain"));
+}
+
+void PreferencesWindow::buildXdmcpPage()
+{
+    auto *page = addPage(QStringLiteral("xdmcp"), QStringLiteral("XDMCP"),
+                         QStringLiteral("video-display"), QStyle::SP_DesktopIcon);
+    const auto current = loadXdmcpDefaults();
+    auto update = [](auto change) {
+        auto options = loadXdmcpDefaults();
+        change(options);
+        saveXdmcpDefaults(options);
+    };
+    auto *card = page->addCard(QStringLiteral("Display"));
+    auto *mode = choiceBox(xdmcpModeChoices(), current.mode);
+    card->addRow(QStringLiteral("Show"), QStringLiteral("What the X server asks the host for."), mode,
+                 QStringLiteral("query indirect broadcast chooser"));
+    connect(mode, &QComboBox::activated, this, [update, mode] {
+        update([&](XdmcpOptions &o) { o.mode = mode->currentData().toString(); });
+    });
+    const bool customPath = !current.program.isEmpty()
+                            && std::none_of(xdmcpProgramChoices().cbegin(), xdmcpProgramChoices().cend(),
+                                            [&](const auto &choice) { return choice.first == current.program; });
+    auto *program = choiceBox(xdmcpProgramChoices(), customPath ? QStringLiteral("custom") : current.program);
+    auto *path = new QLineEdit(customPath ? current.program : QString());
+    path->setPlaceholderText(QStringLiteral("Path of the X server program"));
+    auto *programBox = new QWidget;
+    auto *programLayout = new QVBoxLayout(programBox);
+    programLayout->setContentsMargins(0, 0, 0, 0);
+    programLayout->addWidget(program);
+    programLayout->addWidget(path);
+    auto *availability = new AvailabilityNote(
+        [program, path] {
+            QString choice = program->currentData().toString();
+            if (choice == QStringLiteral("custom"))
+                choice = path->text().trimmed().isEmpty() ? QStringLiteral("custom") : path->text().trimmed();
+            return findXServer(choice).problem;
+        },
+        {});
+    programLayout->addWidget(availability);
+    card->addRow(QStringLiteral("X server program"),
+                 QStringLiteral("XDMCP shows the login screen in an X server of this computer, in a "
+                                "window of its own."),
+                 programBox, QStringLiteral("xephyr xnest vcxsrv xming"));
+    const auto storeProgram = [update, program, path, availability] {
+        path->setVisible(program->currentData().toString() == QStringLiteral("custom"));
+        QString value = program->currentData().toString();
+        if (value == QStringLiteral("custom") && !path->text().trimmed().isEmpty())
+            value = path->text().trimmed();
+        update([&](XdmcpOptions &o) { o.program = value; });
+        availability->check();
+    };
+    connect(program, &QComboBox::activated, this, storeProgram);
+    connect(path, &QLineEdit::editingFinished, this, storeProgram);
+    path->setVisible(program->currentData().toString() == QStringLiteral("custom"));
+    availability->check();
+    auto *size = choiceBox(xdmcpSizeChoices(), current.size);
+    card->addRow(QStringLiteral("Size"), QString(), size, QStringLiteral("resolution geometry fullscreen"));
+    connect(size, &QComboBox::activated, this, [update, size] {
+        update([&](XdmcpOptions &o) { o.size = size->currentData().toString(); });
+    });
+}
+
+void PreferencesWindow::buildHttpRequestPage()
+{
+    auto *page = addPage(QStringLiteral("http-request"), QStringLiteral("HTTP requests"),
+                         QStringLiteral("internet-web-browser"), QStyle::SP_DriveNetIcon);
+    const auto current = loadHttpRequestPreferences();
+    auto update = [](auto change) {
+        auto preferences = loadHttpRequestPreferences();
+        change(preferences);
+        saveHttpRequestPreferences(preferences);
+    };
+    auto *card = page->addCard(QStringLiteral("Network Tools → HTTP Request starts with"));
+    auto *timeout = spinBox(1, 3600, current.timeoutSeconds, QStringLiteral(" s"));
+    card->addRow(QStringLiteral("Time limit"), QStringLiteral("For the whole request, redirects included."), timeout,
+                 QStringLiteral("timeout"));
+    connect(timeout, &QSpinBox::valueChanged, this,
+            [update](int value) { update([&](HttpRequestPreferences &p) { p.timeoutSeconds = value; }); });
+    auto *verify = toggle(current.verifyCertificates);
+    card->addRow(QStringLiteral("Check certificates"),
+                 QStringLiteral("Off: answers come even from untrusted certificates; what is wrong is still shown."),
+                 verify, QStringLiteral("tls ssl insecure"));
+    connect(verify, &QCheckBox::toggled, this,
+            [update](bool on) { update([&](HttpRequestPreferences &p) { p.verifyCertificates = on; }); });
+    auto *follow = toggle(current.followRedirects);
+    card->addRow(QStringLiteral("Follow redirects"), QString(), follow, QStringLiteral("location 301 302"));
+    connect(follow, &QCheckBox::toggled, this,
+            [update](bool on) { update([&](HttpRequestPreferences &p) { p.followRedirects = on; }); });
+    auto *redirects = spinBox(0, 50, current.maxRedirects, QStringLiteral(" redirects"));
+    card->addRow(QStringLiteral("At most"), QString(), redirects, QStringLiteral("redirect limit"));
+    connect(redirects, &QSpinBox::valueChanged, this,
+            [update](int value) { update([&](HttpRequestPreferences &p) { p.maxRedirects = value; }); });
+    auto *agent = new QLineEdit(current.userAgent);
+    card->addRow(QStringLiteral("User-Agent"), QStringLiteral("Sent unless the request sets its own."), agent,
+                 QStringLiteral("browser identification"));
+    connect(agent, &QLineEdit::editingFinished, this, [update, agent] {
+        update([&](HttpRequestPreferences &p) { p.userAgent = agent->text().trimmed(); });
+    });
+    auto *size = spinBox(1, 1024, current.maxBodyMb, QStringLiteral(" MB"));
+    card->addRow(QStringLiteral("Largest answer kept"),
+                 QStringLiteral("Beyond this the body is cut (the tab says so)."), size, QStringLiteral("limit"));
+    connect(size, &QSpinBox::valueChanged, this,
+            [update](int value) { update([&](HttpRequestPreferences &p) { p.maxBodyMb = value; }); });
+}
+
+void PreferencesWindow::buildRunCommandPage()
+{
+    auto *page = addPage(QStringLiteral("run-command"), QStringLiteral("Run on hosts"),
+                         QStringLiteral("system-run"), QStyle::SP_MediaPlay);
+    const auto current = loadRunCommandPreferences();
+    auto update = [](auto change) {
+        auto preferences = loadRunCommandPreferences();
+        change(preferences);
+        saveRunCommandPreferences(preferences);
+    };
+    auto *defaults = page->addCard(QStringLiteral("Each Run on Hosts window starts with"));
+    auto *parallel = spinBox(1, 50, current.parallel, QStringLiteral(" hosts"));
+    defaults->addRow(QStringLiteral("At once"),
+                     QStringLiteral("How many hosts run the command at the same time. Each window can "
+                                    "change it for itself."),
+                     parallel, QStringLiteral("parallel concurrent simultaneous"));
+    connect(parallel, &QSpinBox::valueChanged, this,
+            [update](int value) { update([&](RunCommandPreferences &p) { p.parallel = value; }); });
+    auto *timeout = spinBox(1, 24 * 3600, current.timeoutSeconds, QStringLiteral(" s"));
+    defaults->addRow(QStringLiteral("Time limit per host"),
+                     QStringLiteral("A command still running after this is stopped on that host."),
+                     timeout, QStringLiteral("timeout"));
+    connect(timeout, &QSpinBox::valueChanged, this,
+            [update](int value) { update([&](RunCommandPreferences &p) { p.timeoutSeconds = value; }); });
+    auto *terminal = toggle(current.terminal);
+    defaults->addRow(QStringLiteral("Use a terminal (pty)"),
+                     QStringLiteral("For commands that need one. Output then comes as a terminal shows "
+                                    "it, and a command waiting for input waits until the time limit."),
+                     terminal, QStringLiteral("pty tty sudo"));
+    connect(terminal, &QCheckBox::toggled, this,
+            [update](bool on) { update([&](RunCommandPreferences &p) { p.terminal = on; }); });
+
+    auto *kept = page->addCard(QStringLiteral("Results and history"));
+    auto *output = spinBox(16, 64 * 1024, current.outputKb, QStringLiteral(" KB"));
+    kept->addRow(QStringLiteral("Output kept per host"),
+                 QStringLiteral("Beyond this, a host's output is read and left out."), output,
+                 QStringLiteral("limit size"));
+    connect(output, &QSpinBox::valueChanged, this,
+            [update](int value) { update([&](RunCommandPreferences &p) { p.outputKb = value; }); });
+    auto *recent = spinBox(0, 100, current.keepRecent, QStringLiteral(" commands"), QStringLiteral("None"));
+    kept->addRow(QStringLiteral("Remember recent commands"),
+                 QStringLiteral("Offered under Recent in the window. Commands are kept in settings.yaml "
+                                "as typed, so do not put passwords in them."),
+                 recent, QStringLiteral("history"));
+    connect(recent, &QSpinBox::valueChanged, this, [update](int value) {
+        update([&](RunCommandPreferences &p) {
+            p.keepRecent = value;
+            p.recent = p.recent.mid(0, value);
+        });
+    });
+    auto *forget = new QPushButton(QStringLiteral("Forget Recent Commands"));
+    kept->addRow(QStringLiteral("Recent commands"), QString(), forget, QStringLiteral("clear history"));
+    connect(forget, &QPushButton::clicked, this,
+            [update] { update([](RunCommandPreferences &p) { p.recent.clear(); }); });
+}
+
+void PreferencesWindow::buildFtpPage()
+{
+    auto *page = addPage(QStringLiteral("ftp"), QStringLiteral("FTP"),
+                         QStringLiteral("folder-remote"), QStyle::SP_DriveNetIcon);
+    const auto current = loadFtpDefaults();
+    auto update = [](auto change) {
+        auto options = loadFtpDefaults();
+        change(options);
+        saveFtpDefaults(options);
+    };
+    auto *connection = page->addCard(QStringLiteral("Connection"));
+    auto addChoice = [this, update, connection](const QString &title, const QString &description,
+                                                const RdpChoices &choices, const QString &value,
+                                                const QString &keywords, auto apply) {
+        auto *box = choiceBox(choices, value);
+        connection->addRow(title, description, box, keywords);
+        connect(box, &QComboBox::activated, this, [box, update, apply] {
+            const auto chosen = box->currentData().toString();
+            update([&](FtpOptions &options) { apply(options, chosen); });
+        });
+    };
+    addChoice(QStringLiteral("Security"),
+              QStringLiteral("Plain FTP sends passwords and files unencrypted. Use TLS when "
+                             "offered works with every server; Require refuses servers without "
+                             "it; implicit FTPS is the older kind, usually on port 990."),
+              ftpSecurityChoices(), current.security, QStringLiteral("ftps tls ssl encryption"),
+              [](FtpOptions &o, const QString &v) { o.security = v; });
+    addChoice(QStringLiteral("Data connections"),
+              QStringLiteral("Passive works through most firewalls and NAT. Active needs the "
+                             "server to reach this computer; through a proxy, passive is used."),
+              ftpModeChoices(), current.mode, QStringLiteral("pasv port active passive firewall"),
+              [](FtpOptions &o, const QString &v) { o.mode = v; });
+    addChoice(QStringLiteral("Folder listings"),
+              QStringLiteral("MLSD gives exact sizes and times; LIST works with every server."),
+              ftpListingChoices(), current.listing, QStringLiteral("mlsd list directory"),
+              [](FtpOptions &o, const QString &v) { o.listing = v; });
+    auto *timeout = spinBox(1, 600, current.connectTimeout, QStringLiteral(" s"));
+    connection->addRow(QStringLiteral("Connect timeout"), QString(), timeout,
+                       QStringLiteral("timeout wait"));
+    connect(timeout, &QSpinBox::valueChanged, this, [update](int value) {
+        update([&](FtpOptions &options) { options.connectTimeout = value; });
+    });
+    auto *keepalive = spinBox(0, 3600, current.keepaliveSeconds, QStringLiteral(" s"),
+                              QStringLiteral("Off"));
+    connection->addRow(QStringLiteral("Keepalive"),
+                       QStringLiteral("Sends NOOP while idle, so servers do not close the connection."),
+                       keepalive, QStringLiteral("noop idle timeout"));
+    connect(keepalive, &QSpinBox::valueChanged, this, [update](int value) {
+        update([&](FtpOptions &options) { options.keepaliveSeconds = value; });
+    });
+    connection->addRow(QStringLiteral("Per session"),
+                       QStringLiteral("Every FTP session can override these in its own settings "
+                                      "(Sessions → Edit…). The file browser's own settings are on "
+                                      "the Files and transfers page; proxies on the Proxy page."),
+                       nullptr, QStringLiteral("override"));
 }
 
 void PreferencesWindow::buildRdpPage()
@@ -1368,7 +2009,7 @@ void PreferencesWindow::buildRdpPage()
 
 void PreferencesWindow::buildSftpPage()
 {
-    auto *page = addPage(QStringLiteral("sftp"), QStringLiteral("SFTP and transfers"),
+    auto *page = addPage(QStringLiteral("sftp"), QStringLiteral("Files and transfers"),
                          QStringLiteral("folder-remote"), QStyle::SP_DirLinkIcon);
     auto update = PREFERENCE_UPDATER(SftpPreferences, sftpPreferences, setSftpPreferences);
     const auto current = m_mainWindow->sftpPreferences();
@@ -1402,6 +2043,29 @@ void PreferencesWindow::buildSftpPage()
                       QStringLiteral("explorer file manager"));
     bindToggle(this, open, update, &SftpPreferences::openFolderAfterDownload);
 
+    auto *uploads = page->addCard(QStringLiteral("Uploads"));
+    auto *temporary = choiceBox({{QStringLiteral("above"), QStringLiteral("Files above a size")},
+                                 {QStringLiteral("all"), QStringLiteral("All files")},
+                                 {QStringLiteral("off"), QStringLiteral("Off (write in place)")}},
+                                current.temporaryUpload);
+    uploads->addRow(QStringLiteral("Upload to a temporary name first"),
+                    QStringLiteral("The file is written as name.filepart and replaces the old one "
+                                   "only when complete, so a dropped connection never leaves a "
+                                   "half-written file. For SFTP, SCP, and FTP."),
+                    temporary, QStringLiteral("filepart partial atomic replace winscp safe upload"));
+    auto *threshold = spinBox(0, 1024 * 1024, current.temporaryUploadKb, QStringLiteral(" KB"));
+    uploads->addRow(QStringLiteral("Size from which to use it"), QString(), threshold,
+                    QStringLiteral("filepart threshold"));
+    const auto updateThreshold = [temporary, threshold] {
+        threshold->setEnabled(temporary->currentData().toString() == QStringLiteral("above"));
+    };
+    connect(temporary, &QComboBox::activated, this, [update, temporary, updateThreshold] {
+        update([&](SftpPreferences &v) { v.temporaryUpload = temporary->currentData().toString(); });
+        updateThreshold();
+    });
+    bindSpin(this, threshold, update, &SftpPreferences::temporaryUploadKb);
+    updateThreshold();
+
     auto *conflicts = page->addCard(QStringLiteral("When a file already exists"));
     auto *conflict = choiceBox({{QStringLiteral("ask"), QStringLiteral("Ask me")},
                                 {QStringLiteral("rename"), QStringLiteral("Keep both")},
@@ -1412,12 +2076,23 @@ void PreferencesWindow::buildSftpPage()
                       QStringLiteral("For uploads and downloads alike."), conflict,
                       QStringLiteral("conflict overwrite replace skip rename"));
     bindChoice(this, conflict, update, &SftpPreferences::conflict);
+
+    auto *editing = page->addCard(QStringLiteral("Editing remote files"));
+    auto *editor = new QLineEdit(current.editor);
+    editor->setPlaceholderText(QStringLiteral("The system's program for each file type"));
+    editing->addRow(QStringLiteral("Editor"),
+                    QStringLiteral("Edit (or double-click a file) opens it here; each save uploads "
+                                   "it again. For example: code --wait, notepad++, gedit."),
+                    editor, QStringLiteral("edit editor open text notepad code"));
+    connect(editor, &QLineEdit::editingFinished, this, [update, editor] {
+        update([&](SftpPreferences &v) { v.editor = editor->text().trimmed(); });
+    });
 }
 
 void PreferencesWindow::buildSecurityPage()
 {
     auto *mainWindow = m_mainWindow;
-    auto *page = addPage(QStringLiteral("security"), QStringLiteral("Security and vault"),
+    auto *page = addPage(QStringLiteral("vault"), QStringLiteral("Vault"),
                          QStringLiteral("security-high"), QStyle::SP_MessageBoxWarning);
     auto update = PREFERENCE_UPDATER(SecurityPreferences, securityPreferences, setSecurityPreferences);
     const auto current = mainWindow->securityPreferences();
@@ -1484,6 +2159,8 @@ void PreferencesWindow::buildSecurityPage()
         refreshState();
     });
 
+    page = addPage(QStringLiteral("locking"), QStringLiteral("Locking"),
+                   QStringLiteral("system-lock-screen"), QStyle::SP_MessageBoxWarning);
     auto *locking = page->addCard(QStringLiteral("Locking"));
     auto *autoLock = spinBox(0, 24 * 60, current.autoLockMinutes, QStringLiteral(" min"),
                              QStringLiteral("Never"));
@@ -1501,6 +2178,67 @@ void PreferencesWindow::buildSecurityPage()
                     QStringLiteral("Otherwise it is asked when a session first needs it."),
                     startup, QStringLiteral("unlock start"));
     bindToggle(this, startup, update, &SecurityPreferences::unlockAtStartup);
+
+    page = addPage(QStringLiteral("password-storage"), QStringLiteral("Password storage"),
+                   QStringLiteral("dialog-password"), QStyle::SP_DialogApplyButton);
+    auto *storage = page->addCard(QStringLiteral("Where passwords are kept"));
+    QString why;
+    const bool systemAvailable = SystemCredentials::isAvailable(&why);
+    auto *store = choiceBox({{QStringLiteral("vault"), QStringLiteral("OpsRemote vault")},
+                             {QStringLiteral("system"), QStringLiteral("System credential store")},
+                             {QStringLiteral("both"), QStringLiteral("Both")}},
+                            current.passwordStore);
+    storage->addRow(QStringLiteral("Store"),
+                    QStringLiteral("The vault is encrypted with your master password and travels "
+                                   "with the portable folder. The system store (%1) needs no master "
+                                   "password but stays on this computer. Both: saved in both, read "
+                                   "from the system first. Each session can choose its own (Edit "
+                                   "Session).%2")
+                        .arg(SystemCredentials::name(),
+                             systemAvailable ? QString() : QStringLiteral(" Not available here: ") + why),
+                    store, QStringLiteral("keyring credential manager secret service keychain"));
+    bindChoice(this, store, update, &SecurityPreferences::passwordStore);
+    auto *storeNote = new AvailabilityNote(
+        [] {
+            QString reason;
+            return SystemCredentials::isAvailable(&reason) ? QString() : reason;
+        },
+        [store](bool available) {
+            // The system store's choices wait for it (the current one stays).
+            if (auto *model = qobject_cast<QStandardItemModel *>(store->model())) {
+                for (const auto *key : {"system", "both"}) {
+                    const int row = store->findData(QLatin1String(key));
+                    if (auto *item = model->item(row))
+                        item->setEnabled(available || row == store->currentIndex());
+                }
+            }
+            // The copy buttons, found by name (made after this note).
+            for (const auto *name : {"copyToSystemStore", "copyToVault"}) {
+                if (auto *button = store->window()->findChild<QPushButton *>(QLatin1String(name)))
+                    button->setEnabled(available);
+            }
+        });
+    storage->addWideRow(storeNote, QStringLiteral("keyring libsecret"));
+    auto *copies = page->addCard(QStringLiteral("Copy saved passwords"));
+    auto *toSystem = new QPushButton(QStringLiteral("Copy to the system store"));
+    toSystem->setEnabled(systemAvailable);
+    copies->addRow(QStringLiteral("Vault → system store"),
+                   QStringLiteral("Every password in the vault (unlocks it if needed)."),
+                   toSystem, QStringLiteral("migrate export"));
+    auto *toVault = new QPushButton(QStringLiteral("Copy to the vault"));
+    toVault->setEnabled(systemAvailable);
+    copies->addRow(QStringLiteral("System store → vault"),
+                   QStringLiteral("The saved sessions' passwords, so they travel with the folder."),
+                   toVault, QStringLiteral("migrate import"));
+    toSystem->setObjectName(QStringLiteral("copyToSystemStore"));
+    toVault->setObjectName(QStringLiteral("copyToVault"));
+    storeNote->check();
+    connect(toSystem, &QPushButton::clicked, this, [this, mainWindow = m_mainWindow] {
+        QMessageBox::information(this, QStringLiteral("Copy Passwords"), mainWindow->copyPasswords(true));
+    });
+    connect(toVault, &QPushButton::clicked, this, [this, mainWindow = m_mainWindow] {
+        QMessageBox::information(this, QStringLiteral("Copy Passwords"), mainWindow->copyPasswords(false));
+    });
 }
 
 void PreferencesWindow::buildLoggingPage()
@@ -1546,6 +2284,16 @@ void PreferencesWindow::buildLoggingPage()
         QDir().mkpath(folder);
         QDesktopServices::openUrl(QUrl::fromLocalFile(folder));
     });
+
+    auto *recordings = page->addCard(QStringLiteral("Recordings"));
+    auto *record = toggle(current.record);
+    recordings->addRow(QStringLiteral("Record every session"),
+                       QStringLiteral("Saves each terminal tab as an asciinema recording (.cast) "
+                                      "in the log folder, to replay later with its timing (Tools "
+                                      "→ Play Recording…, or asciinema). A single tab can also be "
+                                      "recorded from its right-click menu."),
+                       record, QStringLiteral("record replay asciinema cast audit training video"));
+    bindToggle(this, record, update, &LoggingPreferences::record);
 }
 
 void PreferencesWindow::buildSnippetsPage()
@@ -1721,6 +2469,142 @@ void PreferencesWindow::buildHighlightsPage()
     });
 }
 
+void PreferencesWindow::buildLocalShellPage()
+{
+    auto *page = addPage(QStringLiteral("local-shell"), QStringLiteral("Local shell"),
+                         QStringLiteral("utilities-terminal"), QStyle::SP_ComputerIcon);
+    auto update = PREFERENCE_UPDATER(LocalShellPreferences, localShellPreferences,
+                                     setLocalShellPreferences);
+    const auto current = m_mainWindow->localShellPreferences();
+    auto *card = page->addCard(QStringLiteral("Local terminals"));
+#ifdef Q_OS_WIN
+    auto *shell = choiceBox({{QStringLiteral("powershell"), QStringLiteral("Windows PowerShell")},
+                             {QStringLiteral("pwsh"), QStringLiteral("PowerShell 7 (pwsh)")},
+                             {QStringLiteral("cmd"), QStringLiteral("Command Prompt")},
+                             {QStringLiteral("wsl"), QStringLiteral("WSL (the default Linux distribution)")},
+                             {QStringLiteral("custom"), QStringLiteral("Another program")}},
+                            current.windowsShell);
+    card->addRow(QStringLiteral("Shell"),
+                 QStringLiteral("What File → New Local Terminal starts, in a Windows pseudo "
+                                "console. PowerShell 7 and WSL need to be installed."),
+                 shell, QStringLiteral("powershell pwsh cmd wsl bash command prompt conpty"));
+    bindChoice(this, shell, update, &LocalShellPreferences::windowsShell);
+    auto *custom = new QLineEdit(current.windowsCustom);
+    custom->setPlaceholderText(QStringLiteral("e.g. C:\\msys64\\usr\\bin\\bash.exe --login"));
+    card->addRow(QStringLiteral("Another program"),
+                 QStringLiteral("With its arguments; used when the shell is \"Another program\"."),
+                 custom, QStringLiteral("custom command"));
+    connect(custom, &QLineEdit::editingFinished, this, [update, custom] {
+        update([&](LocalShellPreferences &v) { v.windowsCustom = custom->text().trimmed(); });
+    });
+
+    auto *admin = page->addCard(QStringLiteral("Run as administrator"));
+    admin->addRow(QStringLiteral("Administrator terminals"),
+                  QStringLiteral("File → New Local Terminal (Administrator), or Administrator in "
+                                 "the split pane chooser. Windows asks first (UAC); a standard user "
+                                 "types an administrator's name and password, and the shell then "
+                                 "runs as that administrator. Not for WSL."),
+                  nullptr, QStringLiteral("admin elevated uac runas root"));
+    auto *sudo = toggle(current.useSudo);
+    admin->addRow(QStringLiteral("Use Windows sudo when it is turned on"),
+                  QStringLiteral("Windows 11's sudo, if an administrator turned it on in inline "
+                                 "mode (Settings → System → For developers). Otherwise OpsRemote "
+                                 "starts the shell through its own elevated helper."),
+                  sudo, QStringLiteral("sudo inline"));
+    bindToggle(this, sudo, update, &LocalShellPreferences::useSudo);
+#else
+    auto *shell = choiceBox({{QStringLiteral("default"), QStringLiteral("My login shell ($SHELL)")},
+                             {QStringLiteral("custom"), QStringLiteral("Another program")}},
+                            current.linuxShell);
+    card->addRow(QStringLiteral("Shell"),
+                 QStringLiteral("What File → New Local Terminal starts."), shell,
+                 QStringLiteral("bash zsh fish shell"));
+    bindChoice(this, shell, update, &LocalShellPreferences::linuxShell);
+    auto *custom = new QLineEdit(current.linuxCustom);
+    custom->setPlaceholderText(QStringLiteral("e.g. /usr/bin/fish -l"));
+    card->addRow(QStringLiteral("Another program"),
+                 QStringLiteral("With its arguments; used when the shell is \"Another program\"."),
+                 custom, QStringLiteral("custom command"));
+    connect(custom, &QLineEdit::editingFinished, this, [update, custom] {
+        update([&](LocalShellPreferences &v) { v.linuxCustom = custom->text().trimmed(); });
+    });
+#endif
+}
+
+void PreferencesWindow::buildSessionListPage()
+{
+    auto *page = addPage(QStringLiteral("appearance-sessions"), QStringLiteral("Session list"),
+                         QStringLiteral("view-list-tree"), QStyle::SP_FileDialogListView);
+    auto update = PREFERENCE_UPDATER(SessionListPreferences, sessionListPreferences,
+                                     setSessionListPreferences);
+    const auto current = m_mainWindow->sessionListPreferences();
+
+    auto *folders = page->addCard(QStringLiteral("Pinned and recent"));
+    auto *pinned = toggle(current.showPinned);
+    folders->addRow(QStringLiteral("Show Pinned"),
+                    QStringLiteral("Sessions pinned with right-click → Pin, at the top of the list."),
+                    pinned, QStringLiteral("favourites favorites star"));
+    bindToggle(this, pinned, update, &SessionListPreferences::showPinned);
+    auto *recent = toggle(current.showRecent);
+    folders->addRow(QStringLiteral("Show Recent"),
+                    QStringLiteral("The sessions opened last, below Pinned."), recent,
+                    QStringLiteral("history last used"));
+    bindToggle(this, recent, update, &SessionListPreferences::showRecent);
+    auto *recentCount = spinBox(1, 20, current.recentCount, QString());
+    folders->addRow(QStringLiteral("Recent sessions"), QString(), recentCount,
+                    QStringLiteral("history count"));
+    bindSpin(this, recentCount, update, &SessionListPreferences::recentCount);
+
+    auto *search = page->addCard(QStringLiteral("Search"));
+    auto *showSearch = toggle(current.showSearch);
+    search->addRow(QStringLiteral("Show the search box"),
+                   QStringLiteral("Above the list. Type parts of a name, host, user, protocol, or "
+                                  "folder; every word must match. Down goes to the results, Enter "
+                                  "opens the first one, Esc clears. Sessions → Search Sessions "
+                                  "(Ctrl+Shift+S) jumps to it even when it is hidden."),
+                   showSearch, QStringLiteral("filter find search box"));
+    bindToggle(this, showSearch, update, &SessionListPreferences::showSearch);
+
+    auto *columns = page->addCard(QStringLiteral("Columns"));
+    auto *host = toggle(current.showHost);
+    columns->addRow(QStringLiteral("Host"),
+                    QStringLiteral("The status dot and the name always show."), host,
+                    QStringLiteral("ip address column"));
+    bindToggle(this, host, update, &SessionListPreferences::showHost);
+    auto *protocol = toggle(current.showProtocol);
+    columns->addRow(QStringLiteral("Protocol"), QString(), protocol,
+                    QStringLiteral("ssh rdp vnc column"));
+    bindToggle(this, protocol, update, &SessionListPreferences::showProtocol);
+    auto *summary = choiceBox({{QStringLiteral("name"), QStringLiteral("After the folder name")},
+                               {QStringLiteral("column"), QStringLiteral("In the next column")},
+                               {QStringLiteral("off"), QStringLiteral("Disabled")}},
+                              current.folderSummary);
+    columns->addRow(QStringLiteral("Folder summary"),
+                    QStringLiteral("How many hosts of a folder answer, like 3 ● 1 ○. In the next "
+                                   "column it lines up with the column after the name."),
+                    summary, QStringLiteral("count reachable folder"));
+    bindChoice(this, summary, update, &SessionListPreferences::folderSummary);
+    auto *fit = toggle(current.fitPanel);
+    columns->addRow(QStringLiteral("Always fit the panel to the list"),
+                    QStringLiteral("The side panel grows and shrinks by itself with the names, "
+                                   "columns, and open folders, so it never needs resizing by "
+                                   "hand. Off: drag its edge."),
+                    fit, QStringLiteral("width resize auto size"));
+    bindToggle(this, fit, update, &SessionListPreferences::fitPanel);
+
+    auto *status = page->addCard(QStringLiteral("Status"));
+    auto *check = toggle(current.checkStatus);
+    status->addRow(QStringLiteral("Check whether hosts answer"),
+                   QStringLiteral("A filled dot when the host answers on its port, an empty "
+                                  "one when it does not. Only knocks on the port; never logs on. "
+                                  "Sessions through a jump host or proxy show a dash."),
+                   check, QStringLiteral("reachable online ping up down status"));
+    bindToggle(this, check, update, &SessionListPreferences::checkStatus);
+    auto *every = spinBox(10, 3600, current.checkSeconds, QStringLiteral(" s"));
+    status->addRow(QStringLiteral("Check every"), QString(), every, QStringLiteral("interval"));
+    bindSpin(this, every, update, &SessionListPreferences::checkSeconds);
+}
+
 void PreferencesWindow::buildPresentationPage()
 {
     auto *mainWindow = m_mainWindow;
@@ -1757,7 +2641,7 @@ void PreferencesWindow::buildPresentationPage()
 
 void PreferencesWindow::buildDataPage()
 {
-    auto *page = addPage(QStringLiteral("data"), QStringLiteral("Data and backup"),
+    auto *page = addPage(QStringLiteral("locations"), QStringLiteral("Locations"),
                          QStringLiteral("drive-removable-media"), QStyle::SP_DriveFDIcon);
     auto current = loadBackupPreferences();
 
@@ -1779,12 +2663,14 @@ void PreferencesWindow::buildDataPage()
     addFolderRow(QStringLiteral("Backups"), QStringLiteral("Copies of the settings folder."),
                  backupsFolder(), QStringLiteral("restore"));
     addFolderRow(QStringLiteral("Program"),
-                 QStringLiteral("The running program. In the package it is unpacked from "
-                                "*.tar.zst into runtime once per version; older copies are "
-                                "removed automatically."),
+                 QStringLiteral("The running program. In the package it is unpacked from the "
+                                "compressed folder into runtime once per version; older copies "
+                                "are removed automatically."),
                  QCoreApplication::applicationDirPath(),
                  QStringLiteral("runtime cache unpacked compressed zstd"));
 
+    page = addPage(QStringLiteral("backups"), QStringLiteral("Backups"),
+                   QStringLiteral("document-save"), QStyle::SP_DialogSaveButton);
     auto *backups = page->addCard(QStringLiteral("Backups"));
     auto *onStart = toggle(current.backupOnStart);
     backups->addRow(QStringLiteral("Back up at every start"),
@@ -1868,15 +2754,48 @@ void PreferencesWindow::buildDataPage()
 
 void PreferencesWindow::buildAboutPage()
 {
-    auto *page = addPage(QStringLiteral("about"), QStringLiteral("About"),
+    auto *page = addPage(QStringLiteral("about-program"), QStringLiteral("OpsRemote"),
                          QStringLiteral("help-about"), QStyle::SP_MessageBoxInformation);
 
     auto *product = page->addCard();
-    product->addRow(QStringLiteral("OpsRemote %1").arg(QStringLiteral(OPSREMOTE_VERSION)),
-                    QStringLiteral("A portable terminal and remote-access workspace for Linux and "
-                                   "Windows. Created by Thanos Athanasopoulos. Free software under "
-                                   "the GNU GPL, version 3 or later."),
-                    nullptr, QStringLiteral("version licence gpl author creator"));
+    // The program's icon beside its name, so the page shows what OpsRemote is.
+    auto *identity = new QWidget;
+    auto *identityLayout = new QHBoxLayout(identity);
+    identityLayout->setContentsMargins(0, 8, 0, 12);
+    identityLayout->setSpacing(16);
+    auto *logo = new QLabel(identity);
+    logo->setPixmap(QApplication::windowIcon().pixmap(QSize(64, 64), devicePixelRatioF()));
+    logo->setFixedSize(64, 64);
+    identityLayout->addWidget(logo, 0, Qt::AlignVCenter);
+    auto *identityTexts = new QVBoxLayout;
+    identityTexts->setSpacing(2);
+    auto *name = new QLabel(QStringLiteral("OpsRemote"), identity);
+    setHeadingFont(name, 1.4);
+    identityTexts->addWidget(name);
+    identityTexts->addWidget(new QLabel(
+        QStringLiteral("Version %1").arg(QStringLiteral(OPSREMOTE_VERSION)), identity));
+    identityTexts->addWidget(
+        secondaryLabel(QStringLiteral("A portable terminal and remote-access workspace for Linux "
+                                      "and Windows. © 2026 Thanos Athanasopoulos."),
+                       identity));
+    identityLayout->addLayout(identityTexts, 1);
+    product->addWideRow(identity, QStringLiteral("opsremote version author creator copyright"));
+    // GPLv3's "Appropriate Legal Notices": the licence, how to read it, and
+    // that there is no warranty.
+    auto *licenceButton = new QPushButton(QStringLiteral("Read Licence"));
+    product->addRow(QStringLiteral("Licence"),
+                    QStringLiteral("OpsRemote is free software: you can redistribute it and/or "
+                                   "modify it under the terms of the GNU General Public License, "
+                                   "version 3 or (at your option) any later version. It comes "
+                                   "with ABSOLUTELY NO WARRANTY, to the extent permitted by law."),
+                    licenceButton, QStringLiteral("licence license gpl warranty free software"));
+    connect(licenceButton, &QPushButton::clicked, this, [] {
+        // The package's LICENSE file, or the text on gnu.org.
+        const QString file = portableFilePath(QStringLiteral("LICENSE"));
+        if (!QFile::exists(file)
+            || !QDesktopServices::openUrl(QUrl::fromLocalFile(file)))
+            QDesktopServices::openUrl(QUrl(QStringLiteral("https://www.gnu.org/licenses/gpl-3.0.html")));
+    });
     auto *sourceButton = new QPushButton(QStringLiteral("Source code"));
     product->addRow(QStringLiteral("Source and licences"),
                     QStringLiteral("github.com/sektorhybrid/OpsRemote. The release packages "
@@ -1933,6 +2852,8 @@ void PreferencesWindow::buildAboutPage()
     });
 
     // Bundled open-source components and their licences.
+    page = addPage(QStringLiteral("components"), QStringLiteral("Components"),
+                   QStringLiteral("help-about"), QStyle::SP_MessageBoxInformation);
     auto *components = page->addCard(QStringLiteral("Open-source components"));
     const QList<QPair<QString, QString>> list{
         {QStringLiteral("Qt %1").arg(QString::fromLatin1(qVersion())), QStringLiteral("LGPL-3.0 · qt.io")},
@@ -1946,6 +2867,7 @@ void PreferencesWindow::buildAboutPage()
         {QStringLiteral("zstd"), QStringLiteral("BSD-3-Clause · facebook.github.io/zstd")},
         {QStringLiteral("zlib, libjpeg-turbo"), QStringLiteral("Zlib, IJG/BSD-3-Clause")},
         {QStringLiteral("ICU (Linux), utf8proc (Windows)"), QStringLiteral("Unicode-3.0, MIT")},
+        {QStringLiteral("Kvantum 1.1.8 (with OpsRemote changes)"), QStringLiteral("GPL-3.0-or-later · github.com/tsujan/Kvantum")},
         {QStringLiteral("iTerm2-Color-Schemes"), QStringLiteral("MIT · github.com/mbadolato/iTerm2-Color-Schemes")},
         {QStringLiteral("Icon themes"), QStringLiteral("GPL-3.0, LGPL-3.0, CC-BY-SA-4.0 · licence files in data/icons/<theme>/")},
     };
@@ -1977,10 +2899,11 @@ void PreferencesWindow::applyStyleSheet()
         "#settingsPageContent { background: palette(window); }"
         "QListWidget#settingsNavigation { border: none; background: transparent; }"
         "QListWidget#settingsNavigation::item { padding: 3px 6px; margin: 1px 0; border-radius: 4px;"
+        " border-left: 2px solid transparent;"
         " color: palette(text); }"
         "QListWidget#settingsNavigation::item:hover { background: %2; }"
         "QListWidget#settingsNavigation::item:selected { background: %3;"
-        " border-left: 2px solid palette(highlight); color: palette(text); }")
+        " border-left-color: palette(highlight); color: palette(text); }")
                       .arg(line, hover, selected));
 }
 

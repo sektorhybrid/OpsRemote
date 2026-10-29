@@ -11,6 +11,7 @@
 #include <QString>
 
 #include "rdpoptions.h"
+#include "sshsession.h"
 
 #include <atomic>
 #include <memory>
@@ -33,6 +34,11 @@ struct RdpConnectionSettings
     QString configPath;
     // Fully resolved (defaults plus the session's overrides).
     RdpOptions options = RdpOptions::builtIn();
+    // Jump hosts to pass through, in order (RdpPage opens them).
+    std::vector<SshConnectionSettings> jumps;
+    // Through jump hosts: the server's real "host:port". FreeRDP then sees
+    // only a local port, so its certificate is remembered under this name.
+    QString certificateName;
 };
 
 enum class RdpCertificateDecision { Reject, AcceptOnce, AcceptAndSave };
@@ -140,6 +146,10 @@ private:
     };
 
     void run(RdpConnectionSettings settings);
+    // FreeRDP's answer (0 reject, 2 accept once) for a server reached
+    // through jump hosts, checked against tunnelled_certificates.
+    unsigned long verifyTunnelledCertificate(const QString &subject, const QString &issuer,
+                                             const QString &fingerprint);
     template <typename Ask>
     bool askOnGuiThread(Ask ask);
     void queueInput(const InputEvent &event);
@@ -159,6 +169,9 @@ private:
     void *m_display = nullptr;
     std::atomic<bool> m_displayReady{false};
     bool m_askCredentials = true; // worker thread only
+    // Through jump hosts (worker thread only); see verifyTunnelledCertificate().
+    QString m_certificateName;
+    QString m_configPath;
     std::atomic<quint32> m_maxMonitors{1};
     QMutex m_inputMutex;
     QList<InputEvent> m_inputQueue;

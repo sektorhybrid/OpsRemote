@@ -33,8 +33,8 @@ struct VncOptions
     int autoReconnect = -1;
     int highDpi = -1; // one remote pixel per physical pixel
     int allMonitors = -1; // full screen spans every monitor
-    // Through an SSH server: "session:<saved session id>", or
-    // "user@host[:port]"; empty: the default, "none": directly.
+    // Read from older files only: a session's SSH tunnel, now its jump host
+    // (SessionDefinition::jumpHost).
     QString sshTunnel;
     // Session only: wait for the server to connect (reverse VNC).
     int listen = -1;
@@ -63,14 +63,13 @@ void saveVncDefaults(const VncOptions &options);
 
 // Edits VncOptions for a session: choices start with "Default (…)", on/off
 // options are checkboxes stored only when they differ from the default.
-// sshSessions lists the saved SSH sessions (id, label) for the tunnel.
 class VncOptionsEditor final : public QWidget
 {
     Q_OBJECT
 
 public:
     VncOptionsEditor(const VncOptions &value, const VncOptions &defaults,
-                     const QList<QPair<QString, QString>> &sshSessions, QWidget *parent = nullptr);
+                     QWidget *parent = nullptr);
 
     VncOptions value() const;
 
@@ -88,7 +87,6 @@ private:
     QCheckBox *m_autoReconnect = nullptr;
     QCheckBox *m_highDpi = nullptr;
     QCheckBox *m_allMonitors = nullptr;
-    QComboBox *m_sshTunnel = nullptr;
     QCheckBox *m_listen = nullptr;
     QSpinBox *m_listenPort = nullptr;
     QLineEdit *m_repeater = nullptr;

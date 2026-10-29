@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "sftppanel.h"
+#include "sftpsync.h"
 #include "icons.h"
 #include "preferences.h"
 
@@ -9,10 +10,15 @@
 #include <QCheckBox>
 #include <QClipboard>
 #include <QDesktopServices>
+#include <QDateTime>
 #include <QDir>
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QFileDialog>
+#include <QFileSystemWatcher>
+#include <QProcess>
+#include <QTimer>
+#include <QTemporaryDir>
 #include <QFileInfo>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -213,6 +219,9 @@ SftpPanel::SftpPanel(QWidget *parent)
     m_homeButton = addButton("go-home", QStyle::SP_DirHomeIcon, QStringLiteral("Home folder"));
     m_refreshButton = addButton("view-refresh", QStyle::SP_BrowserReload,
                                 QStringLiteral("Refresh (F5)"));
+    auto *syncButton = addButton("folder-sync", QStyle::SP_DialogApplyButton,
+                                 QStringLiteral("Sync Folders… (like rsync: copy only what changed)"));
+    connect(syncButton, &QToolButton::clicked, this, &SftpPanel::openSync);
     m_pathEdit = new QLineEdit(this);
     m_pathEdit->setPlaceholderText(QStringLiteral("Remote path"));
     navigation->addWidget(m_pathEdit, 1);
@@ -268,8 +277,12 @@ SftpPanel::SftpPanel(QWidget *parent)
         uploadPaths(paths, intoFolder ? target->data(0, PathRole).toString() : m_currentPath);
     };
     connect(m_view, &QTreeWidget::itemActivated, this, [this](QTreeWidgetItem *item) {
-        if (item && item->data(0, IsDirectoryRole).toBool())
+        if (!item)
+            return;
+        if (item->data(0, IsDirectoryRole).toBool())
             navigate(item->data(0, PathRole).toString());
+        else
+            editFile(item->data(0, PathRole).toString());
     });
     connect(m_view, &QWidget::customContextMenuRequested, this, &SftpPanel::showContextMenu);
 
@@ -322,11 +335,34 @@ void SftpPanel::refreshIcons()
 
 void SftpPanel::setTitle(const QString &title)
 {
-    m_titleLabel->setText(QStringLiteral("SFTP · %1").arg(title));
+    m_title = title;
+    m_titleLabel->setText(QStringLiteral("%1 · %2").arg(m_protocol, title));
     m_titleLabel->setToolTip(title);
 }
 
-void SftpPanel::setSession(SshSession *session)
+void SftpPanel::setDisconnectedText(const QString &text)
+{
+    m_disconnectedText = text;
+}
+
+// Sync Folders, starting at the folder shown.
+void SftpPanel::openSync()
+{
+    if (!m_session || !m_ready) {
+        showMessage(QStringLiteral("Connect first, then sync."), true);
+        return;
+    }
+    auto *dialog = new SftpSyncDialog(m_session, m_currentPath, window());
+    dialog->show();
+}
+
+void SftpPanel::followFolder(const QString &path)
+{
+    if (m_ready && !path.isEmpty() && path != m_currentPath)
+        navigate(path);
+}
+
+void SftpPanel::setSession(RemoteFileSession *session)
 {
     if (m_session)
         disconnect(m_session, nullptr, this, nullptr);
@@ -337,14 +373,23 @@ void SftpPanel::setSession(SshSession *session)
                                                          m_refreshButton, m_pathEdit})
         widget->setEnabled(false);
     if (!session) {
-        showStatus(QStringLiteral("Disconnected.\nPress Enter in the terminal to reconnect."));
+        showStatus(m_disconnectedText);
         return;
     }
 
     showStatus(QStringLiteral("Connecting…"));
-    connect(session, &SshSession::sftpReady, this, [this](const QString &homePath) {
+    const auto preferences = loadSftpPreferences();
+    session->setTemporaryUploads(preferences.temporaryUpload == QStringLiteral("off") ? -1
+                                 : preferences.temporaryUpload == QStringLiteral("all")
+                                     ? 0
+                                     : qint64(preferences.temporaryUploadKb) * 1024);
+    connect(session, &RemoteFileSession::sftpReady, this, [this](const QString &homePath) {
         m_ready = true;
         m_homePath = homePath;
+        if (m_session) {
+            m_protocol = m_session->fileProtocol();
+            setTitle(m_title);
+        }
         for (auto *widget : std::initializer_list<QWidget *>{m_upButton, m_homeButton,
                                                              m_refreshButton, m_pathEdit})
             widget->setEnabled(true);
@@ -352,16 +397,16 @@ void SftpPanel::setSession(SshSession *session)
         // After a reconnect, return to the folder that was open before.
         navigate(m_currentPath.isEmpty() ? homePath : m_currentPath);
     });
-    connect(session, &SshSession::sftpUnavailable, this, &SftpPanel::showStatus);
-    connect(session, &SshSession::directoryListed, this, &SftpPanel::populate);
-    connect(session, &SshSession::fileOperationFinished, this, [this](const QString &error) {
+    connect(session, &RemoteFileSession::sftpUnavailable, this, &SftpPanel::showStatus);
+    connect(session, &RemoteFileSession::directoryListed, this, &SftpPanel::populate);
+    connect(session, &RemoteFileSession::fileOperationFinished, this, [this](const QString &error) {
         if (!error.isEmpty())
             showMessage(error, true);
         refresh();
     });
-    connect(session, &SshSession::transferProgress, this, &SftpPanel::updateProgress);
-    connect(session, &SshSession::transferConflict, this, &SftpPanel::askConflict);
-    connect(session, &SshSession::transferFinished, this, &SftpPanel::finishTransfer);
+    connect(session, &RemoteFileSession::transferProgress, this, &SftpPanel::updateProgress);
+    connect(session, &RemoteFileSession::transferConflict, this, &SftpPanel::askConflict);
+    connect(session, &RemoteFileSession::transferFinished, this, &SftpPanel::finishTransfer);
 }
 
 void SftpPanel::showStatus(const QString &text)
@@ -522,6 +567,10 @@ void SftpPanel::showContextMenu(const QPoint &position)
             navigate(directory->data(0, PathRole).toString());
         });
     }
+    if (selection.size() == 1 && !directory) {
+        menu.addAction(icon("document-edit", QStyle::SP_FileIcon), QStringLiteral("Edit"), this,
+                       [this, path = selection.first()] { editFile(path); });
+    }
     if (!selection.isEmpty())
         menu.addAction(icon("go-down", QStyle::SP_ArrowDown), QStringLiteral("Download…"), this,
                        &SftpPanel::downloadSelected);
@@ -542,6 +591,8 @@ void SftpPanel::showContextMenu(const QPoint &position)
                    &SftpPanel::uploadFilesDialog);
     menu.addAction(icon("upload", QStyle::SP_ArrowUp), QStringLiteral("Upload Folder…"), this,
                    &SftpPanel::uploadFolderDialog);
+    menu.addAction(icon("folder-sync", QStyle::SP_DialogApplyButton), QStringLiteral("Sync Folders…"),
+                   this, &SftpPanel::openSync);
     menu.addSeparator();
     menu.addAction(icon("folder-new", QStyle::SP_FileDialogNewFolder), QStringLiteral("New Folder…"),
                    this, &SftpPanel::createFolder);
@@ -559,7 +610,20 @@ void SftpPanel::showContextMenu(const QPoint &position)
     menu.addSeparator();
     menu.addAction(icon("view-refresh", QStyle::SP_BrowserReload), QStringLiteral("Refresh\tF5"),
                    this, &SftpPanel::refresh);
+    if (m_following && m_setFollowing) {
+        auto *follow = menu.addAction(QStringLiteral("Follow the Terminal's Folder"));
+        follow->setCheckable(true);
+        follow->setChecked(m_following());
+        follow->setToolTip(QStringLiteral("For this tab only; the session's setting stays as it is."));
+        connect(follow, &QAction::toggled, this, [this](bool on) { m_setFollowing(on); });
+    }
     menu.exec(m_view->viewport()->mapToGlobal(position));
+}
+
+void SftpPanel::setFollowControl(std::function<bool()> following, std::function<void(bool)> setFollowing)
+{
+    m_following = std::move(following);
+    m_setFollowing = std::move(setFollowing);
 }
 
 void SftpPanel::uploadPaths(const QStringList &localPaths, const QString &remoteDirectory)
@@ -594,6 +658,160 @@ void SftpPanel::uploadFolderDialog()
         this, QStringLiteral("Upload Folder to %1").arg(m_currentPath), QDir::homePath());
     if (!folder.isEmpty())
         uploadPaths({folder}, m_currentPath);
+}
+
+void SftpPanel::removeStaleEditFolders()
+{
+    // Copies left by a crash; a day old, so another running copy of
+    // OpsRemote keeps the files it is editing.
+    const QDir temp(QDir::tempPath());
+    const auto limit = QDateTime::currentDateTime().addDays(-1);
+    for (const auto &info : temp.entryInfoList({QStringLiteral("opsremote-edit-*")},
+                                               QDir::Dirs | QDir::NoDotAndDotDot)) {
+        if (info.isDir() && !info.isSymLink() && info.isWritable() && info.lastModified() < limit)
+            QDir(info.absoluteFilePath()).removeRecursively();
+    }
+}
+
+SftpPanel::~SftpPanel()
+{
+    // The local copies of edited files go with the panel.
+    if (!m_editDirectory.isEmpty())
+        QDir(m_editDirectory).removeRecursively();
+}
+
+// Downloads a remote file into a private folder and opens it in the editor;
+// saving it there uploads it again (see uploadEdited()).
+void SftpPanel::editFile(const QString &remotePath)
+{
+    if (!m_session || !m_ready)
+        return;
+    if (!m_watcher) {
+        m_watcher = new QFileSystemWatcher(this);
+        connect(m_watcher, &QFileSystemWatcher::fileChanged, this, [this](const QString &path) {
+            // Editors often save by replacing the file, which ends the watch;
+            // a short wait also lets the editor finish writing.
+            QTimer::singleShot(500, this, [this, path] {
+                if (QFileInfo::exists(path) && !m_watcher->files().contains(path))
+                    m_watcher->addPath(path);
+                uploadEdited(path);
+            });
+        });
+    }
+    for (auto it = m_editedFiles.cbegin(); it != m_editedFiles.cend(); ++it) {
+        if (it.value() == remotePath && QFileInfo::exists(it.key())) {
+            openEditor(it.key());
+            return;
+        }
+    }
+    if (m_editDirectory.isEmpty()) {
+        // Created owner-only in one step, so other users never see inside.
+        QTemporaryDir directory(QDir(QDir::tempPath()).filePath(QStringLiteral("opsremote-edit-XXXXXX")));
+        if (!directory.isValid()) {
+            showMessage(QStringLiteral("Could not create a folder for editing."), true);
+            return;
+        }
+        directory.setAutoRemove(false);
+        m_editDirectory = directory.path();
+    }
+    // One folder per file, so files with the same name do not collide.
+    const QString folder = QDir(m_editDirectory).filePath(QString::number(m_editedFiles.size() + 1));
+    if (!QDir().mkpath(folder)) {
+        showMessage(QStringLiteral("Could not create a folder for editing."), true);
+        return;
+    }
+    const QString local = QDir(folder).filePath(remotePath.section(QLatin1Char('/'), -1));
+    m_editedFiles.insert(local, remotePath);
+    const int jobId = m_session->download({remotePath}, folder);
+    m_jobUploads.insert(jobId, false);
+    m_editDownloads.insert(jobId, local);
+}
+
+// Files the system's default program would run rather than open: a
+// server could name a file like this to run code here when it is edited.
+static bool couldRun(const QString &localPath)
+{
+    static const QStringList types{
+        // Windows
+        QStringLiteral("exe"), QStringLiteral("com"), QStringLiteral("bat"), QStringLiteral("cmd"),
+        QStringLiteral("ps1"), QStringLiteral("psm1"), QStringLiteral("vbs"), QStringLiteral("vbe"),
+        QStringLiteral("js"), QStringLiteral("jse"), QStringLiteral("wsf"), QStringLiteral("wsh"),
+        QStringLiteral("msi"), QStringLiteral("msp"), QStringLiteral("scr"), QStringLiteral("pif"),
+        QStringLiteral("lnk"), QStringLiteral("url"), QStringLiteral("hta"), QStringLiteral("cpl"),
+        QStringLiteral("jar"), QStringLiteral("reg"), QStringLiteral("inf"), QStringLiteral("msc"),
+        QStringLiteral("application"), QStringLiteral("appref-ms"), QStringLiteral("library-ms"),
+        QStringLiteral("settingcontent-ms"), QStringLiteral("scf"),
+        // Linux and macOS
+        QStringLiteral("desktop"), QStringLiteral("sh"), QStringLiteral("bash"), QStringLiteral("zsh"),
+        QStringLiteral("run"), QStringLiteral("bin"), QStringLiteral("appimage"), QStringLiteral("py"),
+        QStringLiteral("pl"), QStringLiteral("rb"), QStringLiteral("command"), QStringLiteral("app")};
+    const QFileInfo info(localPath);
+    if (types.contains(info.suffix(), Qt::CaseInsensitive))
+        return true;
+#ifndef Q_OS_WIN
+    // Downloads keep the server's executable bit.
+    return info.isExecutable();
+#else
+    return false;
+#endif
+}
+
+// A plain text editor for files that must not go to the system's default
+// program, or empty if none is found.
+static QStringList plainTextEditor()
+{
+#ifdef Q_OS_WIN
+    return {QStringLiteral("notepad.exe")};
+#else
+    for (const char *name : {"gnome-text-editor", "gedit", "kate", "kwrite", "mousepad", "xed",
+                             "pluma", "featherpad", "leafpad", "code"}) {
+        const QString program = QStandardPaths::findExecutable(QString::fromLatin1(name));
+        if (!program.isEmpty())
+            return {program};
+    }
+    return {};
+#endif
+}
+
+void SftpPanel::openEditor(const QString &localPath)
+{
+    const auto editor = loadSftpPreferences().editor;
+    QStringList arguments = QProcess::splitCommand(editor);
+    if (editor.isEmpty()) {
+        if (!couldRun(localPath)) {
+            if (!QDesktopServices::openUrl(QUrl::fromLocalFile(localPath)))
+                showMessage(QStringLiteral("No program is set to open this kind of file. Choose an "
+                                           "editor in Preferences → Files and transfers."), true);
+            return;
+        }
+        arguments = plainTextEditor();
+        if (arguments.isEmpty()) {
+            showMessage(QStringLiteral("%1 could run if opened with its usual program, so it is "
+                                       "only opened in a text editor. Choose one in Preferences "
+                                       "→ Files and transfers.").arg(QFileInfo(localPath).fileName()), true);
+            return;
+        }
+    }
+    const QString program = arguments.takeFirst();
+    arguments.append(localPath);
+    if (!QProcess::startDetached(program, arguments))
+        showMessage(QStringLiteral("Could not start the editor \"%1\".").arg(program), true);
+}
+
+void SftpPanel::uploadEdited(const QString &localPath)
+{
+    const auto remote = m_editedFiles.value(localPath);
+    if (remote.isEmpty() || !QFileInfo::exists(localPath))
+        return;
+    if (!m_session || !m_ready) {
+        showMessage(QStringLiteral("Not connected: %1 was not saved on the server.").arg(remote), true);
+        return;
+    }
+    const int slash = remote.lastIndexOf(QLatin1Char('/'));
+    const int jobId = m_session->upload({localPath}, slash > 0 ? remote.left(slash)
+                                                                : QStringLiteral("/"));
+    m_jobUploads.insert(jobId, true);
+    m_editUploads.insert(jobId, remote);
 }
 
 void SftpPanel::downloadSelected()
@@ -741,6 +959,36 @@ void SftpPanel::askConflict(const QString &path, quint64 existingSize,
                             const QDateTime &existingModified, quint64 newSize,
                             const QDateTime &newModified, bool upload)
 {
+    // Saving an edited file replaces the server's copy, unless that changed
+    // since it was downloaded or last saved.
+    if (upload && m_session && !m_editUploads.isEmpty()
+        && std::find(m_editUploads.cbegin(), m_editUploads.cend(), path) != m_editUploads.cend()) {
+        const FileVersion remote{existingSize, existingModified.toSecsSinceEpoch()};
+        m_editUploading.insert(path, {newSize, newModified.toSecsSinceEpoch()});
+        if (m_editVersions.value(path) == remote) {
+            m_session->resolveConflict(SftpConflictResolution::Overwrite, false);
+            return;
+        }
+        QMessageBox box(this);
+        box.setIcon(QMessageBox::Warning);
+        box.setWindowTitle(QStringLiteral("File Changed on the Server"));
+        box.setText(QStringLiteral("%1 was changed on the server since you opened it.").arg(path));
+        box.setInformativeText(QStringLiteral("Saving now would replace those changes."));
+        auto *overwrite = box.addButton(QStringLiteral("Overwrite"), QMessageBox::DestructiveRole);
+        auto *copy = box.addButton(QStringLiteral("Save as a Copy"), QMessageBox::AcceptRole);
+        box.addButton(QStringLiteral("Don't Save"), QMessageBox::RejectRole);
+        box.setDefaultButton(copy);
+        box.exec();
+        if (!m_session)
+            return;
+        m_session->resolveConflict(box.clickedButton() == overwrite ? SftpConflictResolution::Overwrite
+                                   : box.clickedButton() == copy    ? SftpConflictResolution::Rename
+                                                                    : SftpConflictResolution::Skip,
+                                   false);
+        if (box.clickedButton() != overwrite)
+            m_editUploading.remove(path);
+        return;
+    }
     // A fixed answer from Preferences applies to the whole transfer.
     const auto policy = loadSftpPreferences().conflict;
     if (policy != QStringLiteral("ask") && m_session) {
@@ -794,6 +1042,42 @@ void SftpPanel::finishTransfer(int jobId, bool upload, const QString &destinatio
     m_jobUploads.remove(jobId);
     if (m_jobUploads.isEmpty())
         resetTransfers();
+    if (const auto local = m_editDownloads.take(jobId); !local.isEmpty()) {
+        if (errors.isEmpty() && !cancelled && QFileInfo::exists(local)) {
+            // Downloads keep the server's modification time.
+            const QFileInfo info(local);
+            m_editVersions.insert(m_editedFiles.value(local),
+                                  {quint64(info.size()), info.lastModified().toSecsSinceEpoch()});
+            m_watcher->addPath(local);
+            openEditor(local);
+            showMessage(QStringLiteral("Editing %1. Each save uploads it again.")
+                            .arg(m_editedFiles.value(local)), false);
+        } else {
+            m_editedFiles.remove(local);
+            showMessage(QStringLiteral("Could not open %1 for editing: %2")
+                            .arg(QFileInfo(local).fileName(), errors.value(0)), true);
+        }
+        return;
+    }
+    if (const auto remote = m_editUploads.take(jobId); !remote.isEmpty()) {
+        const bool saved = errors.isEmpty() && !cancelled && skipped == 0;
+        // The server now has the uploaded copy (it keeps our modification time).
+        if (saved && m_editUploading.contains(remote))
+            m_editVersions.insert(remote, m_editUploading.take(remote));
+        if (destination == m_currentPath)
+            refresh();
+        if (skipped > 0 && errors.isEmpty()) {
+            showMessage(QStringLiteral("Not saved on the server: %1 changed there.").arg(remote), true);
+            return;
+        }
+        showMessage(saved ? QStringLiteral("Saved %1 on the server.").arg(remote)
+                          : QStringLiteral("Could not save %1 on the server: %2")
+                                .arg(remote, errors.value(0)),
+                    !saved);
+        if (!saved && !errors.isEmpty())
+            QMessageBox::warning(this, QStringLiteral("Save Failed"), errors.value(0));
+        return;
+    }
 
     QString summary = QStringLiteral("%1 %2 %3 to %4")
                           .arg(upload ? QStringLiteral("Uploaded") : QStringLiteral("Downloaded"))

@@ -62,6 +62,9 @@ public:
     void setLocalClipboard(const QString &text);
     // Asks the server for a new desktop size (when resizeSupported()).
     void requestDesktopSize(int width, int height);
+    // Asks the server for the whole screen again (a non-incremental update),
+    // for servers that miss some changes and leave stale areas.
+    void requestFullUpdate();
 
     // Called from the worker thread; waits for the user's answer.
     bool askCredentials(QString *username, QString *password, bool needUsername);
@@ -86,7 +89,7 @@ private:
 
     struct InputEvent
     {
-        enum Type { Key, Pointer, Clipboard, Resize } type;
+        enum Type { Key, Pointer, Clipboard, Resize, Refresh } type;
         quint32 code = 0;
         bool down = false;
         int x = 0;
@@ -98,7 +101,8 @@ private:
     void run(VncConnectionSettings settings);
     void queueInput(InputEvent event);
     void flushInput(void *client);
-    void allocateFrame(int width, int height, int depth);
+    // False when the memory could not be had.
+    bool allocateFrame(int width, int height, int depth);
     void copyFrame(const unsigned char *buffer, int stride, const QRect &area);
 
     std::thread m_thread;

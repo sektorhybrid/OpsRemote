@@ -327,6 +327,9 @@ void QTermWidget::init(int startnow)
     connect(m_impl->m_session, SIGNAL(silence()), this, SIGNAL(silence()));
     connect(m_impl->m_session, &Session::profileChangeCommandReceived, this, &QTermWidget::profileChanged);
     connect(m_impl->m_session, &Session::receivedData, this, &QTermWidget::receivedData);
+    // OpsRemote addition: typing, whatever the session's input goes to.
+    connect(m_impl->m_session->emulation(), SIGNAL(sendData(const char *,int)),
+            this, SIGNAL(userTyped(const char *,int)));
 
     // That's OK, FilterChain's dtor takes care of filters.
     // OSC-8 hyperlinks take priority over regex URL detection when both match.

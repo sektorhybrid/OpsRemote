@@ -2,6 +2,8 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "rdpoptions.h"
+#include "availabilitynote.h"
+#include "localresources.h"
 #include "appdirs.h"
 
 #include <QCheckBox>
@@ -9,6 +11,10 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QFormLayout>
+#include <QStandardItemModel>
+#include <QPushButton>
+#include <QLabel>
+#include <QHBoxLayout>
 #include <QGroupBox>
 #include <QGuiApplication>
 #include <QInputMethod>
@@ -53,7 +59,9 @@ bool RdpOptions::isEmpty() const
            && adminSession < 0 && clipboardText < 0 && clipboardFiles < 0
            && graphicsPipeline < 0 && highDpi < 0 && allMonitors < 0 && gateway.isEmpty()
            && gatewayUser.isEmpty() && keyboardLayout.isEmpty() && autoReconnect < 0
-           && askCredentials < 0 && startProgram.isEmpty() && startFolder.isEmpty();
+           && askCredentials < 0 && startProgram.isEmpty() && startFolder.isEmpty()
+           && audio.isEmpty() && microphone < 0 && drives.isEmpty() && driveFolders.isEmpty()
+           && printers < 0 && smartCards < 0;
 }
 
 RdpOptions RdpOptions::overriddenBy(const RdpOptions &session) const
@@ -89,6 +97,19 @@ RdpOptions RdpOptions::overriddenBy(const RdpOptions &session) const
         result.startProgram = session.startProgram;
         result.startFolder = session.startFolder;
     }
+    if (!session.audio.isEmpty())
+        result.audio = session.audio;
+    if (session.microphone >= 0)
+        result.microphone = session.microphone;
+    // The folders belong to the "chosen folders" they are set with.
+    if (!session.drives.isEmpty()) {
+        result.drives = session.drives;
+        result.driveFolders = session.driveFolders;
+    }
+    if (session.printers >= 0)
+        result.printers = session.printers;
+    if (session.smartCards >= 0)
+        result.smartCards = session.smartCards;
     // The gateway user belongs to the gateway it is set with.
     if (!session.gateway.isEmpty()) {
         result.gateway = session.gateway;
@@ -115,7 +136,29 @@ RdpOptions RdpOptions::builtIn()
     options.keyboardLayout = QStringLiteral("auto");
     options.autoReconnect = 1;
     options.askCredentials = 1;
+    // Sound and printers are off unless chosen (globally or per session).
+    options.audio = QStringLiteral("off");
+    options.microphone = 0;
+    options.drives = QStringLiteral("none");
+    options.printers = 0;
+    options.smartCards = 0;
     return options;
+}
+
+RdpChoices rdpAudioChoices()
+{
+    return {{QStringLiteral("local"), QStringLiteral("Play on this computer")},
+            {QStringLiteral("remote"), QStringLiteral("Leave on the remote computer")},
+            {QStringLiteral("off"), QStringLiteral("Don't play")}};
+}
+
+RdpChoices rdpDriveChoices()
+{
+    return {{QStringLiteral("none"), QStringLiteral("None")},
+            {QStringLiteral("shared"), QStringLiteral("The package's shared folder")},
+            {QStringLiteral("home"), QStringLiteral("My home folder")},
+            {QStringLiteral("all"), QStringLiteral("All local drives")},
+            {QStringLiteral("custom"), QStringLiteral("Chosen folders")}};
 }
 
 RdpChoices rdpResolutionChoices()
@@ -271,6 +314,13 @@ RdpOptions rdpOptionsFromYaml(const YAML::Node &node)
         readSwitch("ask_credentials", options.askCredentials);
         readText("start_program", options.startProgram);
         readText("start_folder", options.startFolder);
+        readChoice("audio", rdpAudioChoices(), options.audio);
+        readSwitch("microphone", options.microphone);
+        readChoice("drives", rdpDriveChoices(), options.drives);
+        if (node["drive_folders"])
+            options.driveFolders = QString::fromStdString(node["drive_folders"].as<std::string>()).trimmed().left(4000);
+        readSwitch("printers", options.printers);
+        readSwitch("smart_cards", options.smartCards);
     } catch (const YAML::Exception &) {
         // Keep what was read; invalid values use the defaults.
     }
@@ -313,6 +363,18 @@ void rdpOptionsToYaml(const RdpOptions &options, YAML::Node &node)
         node["start_program"] = options.startProgram.toStdString();
     if (!options.startFolder.isEmpty())
         node["start_folder"] = options.startFolder.toStdString();
+    if (!options.audio.isEmpty())
+        node["audio"] = options.audio.toStdString();
+    if (options.microphone >= 0)
+        node["microphone"] = options.microphone == 1;
+    if (!options.drives.isEmpty())
+        node["drives"] = options.drives.toStdString();
+    if (!options.driveFolders.isEmpty())
+        node["drive_folders"] = options.driveFolders.toStdString();
+    if (options.printers >= 0)
+        node["printers"] = options.printers == 1;
+    if (options.smartCards >= 0)
+        node["smart_cards"] = options.smartCards == 1;
 }
 
 RdpOptions loadRdpDefaults()
@@ -453,6 +515,35 @@ RdpOptionsEditor::RdpOptionsEditor(const RdpOptions &value, bool withDefault,
     m_startFolder = makeText(value.startFolder, defaults.startFolder, QStringLiteral("Default"),
                              QStringLiteral("The folder the program starts in."));
 
+    m_audio = makeBox(rdpAudioChoices(), value.audio, defaults.audio.isEmpty() ? QStringLiteral("off") : defaults.audio);
+    m_audio->setToolTip(QStringLiteral("Where the remote computer's sound plays."));
+    m_microphone = makeSwitch(QStringLiteral("Use this computer's microphone"),
+                              QStringLiteral("Programs on the remote computer can record from it "
+                                             "(calls, dictation)."),
+                              value.microphone, m_defaults.microphone);
+    m_drives = makeBox(rdpDriveChoices(), value.drives, defaults.drives.isEmpty() ? QStringLiteral("none") : defaults.drives);
+    m_drives->setToolTip(QStringLiteral("Local folders that appear as drives in the remote "
+                                        "session's File Explorer (\\tsclient)."));
+    m_driveFolders = makeText(value.driveFolders, defaults.driveFolders,
+                              QStringLiteral("Folders, separated by ;"),
+                              QStringLiteral("For \"Chosen folders\": e.g. C:\\Data;D:\\ISO or "
+                                             "/home/me/work;/mnt/usb"));
+    m_driveFolders->setMaxLength(4000);
+    const auto updateFolders = [this] {
+        const QString choice = m_drives->currentData().toString();
+        m_driveFolders->setEnabled(choice == QStringLiteral("custom")
+                                   || (choice.isEmpty() && m_defaults.drives == QStringLiteral("custom")));
+    };
+    connect(m_drives, &QComboBox::currentIndexChanged, this, updateFolders);
+    updateFolders();
+    m_printers = makeSwitch(QStringLiteral("Use this computer's printers"),
+                            QStringLiteral("Local printers appear in the remote session."),
+                            value.printers, m_defaults.printers);
+    m_smartCards = makeSwitch(QStringLiteral("Use this computer's smart cards"),
+                              QStringLiteral("For smart-card log-on and signing on the remote "
+                                             "computer. On Linux, needs the pcscd service."),
+                              value.smartCards, m_defaults.smartCards);
+
     // Three sections, so the many options stay easy to scan.
     // One tab per section keeps the session window short.
     auto *layout = new QVBoxLayout(this);
@@ -476,6 +567,25 @@ RdpOptionsEditor::RdpOptionsEditor(const RdpOptions &value, bool withDefault,
     resources->addRow(QStringLiteral("Keyboard layout:"), m_keyboard);
     resources->addRow(QString(), m_clipboardText);
     resources->addRow(QString(), m_clipboardFiles);
+    resources->addRow(QStringLiteral("Remote audio:"), m_audio);
+    resources->addRow(QString(), m_microphone);
+    addAvailabilityRow(resources, &LocalResources::soundProblem, [this](bool available) {
+        // Playing here and the microphone need a sound server; leaving the
+        // sound on the remote computer does not.
+        if (auto *model = qobject_cast<QStandardItemModel *>(m_audio->model())) {
+            if (auto *item = model->item(m_audio->findData(QStringLiteral("local"))))
+                item->setEnabled(available);
+        }
+        m_microphone->setEnabled(available);
+    });
+    resources->addRow(QStringLiteral("Drives:"), m_drives);
+    resources->addRow(QStringLiteral("Folders:"), m_driveFolders);
+    resources->addRow(QString(), m_printers);
+    addAvailabilityRow(resources, &LocalResources::printerProblem,
+                       [this](bool available) { m_printers->setEnabled(available); });
+    resources->addRow(QString(), m_smartCards);
+    addAvailabilityRow(resources, &LocalResources::smartCardProblem,
+                       [this](bool available) { m_smartCards->setEnabled(available); });
     auto *connection = section(QStringLiteral("Connection"));
     connection->addRow(QStringLiteral("Security:"), m_security);
     connection->addRow(QString(), m_askCredentials);
@@ -485,6 +595,14 @@ RdpOptionsEditor::RdpOptionsEditor(const RdpOptions &value, bool withDefault,
     connection->addRow(QStringLiteral("Start in folder:"), m_startFolder);
     connection->addRow(QStringLiteral("RD Gateway:"), m_gateway);
     connection->addRow(QStringLiteral("Gateway user:"), m_gatewayUser);
+}
+
+// Under an option that needs something outside OpsRemote: why it is
+// unavailable, with Check again (the option is disabled meanwhile).
+void RdpOptionsEditor::addAvailabilityRow(QFormLayout *form, QString (*problem)(),
+                                          const std::function<void(bool)> &apply)
+{
+    form->addRow(QString(), new AvailabilityNote(problem, apply, this));
 }
 
 RdpOptions RdpOptionsEditor::value() const
@@ -513,5 +631,11 @@ RdpOptions RdpOptionsEditor::value() const
     options.askCredentials = switchValue(m_askCredentials, m_defaults.askCredentials);
     options.startProgram = m_startProgram->text().trimmed();
     options.startFolder = m_startFolder->text().trimmed();
+    options.audio = m_audio->currentData().toString();
+    options.microphone = switchValue(m_microphone, m_defaults.microphone);
+    options.drives = m_drives->currentData().toString();
+    options.driveFolders = m_driveFolders->text().trimmed();
+    options.printers = switchValue(m_printers, m_defaults.printers);
+    options.smartCards = switchValue(m_smartCards, m_defaults.smartCards);
     return options;
 }

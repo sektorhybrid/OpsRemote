@@ -2,6 +2,8 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "sshoptions.h"
+#include "availabilitynote.h"
+#include "localresources.h"
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -25,6 +27,14 @@ SshPreferences SshOptions::appliedTo(SshPreferences preferences) const
         preferences.compression = compression == 1;
     if (tryPublicKeys >= 0)
         preferences.tryPublicKeys = tryPublicKeys == 1;
+    if (forwardAgent >= 0)
+        preferences.forwardAgent = forwardAgent == 1;
+    if (followTerminalFolder >= 0)
+        preferences.followTerminalFolder = followTerminalFolder == 1;
+    if (forwardX11 >= 0)
+        preferences.forwardX11 = forwardX11 == 1;
+    if (!fileTransfer.isEmpty())
+        preferences.fileTransfer = fileTransfer;
     if (!identityFile.isEmpty())
         preferences.identityFile = identityFile;
     if (autoReconnect >= 0)
@@ -60,7 +70,15 @@ SshOptions sshOptionsFromYaml(const YAML::Node &node)
         number("keepalive_seconds", options.keepaliveSeconds, 0, 3600);
         flag("compression", options.compression);
         flag("try_public_keys", options.tryPublicKeys);
+        flag("forward_agent", options.forwardAgent);
+        flag("follow_terminal_folder", options.followTerminalFolder);
+        flag("forward_x11", options.forwardX11);
         text("identity_file", options.identityFile);
+        text("file_transfer", options.fileTransfer);
+        if (!options.fileTransfer.isEmpty()
+            && options.fileTransfer != QStringLiteral("auto") && options.fileTransfer != QStringLiteral("sftp")
+            && options.fileTransfer != QStringLiteral("scp"))
+            options.fileTransfer.clear();
         flag("auto_reconnect", options.autoReconnect);
         number("reconnect_delay", options.reconnectDelay, 1, 600);
         number("reconnect_attempts", options.reconnectAttempts, 0, 100);
@@ -81,6 +99,14 @@ void sshOptionsToYaml(const SshOptions &options, YAML::Node &node)
         node["compression"] = options.compression == 1;
     if (options.tryPublicKeys >= 0)
         node["try_public_keys"] = options.tryPublicKeys == 1;
+    if (options.forwardAgent >= 0)
+        node["forward_agent"] = options.forwardAgent == 1;
+    if (options.followTerminalFolder >= 0)
+        node["follow_terminal_folder"] = options.followTerminalFolder == 1;
+    if (options.forwardX11 >= 0)
+        node["forward_x11"] = options.forwardX11 == 1;
+    if (!options.fileTransfer.isEmpty())
+        node["file_transfer"] = options.fileTransfer.toStdString();
     if (!options.identityFile.isEmpty())
         node["identity_file"] = options.identityFile.toStdString();
     if (options.autoReconnect >= 0)
@@ -91,6 +117,13 @@ void sshOptionsToYaml(const SshOptions &options, YAML::Node &node)
         node["reconnect_attempts"] = options.reconnectAttempts;
     if (!options.terminalType.isEmpty())
         node["terminal_type"] = options.terminalType.toStdString();
+}
+
+QList<QPair<QString, QString>> sshFileTransferChoices()
+{
+    return {{QStringLiteral("auto"), QStringLiteral("SFTP, or SCP if the server has no SFTP")},
+            {QStringLiteral("sftp"), QStringLiteral("SFTP only")},
+            {QStringLiteral("scp"), QStringLiteral("SCP only")}};
 }
 
 SshOptionsEditor::SshOptionsEditor(const SshOptions &value, const SshPreferences &defaults,
@@ -131,6 +164,32 @@ SshOptionsEditor::SshOptionsEditor(const SshOptions &value, const SshPreferences
     m_tryPublicKeys = makeSwitch(QStringLiteral("Log on with keys from ~/.ssh and the SSH agent"),
                                  QStringLiteral("Off: only a password or the key file below."),
                                  value.tryPublicKeys, defaults.tryPublicKeys);
+    m_forwardAgent = makeSwitch(QStringLiteral("Forward the SSH agent (ssh -A)"),
+                                QStringLiteral("Lets this server use your local keys to log on "
+                                               "further. Only for servers you trust: their "
+                                               "administrators can use your keys while you are "
+                                               "connected."),
+                                value.forwardAgent, defaults.forwardAgent);
+    m_followTerminalFolder = makeSwitch(
+        QStringLiteral("Files pane follows the terminal's folder"),
+        QStringLiteral("After each command, the file browser shows the folder the shell is in."),
+        value.followTerminalFolder, defaults.followTerminalFolder);
+    m_forwardX11 = makeSwitch(QStringLiteral("Forward X11 (ssh -Y)"),
+                              QStringLiteral("Graphical programs started on the server show on "
+                                             "this computer. Needs a local X server (on Windows: "
+                                             "VcXsrv or Xming). Only for servers you trust."),
+                              value.forwardX11, defaults.forwardX11);
+    m_fileTransfer = new QComboBox(this);
+    for (const auto &[choice, label] : sshFileTransferChoices()) {
+        if (choice == defaults.fileTransfer)
+            m_fileTransfer->insertItem(0, QStringLiteral("Default (%1)").arg(label), QString());
+    }
+    for (const auto &[choice, label] : sshFileTransferChoices())
+        m_fileTransfer->addItem(label, choice);
+    m_fileTransfer->setCurrentIndex(qMax(0, m_fileTransfer->findData(value.fileTransfer)));
+    m_fileTransfer->setToolTip(QStringLiteral("How the file browser reaches the server's files. SCP "
+                                              "suits devices without SFTP (routers, switches, "
+                                              "appliances); it lists folders with shell commands."));
     m_identityFile = new QLineEdit(value.identityFile, this);
     m_identityFile->setPlaceholderText(
         defaults.identityFile.isEmpty()
@@ -173,6 +232,14 @@ SshOptionsEditor::SshOptionsEditor(const SshOptions &value, const SshPreferences
     form->addRow(QStringLiteral("Keepalive every:"), m_keepalive);
     form->addRow(QString(), m_compression);
     form->addRow(QString(), m_tryPublicKeys);
+    form->addRow(QString(), m_forwardAgent);
+    form->addRow(QStringLiteral("File transfer:"), m_fileTransfer);
+    form->addRow(QString(), m_followTerminalFolder);
+    form->addRow(QString(), m_forwardX11);
+    // Off stays possible when there is no X server.
+    form->addRow(QString(), new AvailabilityNote(&LocalResources::x11Problem, [this](bool available) {
+        m_forwardX11->setEnabled(available || m_forwardX11->isChecked());
+    }, this));
     form->addRow(QStringLiteral("Private key:"), identityRow);
     form->addRow(QString(), m_autoReconnect);
     form->addRow(QStringLiteral("Reconnect after:"), m_reconnectDelay);
@@ -197,8 +264,12 @@ SshOptions SshOptionsEditor::value() const
     };
     options.compression = flag(m_compression, m_defaults.compression);
     options.tryPublicKeys = flag(m_tryPublicKeys, m_defaults.tryPublicKeys);
+    options.forwardAgent = flag(m_forwardAgent, m_defaults.forwardAgent);
+    options.followTerminalFolder = flag(m_followTerminalFolder, m_defaults.followTerminalFolder);
+    options.forwardX11 = flag(m_forwardX11, m_defaults.forwardX11);
     options.autoReconnect = flag(m_autoReconnect, m_defaults.autoReconnect);
     options.identityFile = m_identityFile->text().trimmed();
+    options.fileTransfer = m_fileTransfer->currentData().toString();
     const int index = m_terminalType->currentIndex();
     options.terminalType = index >= 0 && m_terminalType->itemText(index) == m_terminalType->currentText()
                                ? m_terminalType->itemData(index).toString()

@@ -32,6 +32,8 @@ QT_PLUGINS=(
     imageformats/qico.dll
     imageformats/qgif.dll
     imageformats/qjpeg.dll
+    tls/qopensslbackend.dll
+    tls/qschannelbackend.dll
 )
 
 # Prints the DLLs a PE file imports.
@@ -77,6 +79,7 @@ fi
 cp "${BUILD_DIR}/opsremote.exe" "${BUNDLE}/OpsRemote.exe"
 cp "${BUILD_DIR}/third_party/qtermwidget/libqtermwidget6.dll" "${BUNDLE}/"
 cp -r "${BUILD_DIR}/data/qtermwidget" "${BUILD_DIR}/data/color-schemes" "${BUILD_DIR}/data/icons" \
+    "${BUILD_DIR}/data/Kvantum" \
     "${BUNDLE}/data/"
 
 plugin_files=()
@@ -107,6 +110,19 @@ if [[ -f /opt/portable-tools/zstd.exe ]]; then
     install -D -m 0755 /opt/portable-tools/zstd.exe "${DIST_DIR}/tools/zstd-windows-x86_64.exe"
     x86_64-w64-mingw32-strip --strip-unneeded "${DIST_DIR}/tools/zstd-windows-x86_64.exe"
 fi
+
+# The package's native launcher (OpsRemote.exe, with the icon and without a
+# console window; legacy\OpsRemote.bat stays as a fallback). Linked statically, so
+# it needs no DLLs of its own.
+echo "==> Building the Windows launcher"
+mkdir -p "${DIST_DIR}/tools"
+launcher_dir="${PROJECT_DIR}/packaging/launchers/native"
+x86_64-w64-mingw32-windres "${launcher_dir}/launcher-windows.rc" \
+    -O coff -o "${BUILD_DIR}/launcher-windows-res.o"
+x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -municode -mwindows -static \
+    -o "${DIST_DIR}/tools/launcher-windows-x86_64.exe" \
+    "${launcher_dir}/launcher-windows.c" "${BUILD_DIR}/launcher-windows-res.o" -lshell32
+x86_64-w64-mingw32-strip --strip-unneeded "${DIST_DIR}/tools/launcher-windows-x86_64.exe"
 
 echo "==> Checking that every DLL is bundled or a Windows system DLL"
 problems=0

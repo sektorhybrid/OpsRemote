@@ -14,6 +14,10 @@ RUN dnf -y install epel-release dnf-plugins-core \
         xcb-util-cursor openssl-devel zlib-devel ninja-build \
     && dnf clean all
 
+# Sound (PulseAudio, which PipeWire also serves), printing (CUPS), and smart
+# cards (PC/SC) for remote desktop redirection.
+RUN dnf -y install pulseaudio-libs-devel cups-devel pcsc-lite-devel patchelf && dnf clean all
+
 # FreeRDP 3 (Apache-2.0) for remote desktop tabs: the core and client libraries
 # with WinPR and the built-in channels, without client programs, servers, or
 # media codecs. The pinned
@@ -33,8 +37,8 @@ RUN curl -fsSLo /tmp/freerdp.tar.gz \
         -DWITH_CHANNELS=ON -DWITH_CLIENT_CHANNELS=ON -DCHANNEL_URBDRC=OFF -DCHANNEL_TSMF=OFF \
         -DWITH_WINPR_TOOLS=OFF -DWITH_FFMPEG=OFF -DWITH_SWSCALE=OFF \
         -DWITH_DSP_FFMPEG=OFF -DWITH_CAIRO=OFF -DWITH_X11=OFF -DWITH_WAYLAND=OFF -DWITH_FUSE=OFF \
-        -DWITH_PCSC=OFF -DWITH_SMARTCARD_EMULATE=OFF -DWITH_KRB5=OFF -DWITH_CUPS=OFF \
-        -DWITH_PULSE=OFF -DWITH_ALSA=OFF -DWITH_OSS=OFF -DWITH_OPENH264=OFF \
+        -DWITH_PCSC=ON -DWITH_SMARTCARD_EMULATE=OFF -DWITH_KRB5=OFF -DWITH_CUPS=ON \
+        -DWITH_PULSE=ON -DWITH_ALSA=OFF -DWITH_OSS=OFF -DWITH_OPENH264=OFF \
         -DWITH_JSON_DISABLED=ON -DWITH_AAD=OFF -DWITH_SSO_MIB=OFF -DWITH_WEBVIEW=OFF \
         -DWITH_URIPARSER=OFF -DWITH_LIBSYSTEMD=OFF -DUSE_UNWIND=OFF -DWITH_UNICODE_BUILTIN=ON \
         -DWITH_FDK_AAC=OFF -DWITH_LAME=OFF -DWITH_FAAD2=OFF -DWITH_FAAC=OFF -DWITH_SOXR=OFF \
@@ -103,3 +107,11 @@ RUN set -e; \
     take "https://github.com/FreeRDP/FreeRDP/releases/download/${FREERDP_VERSION}/freerdp-${FREERDP_VERSION}.tar.gz" "${FREERDP_SHA256}" FreeRDP; \
     take "https://github.com/facebook/zstd/releases/download/v${ZSTD_VERSION}/zstd-${ZSTD_VERSION}.tar.gz" "${ZSTD_SHA256}" zstd; \
     take "https://github.com/LibVNC/libvncserver/archive/refs/tags/LibVNCServer-${LIBVNC_VERSION}.tar.gz" "${LIBVNC_SHA256}" libvncserver
+
+# Qt SVG headers for the built-in Kvantum style (a separate step, so the
+# layers above stay cached).
+RUN dnf -y install qt6-qtsvg-devel && dnf clean all
+
+# Qt Serial Port for serial console sessions (a separate step, so the
+# layers above stay cached).
+RUN dnf -y install qt6-qtserialport-devel && dnf clean all

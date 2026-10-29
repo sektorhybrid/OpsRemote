@@ -54,6 +54,7 @@ QT_PLUGINS=(
     imageformats/libqico.so
     imageformats/libqgif.so
     imageformats/libqjpeg.so
+    tls/libqopensslbackend.so
 )
 
 # Libraries that must come from the target system and are never bundled:
@@ -105,6 +106,12 @@ bundle_dependencies() {
             fi
             cp -L "${path}" "${BUNDLE}/lib/${name}"
             chmod 0755 "${BUNDLE}/lib/${name}"
+            # A built-in absolute search path (libpulse's points to
+            # /usr/lib64/pulseaudio) would find the system's copies first:
+            # the bundle's lib/ takes its place.
+            if patchelf --print-rpath "${BUNDLE}/lib/${name}" 2>/dev/null | grep -q '^/\|:/'; then
+                patchelf --set-rpath '$ORIGIN' "${BUNDLE}/lib/${name}"
+            fi
         done < <(ldd "${elf}" | awk '/=>/ { sub(".*/", "", $1); print $1, $3 }')
     done
 }
@@ -124,7 +131,7 @@ for folder in settings data; do
     fi
 done
 rm -rf "${saved_state}/data/qtermwidget" "${saved_state}/data/color-schemes" \
-    "${saved_state}/data/icons"
+    "${saved_state}/data/icons" "${saved_state}/data/Kvantum"
 rm -rf "${BUNDLE}"
 mkdir -p "${BUNDLE}/lib"
 for folder in settings data; do
@@ -138,6 +145,7 @@ install -m 0755 "${BUILD_DIR}/opsremote" "${BUNDLE}/opsremote"
 cp -L "${BUILD_DIR}/third_party/qtermwidget/libqtermwidget6.so.2" "${BUNDLE}/lib/"
 # Only the shipped terminal resources; never sessions, settings, or vaults.
 cp -r "${BUILD_DIR}/data/qtermwidget" "${BUILD_DIR}/data/color-schemes" "${BUILD_DIR}/data/icons" \
+    "${BUILD_DIR}/data/Kvantum" \
     "${BUNDLE}/data/"
 
 qt_plugin_dir="$(query_qt QT_INSTALL_PLUGINS)"
@@ -172,6 +180,13 @@ strip --strip-unneeded "${BUNDLE}/opsremote" "${BUNDLE}/lib/libqtermwidget6.so.2
 if [[ -x /opt/portable-tools/zstd ]]; then
     install -D -m 0755 /opt/portable-tools/zstd "${DIST_DIR}/tools/zstd-linux-x86_64"
 fi
+
+# The package's native launcher (OpsRemote; legacy/OpsRemote.sh stays as a fallback).
+echo "==> Building the Linux launcher"
+mkdir -p "${DIST_DIR}/tools"
+gcc -O2 -Wall -Wextra -o "${DIST_DIR}/tools/launcher-linux-x86_64" \
+    "${PROJECT_DIR}/packaging/launchers/native/launcher-linux.c"
+strip --strip-unneeded "${DIST_DIR}/tools/launcher-linux-x86_64"
 
 cat > "${BUNDLE}/qt.conf" <<'EOF'
 [Paths]

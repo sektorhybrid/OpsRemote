@@ -309,6 +309,13 @@ signals:
      */
     void sendData(const char *,int);
 
+    /**
+     * OpsRemote addition: emitted for everything typed or pasted into the
+     * terminal, also when it runs a local program in a pseudo-terminal
+     * (where sendData() is not emitted).
+     */
+    void userTyped(const char *,int);
+
     void profileChanged(const QString & profile);
 
     void titleChanged();

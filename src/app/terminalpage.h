@@ -12,10 +12,17 @@
 #include <QStringDecoder>
 #include <QWidget>
 
+#include <memory>
+
 class QAction;
+class QMenu;
 class QFile;
+class QTimer;
+class JumpChain;
 class SessionEndedPanel;
+class CastRecorder;
 class SftpPanel;
+class StreamConnection;
 class QTermWidget;
 
 class TerminalPage final : public QWidget
@@ -25,8 +32,14 @@ class TerminalPage final : public QWidget
 public:
     // Starts a local shell in a PTY.
     explicit TerminalPage(const TerminalAppearance &appearance, QWidget *parent = nullptr);
+    // Runs a local program in a PTY instead of the shell (mosh, for example).
+    TerminalPage(const QString &program, const QStringList &arguments,
+                 const TerminalAppearance &appearance, QWidget *parent = nullptr);
     // Connects to an SSH server and runs its login shell in this terminal.
     TerminalPage(const SshConnectionSettings &settings, const TerminalAppearance &appearance,
+                 QWidget *parent = nullptr);
+    // Shows a Telnet or serial connection; the page takes ownership.
+    TerminalPage(StreamConnection *connection, const TerminalAppearance &appearance,
                  QWidget *parent = nullptr);
     ~TerminalPage() override;
 
@@ -41,8 +54,17 @@ public:
     // Whether an SSH tab has a live connection (local shells count as connected).
     bool isConnected() const;
     const SshConnectionSettings &sshSettings() const { return m_sshSettings; }
+    // The SSH connection of this tab (tunnels can use it); nullptr when none.
+    SshSession *sshSession() const { return m_ssh; }
+    // Whether the Files pane follows the shell's folder; switched for this
+    // tab only (the session's saved setting is not changed).
+    bool followsFolder() const;
+    void setFollowsFolder(bool on);
     // Starts or stops writing output to a log file; name is used in its file name.
     void setLogging(const LoggingPreferences &preferences, const QString &name);
+    // Records this tab as an asciinema .cast in the log folder.
+    void setRecording(bool on);
+    bool isRecording() const;
     void setHighlightRules(const QList<HighlightRule> &rules);
     // Types text as if the user did (snippets).
     void typeText(const QString &text);
@@ -50,6 +72,10 @@ public:
     void sendInput(const QByteArray &data);
     // Zooms this many steps from the configured font size (presentation mode).
     void setZoomSteps(int steps);
+    // Multi-exec: typing into one chosen terminal goes to all chosen ones.
+    // A chosen terminal has an accent bar along its top.
+    void setMultiExecTarget(bool on);
+    bool isMultiExecTarget() const { return m_multiExecTarget; }
 
 signals:
     void statusMessage(const QString &message);
@@ -60,11 +86,19 @@ signals:
     void userInput(const QByteArray &data);
     // The user asked to close this tab after its SSH session ended.
     void closeRequested();
+    // The terminal's own menu turned multi-exec on or off for it.
+    void multiExecToggled(bool on);
+    // The terminal's own menu: a new pane beside it, or the same session in
+    // a new tab.
+    // Asks MainWindow to add Split Right ▸ / Split Down ▸ to this menu.
+    void splitMenuRequested(QMenu *menu);
+    void duplicateRequested();
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
+    void checkRecording();
     enum class InputMode { Idle, Prompt, Remote, Closed };
     enum class PromptPurpose { Username, Authentication };
 
@@ -84,11 +118,22 @@ private:
     void submitPromptLine();
     void cancelPrompts();
     void handleSshDisconnected(const QString &reason, bool error);
+    void startStream();
+    void handleStreamDisconnected(const QString &reason, bool error);
+    void reconnect();
     void logOutput(const QByteArray &data);
     QByteArray highlight(const QByteArray &data);
+    void followReportedFolder(const QByteArray &data);
+    void reportLocalTyping();
 
     QTermWidget *m_terminal = nullptr;
+    // SFTP follows the shell: asks the server shortly after each command,
+    // unless the shell reports its folder itself (OSC 7).
+    QTimer *m_folderTimer = nullptr;
+    bool m_folderReported = false;
     SessionEndedPanel *m_endedBar = nullptr;
+    QWidget *m_multiExecBar = nullptr;
+    bool m_multiExecTarget = false;
     QAction *m_zoomInAction = nullptr;
     QAction *m_zoomOutAction = nullptr;
     QAction *m_resetZoomAction = nullptr;
@@ -98,6 +143,8 @@ private:
     QAction *m_clearAction = nullptr;
     TerminalBehaviour m_behaviour;
     QFile *m_log = nullptr;
+    QString m_logName;
+    std::unique_ptr<CastRecorder> m_recorder;
     LoggingPreferences m_logging;
     bool m_logAtLineStart = true;
     struct CompiledRule
@@ -111,6 +158,8 @@ private:
     int m_reconnectAttempts = 0;
     bool m_wasConnected = false;
     SshSession *m_ssh = nullptr;
+    StreamConnection *m_stream = nullptr;
+    QPointer<JumpChain> m_jumpChain;
     QPointer<SftpPanel> m_sftpPanel;
     TerminalAppearance m_appearance;
     int m_wheelZoomDelta = 0;

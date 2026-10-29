@@ -1,0 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
+// The icon of opsremote.exe in Explorer, shortcuts, and the taskbar.
+IDI_ICON1 ICON "opsremote.ico"

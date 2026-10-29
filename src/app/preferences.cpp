@@ -139,6 +139,13 @@ SshPreferences loadSshPreferences()
     value.keepaliveSeconds = qBound(0, value.keepaliveSeconds, 3600);
     read(node, "compression", value.compression);
     read(node, "try_public_keys", value.tryPublicKeys);
+    read(node, "forward_agent", value.forwardAgent);
+    read(node, "follow_terminal_folder", value.followTerminalFolder);
+    read(node, "forward_x11", value.forwardX11);
+    readChoice(node, "file_transfer", value.fileTransfer,
+               {QStringLiteral("auto"), QStringLiteral("sftp"), QStringLiteral("scp")});
+    read(node, "agent", value.agent);
+    read(node, "proxy", value.proxy);
     read(node, "identity_file", value.identityFile);
     read(node, "auto_reconnect", value.autoReconnect);
     read(node, "reconnect_delay", value.reconnectDelay);
@@ -158,6 +165,12 @@ void saveSshPreferences(const SshPreferences &value)
     node["keepalive_seconds"] = value.keepaliveSeconds;
     node["compression"] = value.compression;
     node["try_public_keys"] = value.tryPublicKeys;
+    node["forward_agent"] = value.forwardAgent;
+    node["follow_terminal_folder"] = value.followTerminalFolder;
+    node["forward_x11"] = value.forwardX11;
+    node["file_transfer"] = value.fileTransfer.toStdString();
+    node["agent"] = value.agent.toStdString();
+    node["proxy"] = value.proxy.toStdString();
     node["identity_file"] = value.identityFile.toStdString();
     node["auto_reconnect"] = value.autoReconnect;
     node["reconnect_delay"] = value.reconnectDelay;
@@ -177,7 +190,12 @@ SftpPreferences loadSftpPreferences()
                {QStringLiteral("ask"), QStringLiteral("overwrite"), QStringLiteral("rename"),
                 QStringLiteral("skip")});
     read(node, "confirm_delete", value.confirmDelete);
+    readChoice(node, "temporary_upload", value.temporaryUpload,
+               {QStringLiteral("above"), QStringLiteral("all"), QStringLiteral("off")});
+    read(node, "temporary_upload_kb", value.temporaryUploadKb);
+    value.temporaryUploadKb = qBound(0, value.temporaryUploadKb, 1024 * 1024);
     read(node, "open_folder_after_download", value.openFolderAfterDownload);
+    read(node, "editor", value.editor);
     return value;
 }
 
@@ -189,7 +207,10 @@ void saveSftpPreferences(const SftpPreferences &value)
     node["download_folder"] = value.downloadFolder.toStdString();
     node["conflict"] = value.conflict.toStdString();
     node["confirm_delete"] = value.confirmDelete;
+    node["temporary_upload"] = value.temporaryUpload.toStdString();
+    node["temporary_upload_kb"] = value.temporaryUploadKb;
     node["open_folder_after_download"] = value.openFolderAfterDownload;
+    node["editor"] = value.editor.toStdString();
     saveSection("sftp", node);
 }
 
@@ -201,6 +222,8 @@ SecurityPreferences loadSecurityPreferences()
     value.autoLockMinutes = qBound(0, value.autoLockMinutes, 24 * 60);
     read(node, "lock_on_minimize", value.lockOnMinimize);
     read(node, "unlock_at_startup", value.unlockAtStartup);
+    readChoice(node, "password_store", value.passwordStore,
+               {QStringLiteral("vault"), QStringLiteral("system"), QStringLiteral("both")});
     return value;
 }
 
@@ -210,6 +233,7 @@ void saveSecurityPreferences(const SecurityPreferences &value)
     node["auto_lock_minutes"] = value.autoLockMinutes;
     node["lock_on_minimize"] = value.lockOnMinimize;
     node["unlock_at_startup"] = value.unlockAtStartup;
+    node["password_store"] = value.passwordStore.toStdString();
     saveSection("security", node);
 }
 
@@ -221,6 +245,7 @@ LoggingPreferences loadLoggingPreferences()
     read(node, "folder", value.folder);
     read(node, "timestamps", value.timestamps);
     read(node, "plain_text", value.plainText);
+    read(node, "record", value.record);
     return value;
 }
 
@@ -231,6 +256,7 @@ void saveLoggingPreferences(const LoggingPreferences &value)
     node["folder"] = value.folder.toStdString();
     node["timestamps"] = value.timestamps;
     node["plain_text"] = value.plainText;
+    node["record"] = value.record;
     saveSection("logging", node);
 }
 
@@ -240,6 +266,110 @@ QString sessionLogFolder(const LoggingPreferences &preferences)
         return portableFilePath(QStringLiteral("settings/logs"));
     // A relative folder is relative to the portable folder, so it travels with it.
     return QDir(portableHome()).absoluteFilePath(preferences.folder);
+}
+
+LocalServersPreferences loadLocalServersPreferences()
+{
+    const auto node = loadSection("local_servers");
+    LocalServersPreferences value;
+    const auto readServer = [&node](const char *key, LocalServerSettings &server) {
+        const auto section = node[key];
+        if (!section || !section.IsMap())
+            return;
+        read(section, "port", server.port);
+        server.port = qBound(1, server.port, 65535);
+        readChoice(section, "folder", server.folder, {QStringLiteral("shared"), QStringLiteral("custom")});
+        read(section, "custom_folder", server.customFolder);
+        read(section, "uploads", server.uploads);
+        read(section, "listen", server.listen);
+        read(section, "max_upload_mb", server.maxUploadMb);
+        server.maxUploadMb = qBound(1, server.maxUploadMb, 1024 * 1024);
+    };
+    readServer("tftp", value.tftp);
+    readServer("http", value.http);
+    return value;
+}
+
+void saveLocalServersPreferences(const LocalServersPreferences &value)
+{
+    YAML::Node node(YAML::NodeType::Map);
+    for (const auto &[key, server] : {std::pair{"tftp", value.tftp}, std::pair{"http", value.http}}) {
+        YAML::Node section(YAML::NodeType::Map);
+        section["port"] = server.port;
+        section["folder"] = server.folder.toStdString();
+        section["custom_folder"] = server.customFolder.toStdString();
+        section["uploads"] = server.uploads;
+        section["listen"] = server.listen.toStdString();
+        section["max_upload_mb"] = server.maxUploadMb;
+        node[key] = section;
+    }
+    saveSection("local_servers", node);
+}
+
+LocalShellPreferences loadLocalShellPreferences()
+{
+    const auto node = loadSection("local_shell");
+    LocalShellPreferences value;
+    readChoice(node, "windows", value.windowsShell,
+               {QStringLiteral("powershell"), QStringLiteral("pwsh"), QStringLiteral("cmd"),
+                QStringLiteral("wsl"), QStringLiteral("custom")});
+    read(node, "windows_custom", value.windowsCustom);
+    read(node, "use_sudo", value.useSudo);
+    readChoice(node, "linux", value.linuxShell, {QStringLiteral("default"), QStringLiteral("custom")});
+    read(node, "linux_custom", value.linuxCustom);
+    return value;
+}
+
+void saveLocalShellPreferences(const LocalShellPreferences &value)
+{
+    YAML::Node node(YAML::NodeType::Map);
+    node["windows"] = value.windowsShell.toStdString();
+    node["windows_custom"] = value.windowsCustom.toStdString();
+    node["use_sudo"] = value.useSudo;
+    node["linux"] = value.linuxShell.toStdString();
+    node["linux_custom"] = value.linuxCustom.toStdString();
+    saveSection("local_shell", node);
+}
+
+SessionListPreferences loadSessionListPreferences()
+{
+    const auto node = loadSection("session_list");
+    SessionListPreferences value;
+    read(node, "show_pinned", value.showPinned);
+    read(node, "show_recent", value.showRecent);
+    read(node, "recent_count", value.recentCount);
+    value.recentCount = qBound(1, value.recentCount, 20);
+    read(node, "show_host", value.showHost);
+    read(node, "show_protocol", value.showProtocol);
+    read(node, "check_status", value.checkStatus);
+    read(node, "check_seconds", value.checkSeconds);
+    value.checkSeconds = qBound(10, value.checkSeconds, 3600);
+    // Earlier versions had summary_in_column: true/false.
+    bool inColumn = false;
+    read(node, "summary_in_column", inColumn);
+    if (inColumn)
+        value.folderSummary = QStringLiteral("column");
+    readChoice(node, "folder_summary", value.folderSummary,
+               {QStringLiteral("name"), QStringLiteral("column"), QStringLiteral("off")});
+    read(node, "show_search", value.showSearch);
+    read(node, "fit_panel", value.fitPanel);
+    return value;
+}
+
+void saveSessionListPreferences(const SessionListPreferences &value)
+{
+    YAML::Node node(YAML::NodeType::Map);
+    node["show_pinned"] = value.showPinned;
+    node["show_recent"] = value.showRecent;
+    node["recent_count"] = value.recentCount;
+    node["show_host"] = value.showHost;
+    node["show_protocol"] = value.showProtocol;
+    node["check_status"] = value.checkStatus;
+    node["check_seconds"] = value.checkSeconds;
+    node["folder_summary"] = value.folderSummary.toStdString();
+    node["show_search"] = value.showSearch;
+    node["fit_panel"] = value.fitPanel;
+    saveSection("session_list", node);
 }
 
 PresentationPreferences loadPresentationPreferences()
@@ -260,6 +390,71 @@ void savePresentationPreferences(const PresentationPreferences &value)
     node["full_screen"] = value.fullScreen;
     node["hide_panels"] = value.hidePanels;
     saveSection("presentation", node);
+}
+
+HttpRequestPreferences loadHttpRequestPreferences()
+{
+    const auto node = loadSection("http_request");
+    HttpRequestPreferences value;
+    read(node, "timeout_seconds", value.timeoutSeconds);
+    read(node, "follow_redirects", value.followRedirects);
+    read(node, "max_redirects", value.maxRedirects);
+    read(node, "verify_certificates", value.verifyCertificates);
+    read(node, "user_agent", value.userAgent);
+    read(node, "max_body_mb", value.maxBodyMb);
+    value.timeoutSeconds = qBound(1, value.timeoutSeconds, 3600);
+    value.maxRedirects = qBound(0, value.maxRedirects, 50);
+    value.maxBodyMb = qBound(1, value.maxBodyMb, 1024);
+    return value;
+}
+
+void saveHttpRequestPreferences(const HttpRequestPreferences &value)
+{
+    YAML::Node node(YAML::NodeType::Map);
+    node["timeout_seconds"] = value.timeoutSeconds;
+    node["follow_redirects"] = value.followRedirects;
+    node["max_redirects"] = value.maxRedirects;
+    node["verify_certificates"] = value.verifyCertificates;
+    node["user_agent"] = value.userAgent.toStdString();
+    node["max_body_mb"] = value.maxBodyMb;
+    saveSection("http_request", node);
+}
+
+RunCommandPreferences loadRunCommandPreferences()
+{
+    const auto node = loadSection("run_command");
+    RunCommandPreferences value;
+    read(node, "parallel", value.parallel);
+    read(node, "timeout_seconds", value.timeoutSeconds);
+    read(node, "terminal", value.terminal);
+    read(node, "output_kb", value.outputKb);
+    read(node, "keep_recent", value.keepRecent);
+    value.parallel = qBound(1, value.parallel, 50);
+    value.timeoutSeconds = qBound(1, value.timeoutSeconds, 24 * 3600);
+    value.outputKb = qBound(16, value.outputKb, 64 * 1024);
+    value.keepRecent = qBound(0, value.keepRecent, 100);
+    if (const auto recent = node["recent"]; recent && recent.IsSequence()) {
+        for (const auto &entry : recent) {
+            if (entry.IsScalar() && value.recent.size() < value.keepRecent)
+                value.recent << QString::fromStdString(entry.as<std::string>());
+        }
+    }
+    return value;
+}
+
+void saveRunCommandPreferences(const RunCommandPreferences &value)
+{
+    YAML::Node node(YAML::NodeType::Map);
+    node["parallel"] = value.parallel;
+    node["timeout_seconds"] = value.timeoutSeconds;
+    node["terminal"] = value.terminal;
+    node["output_kb"] = value.outputKb;
+    node["keep_recent"] = value.keepRecent;
+    YAML::Node recent(YAML::NodeType::Sequence);
+    for (const auto &command : value.recent.mid(0, value.keepRecent))
+        recent.push_back(command.toStdString());
+    node["recent"] = recent;
+    saveSection("run_command", node);
 }
 
 BackupPreferences loadBackupPreferences()
@@ -468,7 +663,21 @@ StartupPreferences loadStartupPreferences()
     readChoice(node, "tab_title", value.tabTitle,
                {QStringLiteral("name"), QStringLiteral("userhost")});
     read(node, "remember_window", value.rememberWindow);
-    read(node, "show_host_in_list", value.showHostInList);
+    read(node, "single_instance", value.singleInstance);
+    read(node, "wayland_activation", value.waylandActivation);
+    return value;
+}
+
+bool waylandActivationBeforeStart()
+{
+    bool value = StartupPreferences().waylandActivation;
+    try {
+        const auto path = QDir(portableHomeBeforeStart()).filePath(QStringLiteral("settings/settings.yaml"));
+        if (const auto node = YAML::LoadFile(path.toStdString())["startup"]; node && node.IsMap())
+            read(node, "wayland_activation", value);
+    } catch (const YAML::Exception &) {
+        // Missing or invalid settings use the default.
+    }
     return value;
 }
 
@@ -483,7 +692,8 @@ void saveStartupPreferences(const StartupPreferences &value)
     node["middle_click_closes"] = value.middleClickCloses;
     node["tab_title"] = value.tabTitle.toStdString();
     node["remember_window"] = value.rememberWindow;
-    node["show_host_in_list"] = value.showHostInList;
+    node["single_instance"] = value.singleInstance;
+    node["wayland_activation"] = value.waylandActivation;
     saveSection("startup", node);
 }
 
@@ -537,14 +747,22 @@ const QList<ShortcutDefinition> &shortcutDefinitions()
          QStringLiteral("Sessions"), QKeySequence(Qt::CTRL | Qt::Key_E)},
         {QStringLiteral("open_session"), QStringLiteral("Open selected session"),
          QStringLiteral("Sessions"), QKeySequence(Qt::CTRL | Qt::Key_Return)},
-        {QStringLiteral("delete_folder"), QStringLiteral("Delete selected folder"),
+        {QStringLiteral("delete_folder"), QStringLiteral("Delete selected folder or session"),
          QStringLiteral("Sessions"), QKeySequence(QKeySequence::Delete)},
+        {QStringLiteral("search_sessions"), QStringLiteral("Search sessions"),
+         QStringLiteral("Sessions"), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_S)},
         {QStringLiteral("next_tab"), QStringLiteral("Next tab"), QStringLiteral("Tabs"),
          QKeySequence(Qt::CTRL | Qt::Key_PageDown)},
         {QStringLiteral("previous_tab"), QStringLiteral("Previous tab"), QStringLiteral("Tabs"),
          QKeySequence(Qt::CTRL | Qt::Key_PageUp)},
-        {QStringLiteral("close_tab"), QStringLiteral("Close tab"), QStringLiteral("Tabs"),
-         QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_W)},
+        {QStringLiteral("close_tab"), QStringLiteral("Close tab (or the active pane of a split tab)"),
+         QStringLiteral("Tabs"), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_W)},
+        {QStringLiteral("multi_exec"), QStringLiteral("Multi-exec: choose terminals"),
+         QStringLiteral("Tabs"), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_M)},
+        {QStringLiteral("split_right"), QStringLiteral("Split right"), QStringLiteral("Tabs"),
+         QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_E)},
+        {QStringLiteral("split_down"), QStringLiteral("Split down"), QStringLiteral("Tabs"),
+         QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_O)},
         {QStringLiteral("duplicate_tab"), QStringLiteral("Duplicate tab"), QStringLiteral("Tabs"),
          QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_D)},
         {QStringLiteral("copy"), QStringLiteral("Copy"), QStringLiteral("Terminal"),
@@ -659,10 +877,20 @@ void scheduleRuntimeRemoval()
 #ifdef Q_OS_WIN
     // A running program's files cannot be deleted on Windows: a hidden
     // command interpreter waits a few seconds, until this process is gone.
+    // It renames the folder first and deletes only if that worked: OpsRemote
+    // started again meanwhile reuses this folder, and Windows refuses to
+    // rename a folder whose programs run, so that copy keeps its files (it
+    // used to lose every one it had not loaded yet). A start after the
+    // rename finds no folder and unpacks a new one.
+    const QString removing = folder + QStringLiteral(".removing");
     QProcess helper;
     helper.setProgram(QStringLiteral("cmd.exe"));
-    helper.setNativeArguments(QStringLiteral("/d /c \"ping -n 4 127.0.0.1 >nul & rmdir /s /q \"%1\"\"")
-                                  .arg(QDir::toNativeSeparators(folder)));
+    // The runtime folder goes too once empty (rmdir without /s keeps it otherwise).
+    helper.setNativeArguments(
+        QStringLiteral("/d /c \"ping -n 4 127.0.0.1 >nul & ren \"%1\" \"%2\" && rmdir /s /q \"%3\" & "
+                       "rmdir \"%4\" 2>nul\"")
+            .arg(QDir::toNativeSeparators(folder), QFileInfo(removing).fileName(),
+                 QDir::toNativeSeparators(removing), QDir::toNativeSeparators(runtimeRoot)));
     helper.setWorkingDirectory(portableHome());
     helper.setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments *arguments) {
         arguments->flags |= CREATE_NO_WINDOW;
@@ -670,6 +898,13 @@ void scheduleRuntimeRemoval()
     helper.startDetached();
 #else
     // Open and mapped files stay usable on Linux until the process ends.
-    QDir(folder).removeRecursively();
+    // Renamed first, so a start from now on unpacks a new copy instead of
+    // reusing one that is being deleted.
+    const QString removing = folder + QStringLiteral(".removing");
+    QDir(removing).removeRecursively();
+    if (QDir().rename(folder, removing))
+        QDir(removing).removeRecursively();
+    // The runtime folder too, unless another version is unpacked there.
+    QDir().rmdir(runtimeRoot);
 #endif
 }

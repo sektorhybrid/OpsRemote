@@ -22,7 +22,7 @@ in one folder with a shared settings/ folder; built in Docker containers):
   package-zip                Zip the current package as dist/OpsRemote.zip,
                              for handing out (without your settings and backups).
   run-package                Start the package's Linux version
-                             (dist/OpsRemote/OpsRemote.sh).
+                             (dist/OpsRemote/OpsRemote, or legacy/OpsRemote.sh).
   package-linux-and-run      package-linux, then run-package (the default).
   package-all-and-run        package-all, then run-package.
 
@@ -58,11 +58,15 @@ update_package() {
 }
 
 run_package() {
-    if [[ ! -x "${PACKAGE_DIR}/OpsRemote.sh" ]]; then
+    # The native launcher, or its fallback script.
+    if [[ -x "${PACKAGE_DIR}/OpsRemote" ]]; then
+        exec "${PACKAGE_DIR}/OpsRemote"
+    fi
+    if [[ ! -x "${PACKAGE_DIR}/legacy/OpsRemote.sh" ]]; then
         echo "Package not found at ${PACKAGE_DIR}. Build it first with: $0 package-linux" >&2
         exit 1
     fi
-    exec "${PACKAGE_DIR}/OpsRemote.sh"
+    exec "${PACKAGE_DIR}/legacy/OpsRemote.sh"
 }
 
 dev_build() {

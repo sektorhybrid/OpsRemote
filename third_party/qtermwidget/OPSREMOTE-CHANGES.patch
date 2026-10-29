@@ -471,3 +471,31 @@ index f9b9979..957d16e 100644
  public slots:
      // Copy selection to clipboard
      void copyClipboard();
+--- a/lib/qtermwidget.h
++++ b/lib/qtermwidget.h
+@@ -309,6 +309,13 @@
+      */
+     void sendData(const char *,int);
+ 
++    /**
++     * OpsRemote addition: emitted for everything typed or pasted into the
++     * terminal, also when it runs a local program in a pseudo-terminal
++     * (where sendData() is not emitted).
++     */
++    void userTyped(const char *,int);
++
+     void profileChanged(const QString & profile);
+ 
+     void titleChanged();
+--- a/lib/qtermwidget.cpp
++++ b/lib/qtermwidget.cpp
+@@ -327,6 +327,9 @@
+     connect(m_impl->m_session, SIGNAL(silence()), this, SIGNAL(silence()));
+     connect(m_impl->m_session, &Session::profileChangeCommandReceived, this, &QTermWidget::profileChanged);
+     connect(m_impl->m_session, &Session::receivedData, this, &QTermWidget::receivedData);
++    // OpsRemote addition: typing, whatever the session's input goes to.
++    connect(m_impl->m_session->emulation(), SIGNAL(sendData(const char *,int)),
++            this, SIGNAL(userTyped(const char *,int)));
+ 
+     // That's OK, FilterChain's dtor takes care of filters.
+     // OSC-8 hyperlinks take priority over regex URL detection when both match.

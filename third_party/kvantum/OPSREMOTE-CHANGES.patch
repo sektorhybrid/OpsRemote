@@ -1,0 +1,204 @@
+diff -ruN a/style/Kvantum.cpp b/style/Kvantum.cpp
+--- a/Kvantum.cpp	2026-10-28 17:08:38.405871052 +0200
++++ b/Kvantum.cpp	2026-10-28 17:08:38.407730173 +0200
+@@ -167,6 +167,10 @@
+     xdg_config_home = QString("%1/.config").arg(homeDir);
+   else
+     xdg_config_home = QString(_xdg_config_home);
++#ifdef KVANTUM_CONFIG_HOME
++  /* OpsRemote: kvantum.kvconfig and user themes live in its portable folder. */
++  xdg_config_home = KVANTUM_CONFIG_HOME;
++#endif
+ 
+   QString theme;
+   QString themeChooserFile = QString("%1/Kvantum/kvantum.kvconfig").arg(xdg_config_home);
+diff -ruN a/style/blur/blurhelper.cpp b/style/blur/blurhelper.cpp
+--- a/blur/blurhelper.cpp	2026-10-28 17:08:38.406255768 +0200
++++ b/blur/blurhelper.cpp	2026-10-28 17:08:38.408466635 +0200
+@@ -22,11 +22,11 @@
+ #include <QFrame>
+ #include <QWindow>
+ 
+-#ifdef NO_KF
++#if defined NO_KF && !defined KVANTUM_NO_X11
+ #include <QApplication>
+ #include <X11/Xlib.h>
+ #include <X11/Xatom.h>
+-#else
++#elif !defined NO_KF
+ #include <KWindowEffects>
+ #endif
+ 
+@@ -36,7 +36,7 @@
+                         qreal contrast, qreal intensity, qreal saturation,
+                         bool onlyActiveWindow) : QObject (parent)
+ {
+-#ifdef NO_KF
++#if defined NO_KF && !defined KVANTUM_NO_X11
+   isX11_ = (QString::compare(QGuiApplication::platformName(), "xcb", Qt::CaseInsensitive) == 0);
+   if (isX11_)
+   {
+@@ -239,7 +239,7 @@
+   QRegion wMask = widget->mask();
+ 
+   qreal dpr = 1;
+-#ifdef NO_KF
++#if defined NO_KF && !defined KVANTUM_NO_X11
+   if (isX11_)
+   {
+     QWindow *win = widget->window()->windowHandle();
+@@ -253,12 +253,12 @@
+   {
+     if (wMask != QRegion(rect))
+       return QRegion();
+-#ifdef NO_KF
++#if defined NO_KF && !defined KVANTUM_NO_X11
+     QRect mr = wMask.boundingRect();
+     if (dpr > static_cast<qreal>(1))
+       mr.setSize (QSizeF(mr.size() * dpr).toSize());
+     return mr;
+-#else
++#elif !defined NO_KF
+     return wMask;
+ #endif
+   }
+@@ -283,7 +283,7 @@
+     radius = toolTipBlurRadius_;
+   }
+ 
+-#ifdef NO_KF
++#if defined NO_KF && !defined KVANTUM_NO_X11
+   if (dpr > static_cast<qreal>(1))
+   {
+     rect.setSize (QSizeF(rect.size() * dpr).toSize());
+@@ -326,7 +326,7 @@
+ /*************************/
+ void BlurHelper::update (QWidget* widget) const
+ {
+-#ifdef NO_KF
++#if defined NO_KF && !defined KVANTUM_NO_X11
+   if (!isX11_)
+     return;
+ #endif
+@@ -340,7 +340,7 @@
+     clear (widget);
+   else
+   {
+-#ifdef NO_KF
++#if defined NO_KF && !defined KVANTUM_NO_X11
+     if (!widget->internalWinId())
+       return;
+     Display *display = nullptr;
+@@ -357,7 +357,7 @@
+                      atom_blur_, XA_CARDINAL, 32, PropModeReplace,
+                      reinterpret_cast<const unsigned char*>(data.constData()),
+                      data.size());
+-#else
++#elif !defined NO_KF
+     KWindowEffects::enableBlurBehind (win, true, region);
+     /* NOTE: The contrast effect isn't used with menus and tooltips
+              because their borders may be anti-aliased. */
+@@ -379,7 +379,7 @@
+ /*************************/
+ void BlurHelper::clear (QWidget* widget) const
+ {
+-#ifdef NO_KF
++#if defined NO_KF && !defined KVANTUM_NO_X11
+   if (!isX11_)
+     return;
+   Display *display = nullptr;
+@@ -387,7 +387,7 @@
+     display = x11NativeInterfce->display();
+   if (display && widget->internalWinId())
+     XDeleteProperty (display, widget->internalWinId(), atom_blur_);
+-#else
++#elif !defined NO_KF
+   QWindow *win = widget->windowHandle();
+   if (win != nullptr)
+   {
+diff -ruN a/style/blur/blurhelper.h b/style/blur/blurhelper.h
+--- a/blur/blurhelper.h	2026-10-28 17:08:38.406277199 +0200
++++ b/blur/blurhelper.h	2026-10-28 17:08:38.408415434 +0200
+@@ -27,7 +27,7 @@
+ #include <QTimerEvent>
+ #include <QRegion>
+ 
+-#ifdef NO_KF
++#if defined NO_KF && !defined KVANTUM_NO_X11
+ #include <X11/Xdefs.h>
+ #endif
+ 
+@@ -122,7 +122,7 @@
+ 
+     bool onlyActiveWindow_;
+ 
+-#ifdef NO_KF
++#if defined NO_KF && !defined KVANTUM_NO_X11
+     /* The required atom. */
+     Atom atom_blur_;
+     bool isX11_;
+diff -ruN a/style/themeconfig/ThemeConfig.cpp b/style/themeconfig/ThemeConfig.cpp
+--- a/themeconfig/ThemeConfig.cpp	2026-10-28 17:08:38.406509572 +0200
++++ b/themeconfig/ThemeConfig.cpp	2026-10-28 17:08:38.408882272 +0200
+@@ -20,7 +20,7 @@
+ #include <QApplication>
+ #include "ThemeConfig.h"
+ 
+-#if defined Q_WS_X11 || defined Q_OS_LINUX || defined Q_OS_FREEBSD || defined Q_OS_OPENBSD || defined Q_OS_NETBSD || defined Q_OS_HURD
++#if !defined KVANTUM_NO_X11 && (defined Q_WS_X11 || defined Q_OS_LINUX || defined Q_OS_FREEBSD || defined Q_OS_OPENBSD || defined Q_OS_NETBSD || defined Q_OS_HURD)
+ #include <X11/Xlib.h>
+ #include <X11/Xatom.h>
+ #endif
+@@ -31,7 +31,7 @@
+   settings_(nullptr),
+   parentConfig_(nullptr)
+ {
+-#if defined Q_WS_X11 || defined Q_OS_LINUX || defined Q_OS_FREEBSD || defined Q_OS_OPENBSD || defined Q_OS_NETBSD || defined Q_OS_HURD
++#if !defined KVANTUM_NO_X11 && (defined Q_WS_X11 || defined Q_OS_LINUX || defined Q_OS_FREEBSD || defined Q_OS_OPENBSD || defined Q_OS_NETBSD || defined Q_OS_HURD)
+   isX11_ = (QString::compare(QGuiApplication::platformName(), "xcb", Qt::CaseInsensitive) == 0);
+ #else
+   isX11_ = false;
+@@ -579,7 +579,7 @@
+ {
+   bool compositing(false);
+ 
+-#if defined Q_WS_X11 || defined Q_OS_LINUX || defined Q_OS_FREEBSD || defined Q_OS_OPENBSD || defined Q_OS_NETBSD || defined Q_OS_HURD
++#if !defined KVANTUM_NO_X11 && (defined Q_WS_X11 || defined Q_OS_LINUX || defined Q_OS_FREEBSD || defined Q_OS_OPENBSD || defined Q_OS_NETBSD || defined Q_OS_HURD)
+   if (isX11_)
+   {
+     if (auto x11NativeInterfce = qApp->nativeInterface<QNativeInterface::QX11Application>())
+@@ -598,6 +598,10 @@
+     compositing = true;
+   }
+ #endif
++  /* OpsRemote (KVANTUM_NO_X11): compositing is never assumed. Translucent
++     menus need the window to get an alpha channel, which Qt's own window
++     decorations on Wayland do not give; their shadows then showed as black
++     areas. Without compositing, menus and tooltips are drawn opaque. */
+ 
+   /* no blurring or window translucency without compositing */
+   if (compositing)
+--- a/Kvantum.cpp
++++ b/Kvantum.cpp
+@@ -191,7 +191,8 @@
+   }
+   if (!themeChooserFile.isEmpty())
+   {
+-    QSettings themeChooser(themeChooserFile,QSettings::NativeFormat);
++    /* OpsRemote: IniFormat, since NativeFormat means the registry on Windows. */
++    QSettings themeChooser(themeChooserFile,QSettings::IniFormat);
+     if (themeChooser.status() == QSettings::NoError)
+     {
+       if (themeChooser.contains(KL1("theme")))
+--- a/themeconfig/ThemeConfig.cpp
++++ b/themeconfig/ThemeConfig.cpp
+@@ -77,7 +77,8 @@
+   if (!QFile::exists(theme))
+     return;
+ 
+-  settings_ = new QSettings(theme,QSettings::NativeFormat);
++  /* OpsRemote: IniFormat, since NativeFormat means the registry on Windows. */
++  settings_ = new QSettings(theme,QSettings::IniFormat);
+ }
+ 
+ QVariant ThemeConfig::getValue(const QString& group, const QString& key) const

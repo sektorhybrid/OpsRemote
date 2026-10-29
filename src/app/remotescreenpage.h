@@ -35,6 +35,9 @@ public:
     // The remote screen as last received (empty before connecting).
     virtual QImage screenshot() const = 0;
     void sendKeyCombination(KeyCombination combination);
+    // Asks the server for the whole screen again; false where not offered.
+    virtual bool canRefresh() const { return false; }
+    virtual void refreshScreen() {}
 
     // Full screen, on this monitor or across all of them (see
     // canSpanMonitors()); Ctrl+Alt+Enter toggles it from inside the tab.

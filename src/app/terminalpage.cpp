@@ -2,8 +2,11 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "terminalpage.h"
+#include "jumphost.h"
+#include "castrecorder.h"
 #include "sessionendedpanel.h"
 #include "sftppanel.h"
+#include "streamconnection.h"
 
 #include <QAction>
 #include <QDateTime>
@@ -19,6 +22,7 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QSaveFile>
 #include <QVBoxLayout>
 #include <QWheelEvent>
@@ -47,8 +51,30 @@ TerminalPage::TerminalPage(const TerminalAppearance &appearance, QWidget *parent
     : QWidget(parent), m_appearance(appearance)
 {
     createTerminal();
+    reportLocalTyping();
     m_terminal->setWorkingDirectory(QDir::homePath());
     m_terminal->setShellProgram(qEnvironmentVariable("SHELL", QStringLiteral("/bin/bash")));
+    m_terminal->startShellProgram();
+}
+
+// A local program's typing goes straight to its pseudo-terminal; this
+// passes it on too, for broadcast and multi-exec.
+void TerminalPage::reportLocalTyping()
+{
+    connect(m_terminal, &QTermWidget::userTyped, this, [this](const char *data, int size) {
+        emit userInput(QByteArray(data, size));
+    });
+}
+
+TerminalPage::TerminalPage(const QString &program, const QStringList &arguments,
+                           const TerminalAppearance &appearance, QWidget *parent)
+    : QWidget(parent), m_appearance(appearance)
+{
+    createTerminal();
+    reportLocalTyping();
+    m_terminal->setWorkingDirectory(QDir::homePath());
+    m_terminal->setShellProgram(program);
+    m_terminal->setArgs(arguments);
     m_terminal->startShellProgram();
 }
 
@@ -68,6 +94,13 @@ TerminalPage::TerminalPage(const SshConnectionSettings &settings,
     });
     m_terminal->startTerminalTeletype();
     m_sftpPanel = new SftpPanel;
+    m_folderTimer = new QTimer(this);
+    m_folderTimer->setSingleShot(true);
+    m_folderTimer->setInterval(400);
+    connect(m_folderTimer, &QTimer::timeout, this, [this] {
+        if (m_ssh)
+            m_ssh->queryShellFolder();
+    });
     startSsh();
 }
 
@@ -75,6 +108,9 @@ TerminalPage::~TerminalPage()
 {
     delete m_sftpPanel.data();
     m_sshSettings.password.fill(QChar(0));
+    m_sshSettings.keyPassphrase.fill(QChar(0));
+    for (auto &jump : m_sshSettings.jumps)
+        jump.password.fill(QChar(0));
     wipe(m_promptLine);
     wipe(m_promptAnswers);
 }
@@ -155,6 +191,8 @@ void TerminalPage::setShortcuts(const QHash<QString, QKeySequence> &shortcuts)
 
 bool TerminalPage::isConnected() const
 {
+    if (m_stream)
+        return m_inputMode == InputMode::Remote;
     return !m_ssh ? m_sshSettings.host.isEmpty() : m_inputMode != InputMode::Closed;
 }
 
@@ -177,15 +215,33 @@ void TerminalPage::createTerminal()
     m_endedBar = new SessionEndedPanel(SessionEndedPanel::Style::Bar, this);
     m_endedBar->hide();
     connect(m_endedBar, &SessionEndedPanel::reconnectRequested, this, [this] {
-        if (m_inputMode == InputMode::Closed && !m_ssh) {
-            showLocalText(QStringLiteral("\n"));
-            startSsh();
-        }
+        reconnect();
         m_terminal->setFocus();
     });
     connect(m_endedBar, &SessionEndedPanel::closeRequested, this, &TerminalPage::closeRequested);
+    m_multiExecBar = new QWidget(this);
+    m_multiExecBar->setFixedHeight(3);
+    m_multiExecBar->setAutoFillBackground(true);
+    m_multiExecBar->setBackgroundRole(QPalette::Highlight);
+    m_multiExecBar->setToolTip(QStringLiteral("Multi-exec: typing here also goes to the other chosen terminals"));
+    m_multiExecBar->hide();
+    layout->addWidget(m_multiExecBar);
     layout->addWidget(m_endedBar);
     layout->addWidget(m_terminal);
+    // Recordings get the output of local shells here; remote output comes
+    // through logOutput().
+    connect(m_terminal, &QTermWidget::receivedData, this, [this](const QString &text) {
+        if (m_recorder && !m_ssh && !m_stream && m_sshSettings.host.isEmpty()) {
+            m_recorder->output(text.toUtf8());
+            checkRecording();
+        }
+    });
+    connect(m_terminal, &QTermWidget::terminalSizeChanged, this, [this](int lines, int columns) {
+        if (m_recorder) {
+            m_recorder->resize(columns, lines);
+            checkRecording();
+        }
+    });
     setFocusProxy(m_terminal);
     setBehaviour(loadTerminalBehaviour());
 
@@ -291,6 +347,28 @@ void TerminalPage::showTerminalMenu(const QPoint &position)
     }
     auto *saveAction = menu.addAction(QStringLiteral("Save Terminal Output…"));
     connect(saveAction, &QAction::triggered, this, &TerminalPage::saveTerminalOutput);
+    auto *recordAction = menu.addAction(isRecording() ? QStringLiteral("Stop Recording")
+                                                      : QStringLiteral("Start Recording"));
+    connect(recordAction, &QAction::triggered, this, [this] { setRecording(!isRecording()); });
+
+    menu.addSeparator();
+    emit splitMenuRequested(&menu);
+    menu.addAction(QStringLiteral("Duplicate in a New Tab"), this, [this] { emit duplicateRequested(); });
+    menu.addAction(QStringLiteral("Close This Terminal"), this, [this] { emit closeRequested(); });
+    if (m_ssh && m_sftpPanel) {
+        auto *follow = menu.addAction(QStringLiteral("Files Follow This Terminal's Folder"));
+        follow->setCheckable(true);
+        follow->setChecked(followsFolder());
+        follow->setToolTip(QStringLiteral("For this tab only; the session's setting stays as it is."));
+        connect(follow, &QAction::toggled, this, &TerminalPage::setFollowsFolder);
+    }
+    auto *multiExec = menu.addAction(QStringLiteral("Multi-exec: Type Into This Terminal Too"));
+    multiExec->setCheckable(true);
+    multiExec->setChecked(m_multiExecTarget);
+    connect(multiExec, &QAction::toggled, this, [this](bool on) {
+        setMultiExecTarget(on);
+        emit multiExecToggled(on);
+    });
 
     menu.addSeparator();
     menu.addAction(m_zoomInAction);
@@ -304,6 +382,23 @@ void TerminalPage::showTerminalMenu(const QPoint &position)
             menu.addAction(action);
     }
     menu.exec(m_terminal->mapToGlobal(position));
+}
+
+bool TerminalPage::followsFolder() const
+{
+    return m_sshSettings.followTerminalFolder;
+}
+
+void TerminalPage::setFollowsFolder(bool on)
+{
+    // The tab's own copy of the settings: kept for its reconnects, never saved.
+    m_sshSettings.followTerminalFolder = on;
+    m_folderReported = false;
+    // Straight to the shell's folder, not only after the next command.
+    if (on && m_ssh)
+        m_ssh->queryShellFolder();
+    emit statusMessage(on ? QStringLiteral("Files follows this terminal's folder (this tab only).")
+                          : QStringLiteral("Files no longer follows this terminal's folder (this tab only)."));
 }
 
 void TerminalPage::saveTerminalOutput()
@@ -358,14 +453,57 @@ void TerminalPage::startSsh()
     });
     connect(m_ssh, &SshSession::dataReceived, this, [this](const QByteArray &data) {
         logOutput(data);
+        if (m_sshSettings.followTerminalFolder)
+            followReportedFolder(data);
         const auto shown = highlight(data);
         m_terminal->receiveData(shown.constData(), static_cast<int>(shown.size()));
         if (m_behaviour.markActivity)
             emit activity();
     });
+    connect(m_ssh, &SshSession::forwardStatus, this,
+            [this](int, bool listening, const QString &message) {
+                // A forward that cannot listen shows in the terminal.
+                if (listening)
+                    emit statusMessage(QStringLiteral("Port forward: %1").arg(message));
+                else
+                    showLocalText(QStringLiteral("\x1b[0m\r\n\x1b[1;33mPort forward: %1\x1b[0m\r\n")
+                                      .arg(message));
+            });
+    connect(m_ssh, &SshSession::forwardConnectionFailed, this,
+            [this](int, const QString &message) {
+                emit statusMessage(QStringLiteral("Port forward: %1").arg(message));
+            });
     connect(m_ssh, &SshSession::disconnected, this, &TerminalPage::handleSshDisconnected);
     m_sftpPanel->setSession(m_ssh);
-    m_ssh->connectToHost(m_sshSettings);
+    m_sftpPanel->setFollowControl([this] { return followsFolder(); }, [this](bool on) { setFollowsFolder(on); });
+    connect(m_ssh, &SshSession::shellFolder, m_sftpPanel.data(), &SftpPanel::followFolder);
+    if (m_sshSettings.jumps.empty()) {
+        m_ssh->connectToHost(m_sshSettings);
+        return;
+    }
+
+    // Through jump hosts: the chain's local port stands in for the server.
+    m_jumpChain = new JumpChain(this);
+    connect(m_jumpChain, &JumpChain::statusMessage, this, [this](const QString &message) {
+        showLocalText(message + QLatin1Char('\n'));
+    });
+    connect(m_jumpChain, &JumpChain::ready, this, [this](quint16 localPort) {
+        if (!m_ssh)
+            return;
+        auto settings = m_sshSettings;
+        settings.jumps.clear();
+        settings.viaLocalPort = localPort;
+        m_ssh->connectToHost(settings);
+        settings.password.fill(QChar(0));
+    });
+    connect(m_jumpChain, &JumpChain::failed, this, [this](const QString &reason, bool error) {
+        if (m_inputMode == InputMode::Remote)
+            return; // the SSH connection reports its own end
+        if (m_ssh)
+            m_ssh->disconnect(this);
+        handleSshDisconnected(reason, error);
+    });
+    m_jumpChain->open(m_sshSettings.jumps, m_sshSettings.host, m_sshSettings.port);
 }
 
 void TerminalPage::handleTerminalInput(const char *data, int size)
@@ -373,9 +511,16 @@ void TerminalPage::handleTerminalInput(const char *data, int size)
     const QByteArray bytes(data, size);
     switch (m_inputMode) {
     case InputMode::Remote:
-        if (m_ssh) {
+        if (m_stream) {
+            m_stream->write(bytes);
+            emit userInput(bytes);
+        } else if (m_ssh) {
             m_ssh->write(bytes);
             emit userInput(bytes);
+            // A command was entered: look up the shell's folder once it ran.
+            if (m_sshSettings.followTerminalFolder && !m_folderReported
+                && (bytes.contains('\r') || bytes.contains('\n')))
+                m_folderTimer->start();
         }
         break;
     case InputMode::Prompt:
@@ -387,14 +532,30 @@ void TerminalPage::handleTerminalInput(const char *data, int size)
             emit closeRequested();
             break;
         }
-        if (bytes.contains('\r') || bytes.contains('\n')) {
-            showLocalText(QStringLiteral("\n"));
-            startSsh();
-        }
+        if (bytes.contains('\r') || bytes.contains('\n'))
+            reconnect();
         break;
     case InputMode::Idle:
         break;
     }
+}
+
+// A shell that reports its folder itself (OSC 7: ESC ] 7 ; file://host/path
+// BEL or ST, as zsh, fish, and many distributions' bash setups do) is
+// followed directly, without asking the server.
+void TerminalPage::followReportedFolder(const QByteArray &data)
+{
+    static const QRegularExpression osc7(
+        QStringLiteral("\x1b\\]7;file://[^/\x07\x1b]*(/[^\x07\x1b]*)(?:\x07|\x1b\\\\)"));
+    auto matches = osc7.globalMatch(QString::fromUtf8(data));
+    QString folder;
+    while (matches.hasNext())
+        folder = QUrl::fromPercentEncoding(matches.next().captured(1).toUtf8());
+    if (folder.isEmpty())
+        return;
+    m_folderReported = true;
+    if (m_sftpPanel)
+        m_sftpPanel->followFolder(folder);
 }
 
 void TerminalPage::showLocalText(const QString &text)
@@ -574,11 +735,79 @@ void TerminalPage::cancelPrompts()
     handleSshDisconnected(QStringLiteral("Login cancelled."), false);
 }
 
+TerminalPage::TerminalPage(StreamConnection *connection, const TerminalAppearance &appearance,
+                           QWidget *parent)
+    : QWidget(parent), m_stream(connection), m_appearance(appearance)
+{
+    m_stream->setParent(this);
+    createTerminal();
+    m_terminal->setFlowControlEnabled(false);
+    connect(m_terminal, &QTermWidget::sendData, this, &TerminalPage::handleTerminalInput);
+    connect(m_terminal, &QTermWidget::terminalSizeChanged, this, [this](int lines, int columns) {
+        m_stream->resize(columns, lines);
+    });
+    m_terminal->startTerminalTeletype();
+    connect(m_stream, &StreamConnection::connected, this, [this] {
+        m_inputMode = InputMode::Remote;
+        m_wasConnected = true;
+        m_endedBar->hide();
+        m_stream->resize(m_terminal->screenColumnsCount(), m_terminal->screenLinesCount());
+        emit statusMessage(QStringLiteral("Connected: %1").arg(m_stream->description()));
+    });
+    connect(m_stream, &StreamConnection::dataReceived, this, [this](const QByteArray &data) {
+        logOutput(data);
+        const auto shown = highlight(data);
+        m_terminal->receiveData(shown.constData(), static_cast<int>(shown.size()));
+        if (m_behaviour.markActivity)
+            emit activity();
+    });
+    connect(m_stream, &StreamConnection::disconnected, this, &TerminalPage::handleStreamDisconnected);
+    startStream();
+}
+
+void TerminalPage::startStream()
+{
+    m_inputMode = InputMode::Idle;
+    m_endedBar->hide();
+    if (m_stream->announcesStart())
+        showLocalText(QStringLiteral("Connecting: %1…\n").arg(m_stream->description()));
+    m_stream->open();
+}
+
+void TerminalPage::handleStreamDisconnected(const QString &reason, bool error)
+{
+    m_stream->close();
+    m_inputMode = InputMode::Closed;
+    showLocalText(QStringLiteral("\x1b[0m\n\x1b[1%1m%2\x1b[0m\nPress Enter to reconnect, or Esc to close the tab.\n")
+                      .arg(error ? QStringLiteral(";31") : QString(), reason));
+    m_endedBar->setMessage(QStringLiteral("Disconnected: %1").arg(m_stream->description()), reason,
+                           error);
+    m_endedBar->show();
+    emit statusMessage(QStringLiteral("%1: %2").arg(m_stream->description(), reason));
+}
+
+// After a session ended: Enter or the bar's Reconnect button.
+void TerminalPage::reconnect()
+{
+    if (m_inputMode != InputMode::Closed)
+        return;
+    showLocalText(QStringLiteral("\n"));
+    if (m_stream)
+        startStream();
+    else if (!m_ssh)
+        startSsh();
+}
+
 void TerminalPage::handleSshDisconnected(const QString &reason, bool error)
 {
     if (m_ssh) {
         m_ssh->deleteLater();
         m_ssh = nullptr;
+    }
+    if (m_jumpChain) {
+        m_jumpChain->disconnect(this);
+        m_jumpChain->deleteLater();
+        m_jumpChain = nullptr;
     }
     if (m_sftpPanel)
         m_sftpPanel->setSession(nullptr);
@@ -608,9 +837,59 @@ void TerminalPage::handleSshDisconnected(const QString &reason, bool error)
     }
 }
 
+// Starts or stops an asciinema recording of this tab, in the log folder.
+void TerminalPage::setRecording(bool on)
+{
+    if (!on) {
+        if (m_recorder)
+            emit statusMessage(QStringLiteral("Recording saved: %1")
+                                   .arg(QDir::toNativeSeparators(m_recorder->path())));
+        m_recorder.reset();
+        return;
+    }
+    if (m_recorder)
+        return;
+    QString safeName = m_logName;
+    safeName.replace(QRegularExpression(QStringLiteral("[^A-Za-z0-9._@-]+")), QStringLiteral("_"));
+    const auto path = QDir(sessionLogFolder(m_logging)).filePath(
+        QStringLiteral("%1_%2.cast")
+            .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd_HH-mm-ss")),
+                 safeName.isEmpty() ? QStringLiteral("terminal") : safeName));
+    auto recorder = std::make_unique<CastRecorder>();
+    QString error;
+    if (!recorder->start(path, m_terminal->screenColumnsCount(), m_terminal->screenLinesCount(),
+                         m_logName, &error)) {
+        emit statusMessage(QStringLiteral("Cannot record to %1: %2")
+                               .arg(QDir::toNativeSeparators(path), error));
+        return;
+    }
+    m_recorder = std::move(recorder);
+    emit statusMessage(QStringLiteral("Recording this tab"));
+}
+
+// A recording that could not be written stopped itself: say so.
+void TerminalPage::checkRecording()
+{
+    if (!m_recorder || m_recorder->isRecording())
+        return;
+    emit statusMessage(QStringLiteral("Recording stopped: %1 (%2)")
+                           .arg(m_recorder->failure(), QDir::toNativeSeparators(m_recorder->path())));
+    m_recorder.reset();
+}
+
+bool TerminalPage::isRecording() const
+{
+    return m_recorder != nullptr;
+}
+
 void TerminalPage::setLogging(const LoggingPreferences &preferences, const QString &name)
 {
+    const bool startRecording = preferences.record && !m_logging.record;
+    const bool stopRecording = !preferences.record && m_logging.record;
     m_logging = preferences;
+    m_logName = name;
+    if (startRecording || stopRecording)
+        setRecording(startRecording);
     if (!preferences.enabled) {
         delete m_log;
         m_log = nullptr;
@@ -639,6 +918,10 @@ void TerminalPage::setLogging(const LoggingPreferences &preferences, const QStri
 
 void TerminalPage::logOutput(const QByteArray &data)
 {
+    if (m_recorder) {
+        m_recorder->output(data);
+        checkRecording();
+    }
     if (!m_log)
         return;
     QByteArray text = data;
@@ -758,10 +1041,18 @@ void TerminalPage::typeText(const QString &text)
 
 void TerminalPage::sendInput(const QByteArray &data)
 {
-    if (m_ssh && m_inputMode == InputMode::Remote)
+    if (m_stream && m_inputMode == InputMode::Remote)
+        m_stream->write(data);
+    else if (m_ssh && m_inputMode == InputMode::Remote)
         m_ssh->write(data);
-    else if (!m_ssh && m_sshSettings.host.isEmpty())
+    else if (!m_stream && !m_ssh && m_sshSettings.host.isEmpty())
         m_terminal->sendText(QString::fromUtf8(data));
+}
+
+void TerminalPage::setMultiExecTarget(bool on)
+{
+    m_multiExecTarget = on;
+    m_multiExecBar->setVisible(on);
 }
 
 void TerminalPage::setZoomSteps(int steps)

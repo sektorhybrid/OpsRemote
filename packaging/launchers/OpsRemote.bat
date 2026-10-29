@@ -1,18 +1,22 @@
 @echo off
 rem SPDX-License-Identifier: GPL-3.0-or-later
 rem SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
-rem Starts OpsRemote on Windows. Sessions, settings, and the
-rem credential vault are shared with the Linux version in the settings\
-rem folder next to this file. Checks the system first and explains any
-rem problem instead of failing silently.
+rem Starts OpsRemote on Windows: the fallback for the native launcher
+rem (OpsRemote.exe). Sessions, settings, and the credential vault are shared
+rem with the Linux version in the package's settings\ folder. Checks the
+rem system first and explains any problem instead of failing silently.
 rem
-rem The program is stored compressed (windows-x86_64.tar.zst). The first
-rem start of a version extracts it into runtime\ next to this file; later
-rem starts reuse that copy, and copies of older versions are removed once
-rem they are no longer running.
+rem The program is stored compressed (compressed\windows-x86_64.tar.zst).
+rem The first start of a version extracts it into the package's runtime\
+rem folder; later starts reuse that copy, and copies of older versions are
+rem removed once they are no longer running.
 setlocal
 set "HERE=%~dp0"
+rem This file lives in legacy\; the package is the folder holding data\.
+rem The path is made absolute, as the old-version clean-up compares paths.
+if not exist "%HERE%data" for %%i in ("%~dp0..") do set "HERE=%%~fi\"
 set "PLATFORM=windows-x86_64"
+set "ARCHIVE=%HERE%compressed\%PLATFORM%.tar.zst"
 
 if /i not "%PROCESSOR_ARCHITECTURE%"=="AMD64" if /i not "%PROCESSOR_ARCHITEW6432%"=="AMD64" (
     call :fail "OpsRemote needs 64-bit (x64) Windows."
@@ -30,14 +34,14 @@ if %MAJOR% LSS 10 goto :too_old
 if %BUILD% LSS 17763 goto :too_old
 
 if not exist "%HERE%data" goto :incomplete
-if exist "%HERE%%PLATFORM%.tar.zst" goto :compressed
+if exist "%ARCHIVE%" goto :compressed
 rem An uncompressed package (make-package.sh --uncompressed).
 set "APP=%HERE%%PLATFORM%\OpsRemote.exe"
 goto :check
 
 :compressed
 set "ID="
-if exist "%HERE%%PLATFORM%.id" set /p ID=<"%HERE%%PLATFORM%.id"
+if exist "%HERE%compressed\%PLATFORM%.id" set /p ID=<"%HERE%compressed\%PLATFORM%.id"
 if "%ID%"=="" goto :incomplete
 set "RUNTIME=%HERE%runtime\%PLATFORM%-%ID%"
 set "APP=%RUNTIME%\OpsRemote.exe"
@@ -54,10 +58,10 @@ set "PARTIAL=%RUNTIME%.partial%RANDOM%"
 if exist "%PARTIAL%" rmdir /s /q "%PARTIAL%"
 mkdir "%PARTIAL%" 2>nul || goto :read_only
 echo OpsRemote: preparing this version (first start only)...
-"%HERE%tools\zstd-%PLATFORM%.exe" -dcq "%HERE%%PLATFORM%.tar.zst" | "%SystemRoot%\System32\tar.exe" -xf - -C "%PARTIAL%"
+"%HERE%tools\zstd-%PLATFORM%.exe" -dcq "%ARCHIVE%" | "%SystemRoot%\System32\tar.exe" -xf - -C "%PARTIAL%"
 if not exist "%PARTIAL%\OpsRemote.exe" (
     rmdir /s /q "%PARTIAL%" 2>nul
-    call :fail "Could not unpack %PLATFORM%.tar.zst. Is the disk full?"
+    call :fail "Could not unpack compressed\%PLATFORM%.tar.zst. Is the disk full?"
     exit /b 1
 )
 rem Another start may have finished first; either copy is complete.
@@ -87,7 +91,7 @@ call :fail "This copy of OpsRemote is incomplete. Extract the whole archive agai
 exit /b 1
 
 :read_only
-call :fail "Cannot write to %HERE%. OpsRemote unpacks itself next to this file, so the folder must be writable."
+call :fail "Cannot write to %HERE%. OpsRemote unpacks itself into this folder, so it must be writable."
 exit /b 1
 
 :too_old

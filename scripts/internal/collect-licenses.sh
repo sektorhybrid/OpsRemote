@@ -19,6 +19,7 @@ PLATFORM="$2"
 SYSROOT="${3:-}"
 PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 OUT="${BUNDLE}/licenses"
+DISTRIBUTION="$( . /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-}" || true)"
 
 rm -rf "${OUT}"
 mkdir -p "${OUT}"
@@ -31,6 +32,9 @@ copy_package() {
     if [[ -d "${OUT}/${package}" ]]; then
         return 0
     fi
+    # The exact source package, for SOURCES.txt (see the written offer there).
+    rpm -q --queryformat '%{NAME}-%{VERSION}-%{RELEASE}  (source: %{SOURCERPM})\n' "${package}" \
+        >> "${OUT}/.packages" 2>/dev/null || true
     while IFS= read -r file; do
         [[ -f "${file}" ]] || continue
         mkdir -p "${OUT}/${package}"
@@ -145,5 +149,28 @@ fi
 mkdir -p "${OUT}/qtermwidget"
 cp "${PROJECT_DIR}/third_party/qtermwidget/"{LICENSE,LICENSE.LGPL2+,LICENSE.BSD-3-clause,AUTHORS} \
     "${PROJECT_DIR}/third_party/qtermwidget/OPSREMOTE-CHANGES.md" "${OUT}/qtermwidget/"
+
+# The distribution packages the bundle's libraries come from, with their
+# source packages.
+if [[ -f "${OUT}/.packages" ]]; then
+    {
+        echo "Libraries in this package taken from ${DISTRIBUTION:-the build image},"
+        echo "and the source packages they were built from:"
+        echo
+        sort -u "${OUT}/.packages"
+    } > "${OUT}/DISTRIBUTION-PACKAGES.txt"
+    rm -f "${OUT}/.packages"
+fi
+
+# Kvantum, compiled into OpsRemote with OpsRemote's changes; its themes are in
+# data/Kvantum/.
+mkdir -p "${OUT}/kvantum"
+cp "${PROJECT_DIR}/third_party/kvantum/COPYING" \
+    "${PROJECT_DIR}/third_party/kvantum/OPSREMOTE-CHANGES.md" "${OUT}/kvantum/"
+
+# Colour schemes in data/color-schemes/ (the icon themes keep their licence
+# files in their own folders under data/icons/).
+mkdir -p "${OUT}/iterm2-color-schemes"
+cp "${PROJECT_DIR}/third_party/iterm2-color-schemes/LICENSE" "${OUT}/iterm2-color-schemes/"
 
 echo "==> Licence texts: $(find "${OUT}" -mindepth 1 -maxdepth 1 -type d | wc -l) components in ${OUT}"

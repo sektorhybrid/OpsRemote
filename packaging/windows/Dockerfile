@@ -67,7 +67,7 @@ RUN curl -fsSLo /tmp/freerdp.tar.gz \
         -DWITH_WINPR_TOOLS=OFF -DWITH_FFMPEG=OFF -DWITH_SWSCALE=OFF \
         -DWITH_DSP_FFMPEG=OFF -DWITH_CAIRO=OFF -DWITH_X11=OFF -DWITH_WAYLAND=OFF -DWITH_FUSE=OFF \
         -DWITH_PCSC=OFF -DWITH_SMARTCARD_EMULATE=OFF -DWITH_KRB5=OFF -DWITH_CUPS=OFF \
-        -DWITH_PULSE=OFF -DWITH_ALSA=OFF -DWITH_OSS=OFF -DWITH_OPENH264=OFF \
+        -DWITH_PULSE=OFF -DWITH_ALSA=OFF -DWITH_OSS=OFF -DWITH_OPENH264=OFF -DWITH_WINMM=ON \
         -DWITH_JSON_DISABLED=ON -DWITH_AAD=OFF -DWITH_SSO_MIB=OFF -DWITH_WEBVIEW=OFF \
         -DWITH_URIPARSER=OFF -DWITH_LIBSYSTEMD=OFF -DUSE_UNWIND=OFF -DWITH_UNICODE_BUILTIN=ON \
         -DWITH_FDK_AAC=OFF -DWITH_LAME=OFF -DWITH_FAAD2=OFF -DWITH_FAAC=OFF -DWITH_SOXR=OFF \
@@ -138,3 +138,7 @@ RUN set -e; \
     take "https://github.com/FreeRDP/FreeRDP/releases/download/${FREERDP_VERSION}/freerdp-${FREERDP_VERSION}.tar.gz" "${FREERDP_SHA256}" FreeRDP; \
     take "https://github.com/facebook/zstd/releases/download/v${ZSTD_VERSION}/zstd-${ZSTD_VERSION}.tar.gz" "${ZSTD_SHA256}" zstd; \
     take "https://github.com/LibVNC/libvncserver/archive/refs/tags/LibVNCServer-${LIBVNC_VERSION}.tar.gz" "${LIBVNC_SHA256}" libvncserver
+
+# Qt Serial Port for serial console sessions (a separate step, so the
+# layers above stay cached).
+RUN dnf -y install mingw64-qt6-qtserialport && dnf clean all

@@ -8,8 +8,11 @@
 #include <QString>
 #include <QWidget>
 
+#include <functional>
+
 class QCheckBox;
 class QComboBox;
+class QFormLayout;
 class QLineEdit;
 namespace YAML { class Node; }
 
@@ -44,6 +47,13 @@ struct RdpOptions
     // Server, and xrdp; Windows client editions ignore it).
     QString startProgram;
     QString startFolder;
+    // Local resources in the remote session.
+    QString audio; // local (play here), remote (leave there), off
+    int microphone = -1; // this computer's microphone in the remote session
+    QString drives; // none, shared (the package's shared/), home, all, custom
+    QString driveFolders; // custom: folders separated by ';'
+    int printers = -1; // this computer's printers
+    int smartCards = -1; // this computer's smart cards (PC/SC)
 
     bool isEmpty() const;
     RdpOptions overriddenBy(const RdpOptions &session) const;
@@ -60,6 +70,8 @@ RdpChoices rdpColorDepthChoices();
 RdpChoices rdpQualityChoices();
 RdpChoices rdpSecurityChoices();
 RdpChoices rdpKeyboardChoices();
+RdpChoices rdpAudioChoices();
+RdpChoices rdpDriveChoices();
 // The Windows keyboard layout id for "auto" or a stored id.
 quint32 rdpKeyboardLayoutId(const QString &value);
 
@@ -105,4 +117,12 @@ private:
     QCheckBox *m_askCredentials = nullptr;
     QLineEdit *m_startProgram = nullptr;
     QLineEdit *m_startFolder = nullptr;
+    void addAvailabilityRow(QFormLayout *form, QString (*problem)(),
+                            const std::function<void(bool)> &apply);
+    QComboBox *m_audio = nullptr;
+    QCheckBox *m_microphone = nullptr;
+    QComboBox *m_drives = nullptr;
+    QLineEdit *m_driveFolders = nullptr;
+    QCheckBox *m_printers = nullptr;
+    QCheckBox *m_smartCards = nullptr;
 };

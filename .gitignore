@@ -12,6 +12,10 @@
 # ---- Personal data (never publish) ----
 # Old personal files kept for reference.
 /archived/
+# Private plans, not published.
+/private/
+# Design notes and reviews: kept locally, not published.
+/design/
 # What OpsRemote writes next to itself: sessions, preferences, the
 # encrypted vault, trusted host keys and certificates, backups, and the
 # unpacked program.
@@ -24,6 +28,8 @@ known_hosts
 *.log
 
 # ---- Editors and tools ----
+__pycache__/
+*.pyc
 .vscode/
 .idea/
 .claude/

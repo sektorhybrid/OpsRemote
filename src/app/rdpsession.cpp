@@ -2,15 +2,21 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "rdpsession.h"
+#include "appdirs.h"
+#include "localresources.h"
 #include "rdpclipboard.h"
 
 #include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QSaveFile>
 #include <QMetaObject>
 #include <QTimer>
 
 #include <freerdp/addin.h>
 #include <freerdp/client.h>
 #include <freerdp/channels/cliprdr.h>
+#include <freerdp/channels/rdpdr.h>
 #include <freerdp/client/channels.h>
 #include <freerdp/client/cliprdr.h>
 #include <freerdp/client/cmdline.h>
@@ -29,6 +35,7 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <vector>
 #include <cstring>
 #include <mutex>
 #include <memory>
@@ -285,6 +292,8 @@ struct RdpCallbacks
                                    const char *issuer, const char *fingerprint, DWORD)
     {
         Q_UNUSED(commonName);
+        if (auto *owner = ownerOf(instance->context); !owner->m_certificateName.isEmpty())
+            return owner->verifyTunnelledCertificate(text(subject), text(issuer), text(fingerprint));
         const auto decision = ownerOf(instance->context)->askCertificate(
             QStringLiteral("%1:%2").arg(text(host)).arg(port), text(subject), text(issuer),
             text(fingerprint), false);
@@ -298,6 +307,8 @@ struct RdpCallbacks
                                           const char *fingerprint, const char *, const char *,
                                           const char *, DWORD)
     {
+        if (auto *owner = ownerOf(instance->context); !owner->m_certificateName.isEmpty())
+            return owner->verifyTunnelledCertificate(text(subject), text(issuer), text(fingerprint));
         const auto decision = ownerOf(instance->context)->askCertificate(
             QStringLiteral("%1:%2").arg(text(host)).arg(port), text(subject), text(issuer),
             text(fingerprint), true);
@@ -377,6 +388,8 @@ void RdpSession::disconnectFromHost()
 
 void RdpSession::run(RdpConnectionSettings settings)
 {
+    m_certificateName = settings.certificateName;
+    m_configPath = settings.configPath;
     QString failure;
     bool error = false;
     freerdp *instance = freerdp_new();
@@ -523,18 +536,83 @@ void RdpSession::run(RdpConnectionSettings settings)
     m_askCredentials = options.askCredentials != 0;
     if (!m_askCredentials && !hasPassword && options.security == QStringLiteral("auto"))
         freerdp_settings_set_bool(rdp, FreeRDP_NlaSecurity, FALSE);
-    // No drive, printer, port, smartcard, audio, or clipboard redirection
-    // yet; each would load a channel this build may not include.
+    // Ports and WebAuthn are not redirected, nor the RDP 8 extras that need
+    // device redirection.
     for (const auto key : {FreeRDP_DeviceRedirection, FreeRDP_RedirectDrives,
                            FreeRDP_RedirectHomeDrive, FreeRDP_RedirectSerialPorts,
                            FreeRDP_RedirectParallelPorts, FreeRDP_RedirectSmartCards,
                            FreeRDP_RedirectPrinters,
                            FreeRDP_AudioPlayback, FreeRDP_AudioCapture,
                            FreeRDP_RedirectWebAuthN,
-                           // These RDP 8 extras need device redirection (rdpdr).
                            FreeRDP_NetworkAutoDetect, FreeRDP_SupportHeartbeatPdu,
                            FreeRDP_SupportMultitransport})
         freerdp_settings_set_bool(rdp, key, FALSE);
+    // Local resources. FreeRDP's channel loader (freerdp_client_load_channels)
+    // adds the sound, microphone, and device channels these settings ask for.
+    // A resource whose service is missing here is left out, with a note,
+    // rather than failing the connection.
+    QStringList skipped;
+    const auto available = [&skipped](bool wanted, const QString &problem, const QString &what) {
+        if (wanted && !problem.isEmpty())
+            skipped.append(QStringLiteral("%1 (%2)").arg(what, problem));
+        return wanted && problem.isEmpty();
+    };
+    const QString sound = (options.audio == QStringLiteral("local") || options.microphone == 1)
+                              ? LocalResources::soundProblem() : QString();
+    freerdp_settings_set_bool(rdp, FreeRDP_AudioPlayback,
+                              available(options.audio == QStringLiteral("local"), sound, QStringLiteral("sound")));
+    freerdp_settings_set_bool(rdp, FreeRDP_RemoteConsoleAudio, options.audio == QStringLiteral("remote"));
+    freerdp_settings_set_bool(rdp, FreeRDP_AudioCapture,
+                              available(options.microphone == 1, sound, QStringLiteral("microphone")));
+    bool devices = false;
+    const auto addDevice = [rdp, &devices](UINT32 type, const QList<QByteArray> &arguments) {
+        std::vector<const char *> pointers;
+        for (const auto &argument : arguments)
+            pointers.push_back(argument.constData());
+        RDPDR_DEVICE *device = freerdp_device_new(type, pointers.size(), pointers.data());
+        if (device && freerdp_device_collection_add(rdp, device))
+            devices = true;
+        else if (device)
+            freerdp_device_free(device);
+    };
+    // Drives: (name shown in the remote session, local path).
+    if (options.drives == QStringLiteral("home")) {
+        freerdp_settings_set_bool(rdp, FreeRDP_RedirectHomeDrive, TRUE);
+        devices = true;
+    } else if (options.drives == QStringLiteral("all")) {
+        addDevice(RDPDR_DTYP_FILESYSTEM, {"*", "*"});
+    } else if (options.drives == QStringLiteral("shared")) {
+        const QString folder = portableFilePath(QStringLiteral("shared"));
+        QDir().mkpath(folder);
+        addDevice(RDPDR_DTYP_FILESYSTEM, {"OpsRemote", QDir::toNativeSeparators(folder).toUtf8()});
+    } else if (options.drives == QStringLiteral("custom")) {
+        for (const auto &path : options.driveFolders.split(QLatin1Char(';'), Qt::SkipEmptyParts)) {
+            const QString folder = path.trimmed();
+            QString name = QFileInfo(folder).fileName();
+            if (name.isEmpty())
+                name = folder.left(1); // a drive root, such as D:\ becomes "D"
+            if (QFileInfo(folder).isDir())
+                addDevice(RDPDR_DTYP_FILESYSTEM, {name.toUtf8(), QDir::toNativeSeparators(folder).toUtf8()});
+        }
+    }
+    if (devices)
+        freerdp_settings_set_bool(rdp, FreeRDP_RedirectDrives, TRUE);
+    if (available(options.printers == 1, options.printers == 1 ? LocalResources::printerProblem() : QString(),
+                  QStringLiteral("printers"))) {
+        addDevice(RDPDR_DTYP_PRINT, {"printer"});
+        freerdp_settings_set_bool(rdp, FreeRDP_RedirectPrinters, TRUE);
+    }
+    if (available(options.smartCards == 1, options.smartCards == 1 ? LocalResources::smartCardProblem() : QString(),
+                  QStringLiteral("smart cards"))) {
+        addDevice(RDPDR_DTYP_SMARTCARD, {"smartcard"});
+        freerdp_settings_set_bool(rdp, FreeRDP_RedirectSmartCards, TRUE);
+    }
+    if (devices)
+        freerdp_settings_set_bool(rdp, FreeRDP_DeviceRedirection, TRUE);
+    if (!skipped.isEmpty()) {
+        const QString note = QStringLiteral("Not shared with the remote computer: %1").arg(skipped.join(QStringLiteral("; ")));
+        QMetaObject::invokeMethod(this, [this, note] { emit statusMessage(note); }, Qt::QueuedConnection);
+    }
     // Display Control (a dynamic channel) lets the desktop follow the tab size.
     freerdp_settings_set_bool(rdp, FreeRDP_SupportDynamicChannels, TRUE);
     // The clipboard channel, when text or files are shared.
@@ -870,6 +948,43 @@ bool RdpSession::askOnGuiThread(Ask ask)
         prompt->answered.wait_for(lock, std::chrono::milliseconds(100));
     }
     return true;
+}
+
+unsigned long RdpSession::verifyTunnelledCertificate(const QString &subject,
+                                                     const QString &issuer,
+                                                     const QString &fingerprint)
+{
+    // One "host:port fingerprint" line per server.
+    const QString path = QDir(m_configPath).filePath(QStringLiteral("tunnelled_certificates"));
+    QStringList lines;
+    QString saved;
+    if (QFile file(path); file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        for (const auto &line : QString::fromUtf8(file.readAll()).split(QLatin1Char('\n'),
+                                                                        Qt::SkipEmptyParts)) {
+            if (line.section(QLatin1Char(' '), 0, 0) == m_certificateName)
+                saved = line.section(QLatin1Char(' '), 1);
+            else
+                lines.append(line);
+        }
+    }
+    if (!saved.isEmpty() && saved == fingerprint)
+        return 2;
+    const auto decision = askCertificate(m_certificateName, subject, issuer, fingerprint,
+                                         !saved.isEmpty());
+    if (decision == RdpCertificateDecision::Reject)
+        return 0;
+    if (decision == RdpCertificateDecision::AcceptAndSave) {
+        lines.append(m_certificateName + QLatin1Char(' ') + fingerprint);
+        QDir().mkpath(m_configPath);
+        QSaveFile file(path);
+        if (file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            file.write((lines.join(QLatin1Char('\n')) + QLatin1Char('\n')).toUtf8());
+            if (file.commit())
+                restrictToOwner(path);
+        }
+    }
+    // Never saved in FreeRDP's own store, where the name is only 127.0.0.1.
+    return 2;
 }
 
 RdpCertificateDecision RdpSession::askCertificate(const QString &host, const QString &subject,

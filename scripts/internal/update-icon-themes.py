@@ -13,6 +13,7 @@ Usage: scripts/internal/update-icon-themes.py [--cache DIR]
   --cache DIR  keep downloaded source archives in DIR between runs
 """
 import argparse
+import colorsys
 import io
 import os
 import re
@@ -95,6 +96,10 @@ ACTIONS = {
 }
 APPS = {
     "utilities-terminal": ["utilities-terminal", "terminal", "org.gnome.Terminal", "konsole"],
+    # Network tools (ping, traceroute, port scan): a network port or a monitor,
+    # not the globe that SSH Tunnels already shows.
+    "network-wired": ["preferences-system-network", "utilities-system-monitor",
+                      "org.gnome.SystemMonitor", "ksysguard"],
 }
 PLACES = {
     "folder": ["folder"],
@@ -304,6 +309,51 @@ def build_theme(theme, cache, output):
     return display, release, url, spdx, total, missing, rejected
 
 
+# Derived themes: (id, display name, base theme, tint). Coloured parts of the
+# base theme's icons take the tint's hue and are softened (pale, matte);
+# greys, black and white stay. The licence is the base theme's.
+TINTED = [
+    ("Papirus-Orange", "Papirus Orange", "Papirus", (0xE0, 0x95, 0x5A)),
+]
+HEX_COLOUR = re.compile(rb"#([0-9a-fA-F]{6}|[0-9a-fA-F]{3})\b")
+
+
+def tint_colour(match, tint):
+    digits = match.group(1).decode()
+    if len(digits) == 3:
+        digits = "".join(d * 2 for d in digits)
+    r, g, b = (int(digits[i:i + 2], 16) / 255 for i in (0, 2, 4))
+    hue, lightness, saturation = colorsys.rgb_to_hls(r, g, b)
+    if saturation < 0.2 or lightness < 0.08 or lightness > 0.95:
+        return match.group(0)
+    # The tint's hue, spread a little by the original hue so icons stay
+    # distinguishable; softer saturation, a touch lighter.
+    tint_hue, _, _ = colorsys.rgb_to_hls(*(c / 255 for c in tint))
+    hue = (tint_hue + (hue - 0.5) * 0.08) % 1.0
+    r, g, b = colorsys.hls_to_rgb(hue, min(0.82, 0.12 + lightness * 0.95), 0.25 + saturation * 0.4)
+    return ("#%02x%02x%02x" % tuple(round(c * 255) for c in (r, g, b))).encode()
+
+
+def build_tinted(theme, output):
+    theme_id, display, base, tint = theme
+    directory = os.path.join(output, theme_id)
+    shutil.copytree(os.path.join(output, base), directory)
+    for folder, _, files in os.walk(directory):
+        for name in files:
+            path = os.path.join(folder, name)
+            if name.endswith(".svg"):
+                with open(path, "rb") as svg:
+                    data = HEX_COLOUR.sub(lambda match: tint_colour(match, tint), svg.read())
+                with open(path, "wb") as svg:
+                    svg.write(data)
+    index = os.path.join(directory, "index.theme")
+    with open(index) as file:
+        text = file.read()
+    with open(index, "w") as file:
+        file.write(re.sub(r"^Name=.*$", f"Name={display}", text, count=1, flags=re.M)
+                   .replace(f"Comment=Subset of {base} ", f"Comment=Recoloured subset of {base} "))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--cache", help="directory to keep downloaded archives in")
@@ -312,6 +362,8 @@ def main():
     staging = tempfile.mkdtemp(dir=os.path.dirname(TARGET) if os.path.isdir(os.path.dirname(TARGET)) else None)
     try:
         results = [build_theme(theme, arguments.cache, staging) for theme in THEMES]
+        for theme in TINTED:
+            build_tinted(theme, staging)
         with open(os.path.join(staging, "README.md"), "w") as out:
             out.write("# Icon themes\n\nSubsets of freedesktop icon themes: only the icons Portable "
                       "Terminal uses (actions, folders, and SFTP file types). Files are copied unmodified "
@@ -320,8 +372,13 @@ def main():
                       "| Theme | Release | Icons | License | Source |\n|---|---|---|---|---|\n")
             for display, release, url, spdx, total, _, _ in results:
                 out.write(f"| {display} | {release} | {total} | {spdx} | {url} |\n")
+            for theme_id, display, base, _ in TINTED:
+                out.write(f"| {display} | (from {base}) | | as {base} | {base}, recoloured by "
+                          f"`update-icon-themes.py` |\n")
             out.write("\nEach theme's folder contains its upstream license files. Icons a theme does not "
-                      "provide fall back to the application's built-in icons.\n")
+                      "provide fall back to the application's built-in icons. Recoloured themes are "
+                      "modified copies: their coloured parts take a pale, matte tint "
+                      "(see `TINTED` in the script).\n")
         if os.path.isdir(TARGET):
             shutil.rmtree(TARGET)
         os.rename(staging, TARGET)

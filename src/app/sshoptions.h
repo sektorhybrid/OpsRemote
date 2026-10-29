@@ -22,11 +22,15 @@ struct SshOptions
     int keepaliveSeconds = -1; // 0 turns keepalives off
     int compression = -1;
     int tryPublicKeys = -1;
+    int forwardAgent = -1;
     QString identityFile;
     int autoReconnect = -1;
     int reconnectDelay = 0; // seconds
     int reconnectAttempts = -1;
     QString terminalType;
+    int followTerminalFolder = -1;
+    int forwardX11 = -1;
+    QString fileTransfer; // auto, sftp, scp
 
     bool isEmpty() const { return *this == SshOptions(); }
     SshPreferences appliedTo(SshPreferences preferences) const;
@@ -53,9 +57,16 @@ private:
     QSpinBox *m_keepalive = nullptr;
     QCheckBox *m_compression = nullptr;
     QCheckBox *m_tryPublicKeys = nullptr;
+    QCheckBox *m_forwardAgent = nullptr;
     QLineEdit *m_identityFile = nullptr;
     QCheckBox *m_autoReconnect = nullptr;
     QSpinBox *m_reconnectDelay = nullptr;
     QSpinBox *m_reconnectAttempts = nullptr;
     QComboBox *m_terminalType = nullptr;
+    QCheckBox *m_followTerminalFolder = nullptr;
+    QCheckBox *m_forwardX11 = nullptr;
+    QComboBox *m_fileTransfer = nullptr;
 };
+
+// The file browser's protocols for SSH: value and label.
+QList<QPair<QString, QString>> sshFileTransferChoices();

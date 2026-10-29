@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "credentialvault.h"
+#include "systemcredentials.h"
 
 #include "appdirs.h"
 
@@ -92,8 +93,72 @@ bool CredentialVault::unlock(const QString &masterPassword, QString *error)
     return loadEncryptedData(masterPassword, error);
 }
 
+void CredentialVault::setStoreRule(std::function<PasswordStore(const QString &key)> rule)
+{
+    m_storeRule = std::move(rule);
+}
+
+PasswordStore CredentialVault::storeFor(const QString &key) const
+{
+    return m_storeRule ? m_storeRule(key) : PasswordStore::Vault;
+}
+
+bool CredentialVault::needsUnlock(const QString &key) const
+{
+    return needsVault(key) && exists() && !m_unlocked;
+}
+
+QStringList CredentialVault::vaultKeys() const
+{
+    return m_unlocked ? m_passwords.keys() : QStringList();
+}
+
+QString CredentialVault::vaultPassword(const QString &key) const
+{
+    return m_unlocked ? m_passwords.value(key) : QString();
+}
+
+bool CredentialVault::removePassword(const QString &sessionId, QString *error)
+{
+    // Gone from the system store too, when it was used for this entry.
+    if (storeFor(sessionId) != PasswordStore::Vault && SystemCredentials::isAvailable()
+        && !SystemCredentials::remove(sessionId, error))
+        return false;
+    if (!needsVault(sessionId) && !m_unlocked)
+        return true;
+    if (!m_unlocked) {
+        setError(error, QStringLiteral("Unlock the credential vault first."));
+        return false;
+    }
+    if (!m_passwords.contains(sessionId))
+        return true;
+    const auto previous = m_passwords.take(sessionId);
+    if (!saveEncryptedData(error)) {
+        m_passwords.insert(sessionId, previous);
+        return false;
+    }
+    return true;
+}
+
 bool CredentialVault::setPassword(const QString &sessionId, const QString &password,
                                   QString *error)
+{
+    const PasswordStore store = storeFor(sessionId);
+    if (store != PasswordStore::Vault && !SystemCredentials::write(sessionId, password, error))
+        return false;
+    if (store == PasswordStore::System) {
+        // Only one copy: an older one in the vault goes.
+        if (m_unlocked && m_passwords.contains(sessionId)) {
+            m_passwords.remove(sessionId);
+            saveEncryptedData(nullptr);
+        }
+        return true;
+    }
+    return setVaultPassword(sessionId, password, error);
+}
+
+bool CredentialVault::setVaultPassword(const QString &sessionId, const QString &password,
+                                       QString *error)
 {
     if (!m_unlocked) {
         setError(error, QStringLiteral("Unlock the credential vault first."));
@@ -114,7 +179,13 @@ bool CredentialVault::setPassword(const QString &sessionId, const QString &passw
 
 QString CredentialVault::passwordForSession(const QString &sessionId) const
 {
-    return m_unlocked ? m_passwords.value(sessionId) : QString();
+    const PasswordStore store = storeFor(sessionId);
+    if (store != PasswordStore::Vault) {
+        const QString stored = SystemCredentials::read(sessionId);
+        if (!stored.isNull() || store == PasswordStore::System)
+            return stored;
+    }
+    return vaultPassword(sessionId);
 }
 
 bool CredentialVault::changeMasterPassword(const QString &currentPassword,

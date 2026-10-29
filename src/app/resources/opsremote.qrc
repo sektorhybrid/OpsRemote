@@ -1,0 +1,14 @@
+<!DOCTYPE RCC>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later
+     SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos -->
+<RCC version="1.0">
+    <qresource prefix="/icons">
+        <file alias="opsremote-16.png">icons/opsremote-16.png</file>
+        <file alias="opsremote-24.png">icons/opsremote-24.png</file>
+        <file alias="opsremote-32.png">icons/opsremote-32.png</file>
+        <file alias="opsremote-48.png">icons/opsremote-48.png</file>
+        <file alias="opsremote-64.png">icons/opsremote-64.png</file>
+        <file alias="opsremote-128.png">icons/opsremote-128.png</file>
+        <file alias="opsremote-256.png">icons/opsremote-256.png</file>
+    </qresource>
+</RCC>

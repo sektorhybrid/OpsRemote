@@ -4,6 +4,9 @@
 #include "appdirs.h"
 #include "icons.h"
 
+#include <QPainter>
+#include <QPixmap>
+
 #include <QApplication>
 #include <QCoreApplication>
 #include <QDir>
@@ -89,4 +92,24 @@ QIcon fileTypeIcon(const QString &fileName, bool isDirectory, bool isSymlink)
             return QIcon::fromTheme(name);
     }
     return styleIcon(fallback);
+}
+
+QIcon fixedSizeIcon(const QIcon &icon, const QSize &size)
+{
+    QIcon fixed;
+    for (const qreal scale : {1.0, 2.0}) {
+        QPixmap tile(size * scale);
+        tile.setDevicePixelRatio(scale);
+        tile.fill(Qt::transparent);
+        // Never scaled up (that blurs): a smaller icon sits in the middle.
+        const QPixmap pixmap = icon.pixmap(size, scale);
+        const QSizeF drawn = QSizeF(pixmap.size()) / pixmap.devicePixelRatio();
+        QPainter painter(&tile);
+        painter.drawPixmap(QPointF((size.width() - drawn.width()) / 2,
+                                   (size.height() - drawn.height()) / 2),
+                           pixmap);
+        painter.end();
+        fixed.addPixmap(tile);
+    }
+    return fixed;
 }

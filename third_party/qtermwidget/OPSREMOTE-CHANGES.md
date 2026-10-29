@@ -14,6 +14,6 @@ files to state. The complete diff against upstream is in
 | `lib/PtyWindows.h`, `lib/PtyWindows.cpp` | **New:** a `Pty` stand-in for Windows, where there are no Unix pseudo-terminals. © 2026 Thanos Athanasopoulos, LGPL-2.0-or-later. |
 | `lib/History.h`, `lib/History.cpp`, `lib/BlockArray.cpp` | Scrollback history without `mmap()`/`getpagesize()` on Windows. |
 | `lib/Session.cpp` | Ends a session without POSIX signals on Windows. |
-| `lib/qtermwidget.h`, `lib/qtermwidget.cpp` | API additions: feed output from an external transport (SSH), and a signal when the screen size changes. |
+| `lib/qtermwidget.h`, `lib/qtermwidget.cpp` | API additions: feed output from an external transport (SSH), a signal when the screen size changes, and `userTyped()`, emitted for typing also when a local program runs in a pseudo-terminal (for broadcast and multi-exec). |
 
 Changed places in the sources are marked "OpsRemote addition".

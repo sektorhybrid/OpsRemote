@@ -24,6 +24,33 @@ int clientTag;
 // own thread, so the last error is kept per thread and becomes the reason
 // shown when a connection fails.
 thread_local QString lastError;
+// The last ordinary message too: some failures are only logged that way
+// ("Reading password failed" when no password was given).
+thread_local QString lastMessage;
+
+// A failed connection's reason in words, from what libvncclient logged.
+QString failureReason(const QString &target)
+{
+    const QString logged = lastError.isEmpty() ? lastMessage : lastError;
+    if (logged.contains(QStringLiteral("Reading password failed"), Qt::CaseInsensitive))
+        return QStringLiteral("No password reached %1: the password prompt was cancelled, or no "
+                              "password is saved for this session (or the vault is locked).")
+            .arg(target);
+    if (logged.contains(QStringLiteral("authentication failed"), Qt::CaseInsensitive))
+        return QStringLiteral("%1 refused the password.").arg(target);
+    if (logged.contains(QStringLiteral("Unable to connect"), Qt::CaseInsensitive)
+        || logged.contains(QStringLiteral("ConnectClientToTcpAddr"), Qt::CaseInsensitive))
+        return QStringLiteral("Could not reach %1 (nothing answered on its VNC port).").arg(target);
+    if (logged.isEmpty())
+        return QStringLiteral("Could not connect to %1.").arg(target);
+    return QStringLiteral("Could not connect to %1: %2").arg(target, logged);
+}
+
+// Limits on what a server may announce: the screen (16384 pixels a side,
+// 1 GiB in all) and the pointer shape.
+constexpr int MaximumScreenSide = 16384;
+constexpr qint64 MaximumScreenBytes = qint64(1) << 30;
+constexpr int MaximumCursorSide = 512;
 
 void logMessage(const char *format, ...)
 {
@@ -32,7 +59,8 @@ void logMessage(const char *format, ...)
     va_start(arguments, format);
     std::vsnprintf(buffer, sizeof buffer, format, arguments);
     va_end(arguments);
-    qDebug("VNC: %s", QByteArray(buffer).trimmed().constData());
+    lastMessage = QString::fromUtf8(buffer).trimmed();
+    qDebug("VNC: %s", qUtf8Printable(lastMessage));
 }
 
 void logError(const char *format, ...)
@@ -119,9 +147,32 @@ struct VncCallbacks
     {
         auto *owner = ownerOf(client);
         const int bytes = client->format.bitsPerPixel / 8;
-        owner->m_frameBuffer = QByteArray(qsizetype(client->width) * client->height * bytes, '\0');
+        // The server chooses the size (also when it resizes later): refuse
+        // what no real desktop needs before allocating anything.
+        const qint64 size = qint64(client->width) * client->height * bytes;
+        if (client->width <= 0 || client->height <= 0 || client->width > MaximumScreenSide
+            || client->height > MaximumScreenSide || (bytes != 1 && bytes != 2 && bytes != 4)
+            || size > MaximumScreenBytes) {
+            lastError = QStringLiteral("The server announced a %1 × %2 screen, larger than "
+                                       "OpsRemote accepts (%3 × %3).")
+                            .arg(client->width).arg(client->height).arg(MaximumScreenSide);
+            return FALSE;
+        }
+        // Within the limit, memory can still run out: end the session then.
+        try {
+            owner->m_frameBuffer = QByteArray(qsizetype(size), '\0');
+        } catch (const std::bad_alloc &) {
+            owner->m_frameBuffer.clear();
+        }
+        if (owner->m_frameBuffer.size() != size
+            || !owner->allocateFrame(client->width, client->height, owner->m_depth)) {
+            owner->m_frameBuffer.clear();
+            client->frameBuffer = nullptr;
+            lastError = QStringLiteral("Not enough memory for a %1 × %2 screen.")
+                            .arg(client->width).arg(client->height);
+            return FALSE;
+        }
         client->frameBuffer = reinterpret_cast<uint8_t *>(owner->m_frameBuffer.data());
-        owner->allocateFrame(client->width, client->height, owner->m_depth);
         const int width = client->width;
         const int height = client->height;
         QMetaObject::invokeMethod(owner, [owner, width, height] {
@@ -132,6 +183,7 @@ struct VncCallbacks
 
     static void gotFrameBufferUpdate(rfbClient *client, int x, int y, int w, int h)
     {
+        // Within int range: mallocFrameBuffer() limits width and depth.
         const int stride = client->width * client->format.bitsPerPixel / 8;
         ownerOf(client)->copyFrame(client->frameBuffer, stride, QRect(x, y, w, h));
     }
@@ -139,7 +191,8 @@ struct VncCallbacks
     static void gotCursorShape(rfbClient *client, int xhot, int yhot, int width, int height,
                                int bytesPerPixel)
     {
-        if (!client->rcSource || !client->rcMask || width <= 0 || height <= 0)
+        if (!client->rcSource || !client->rcMask || width <= 0 || height <= 0
+            || width > MaximumCursorSide || height > MaximumCursorSide)
             return;
         auto *owner = ownerOf(client);
         QImage shape(width, height, QImage::Format_ARGB32);
@@ -265,6 +318,7 @@ void VncSession::run(VncConnectionSettings settings)
     rfbClientLog = logMessage;
     rfbClientErr = logError;
     lastError.clear();
+    lastMessage.clear();
     const auto &options = settings.options;
     m_password = settings.password;
     settings.password.fill(QChar(0));
@@ -330,6 +384,8 @@ void VncSession::run(VncConnectionSettings settings)
                                               "port %1…").arg(port));
         }, Qt::QueuedConnection);
         int result = 0;
+        // The timeout is in microseconds (libvncclient waits with select()),
+        // so a stop request is seen within 0.2 s.
         while (!m_stopping && result == 0)
             result = listenForIncomingConnectionsNoFork(client, 200000);
         if (result <= 0) {
@@ -343,11 +399,42 @@ void VncSession::run(VncConnectionSettings settings)
     } else if (!options.repeater.isEmpty()) {
         // UltraVNC repeater: connect to it and name the server, by ID or by
         // its host and port.
-        QString repeater = options.repeater;
+        // host, host:port, [IPv6] or [IPv6]:port.
+        QString repeater = options.repeater.trimmed();
         int repeaterPort = 5901;
-        if (repeater.count(QLatin1Char(':')) == 1) {
-            repeaterPort = repeater.section(QLatin1Char(':'), 1).toInt();
+        bool valid = !repeater.isEmpty();
+        const auto readPort = [&valid](const QString &text) {
+            bool ok = false;
+            const int port = text.toInt(&ok);
+            if (!ok || port < 1 || port > 65535)
+                valid = false;
+            return port;
+        };
+        if (repeater.startsWith(QLatin1Char('['))) {
+            const int close = repeater.indexOf(QLatin1Char(']'));
+            const QString after = close > 0 ? repeater.mid(close + 1) : QString();
+            if (close < 0 || (!after.isEmpty() && !after.startsWith(QLatin1Char(':'))))
+                valid = false;
+            else if (!after.isEmpty())
+                repeaterPort = readPort(after.mid(1));
+            repeater = close > 0 ? repeater.mid(1, close - 1) : QString();
+        } else if (repeater.count(QLatin1Char(':')) == 1) {
+            repeaterPort = readPort(repeater.section(QLatin1Char(':'), 1));
             repeater = repeater.section(QLatin1Char(':'), 0, 0);
+        }
+        // The ID is a number at the repeater.
+        bool idValid = true;
+        if (!options.repeaterId.isEmpty())
+            options.repeaterId.toUInt(&idValid);
+        if (!valid || repeater.isEmpty() || repeater.contains(QLatin1Char(' ')) || !idValid) {
+            rfbClientCleanup(client);
+            finish(QStringLiteral("The repeater \"%1\"%2 is not valid: use host or host:port, and a "
+                                  "number as the ID.")
+                       .arg(options.repeater,
+                            options.repeaterId.isEmpty() ? QString()
+                                                         : QStringLiteral(" (ID %1)").arg(options.repeaterId)),
+                   true);
+            return;
         }
         repeaterHost = repeater.toUtf8();
         repeaterTarget = options.repeaterId.isEmpty() ? host
@@ -359,6 +446,11 @@ void VncSession::run(VncConnectionSettings settings)
     } else {
         client->serverHost = strdup(host.constData());
         client->serverPort = settings.port;
+    }
+    if (options.listen != 1 && (!client->serverHost || (!options.repeater.isEmpty() && !client->destHost))) {
+        rfbClientCleanup(client);
+        finish(QStringLiteral("Not enough memory to connect."), true);
+        return;
     }
     if (options.listen != 1) {
         const QString target = settings.label.isEmpty()
@@ -372,10 +464,7 @@ void VncSession::run(VncConnectionSettings settings)
     // rfbInitClient frees the client when it fails.
     if (!rfbInitClient(client, nullptr, nullptr)) {
         finish(m_stopping ? QStringLiteral("Disconnected.")
-               : lastError.isEmpty()
-                   ? QStringLiteral("Could not connect to %1.")
-                         .arg(settings.label.isEmpty() ? settings.host : settings.label)
-                   : QStringLiteral("Could not connect: %1").arg(lastError),
+                          : failureReason(settings.label.isEmpty() ? settings.host : settings.label),
                !m_stopping);
         return;
     }
@@ -446,6 +535,9 @@ void VncSession::flushInput(void *clientPointer)
             SendClientCutText(client, latin1.data(), int(latin1.size()));
             break;
         }
+        case InputEvent::Refresh:
+            SendFramebufferUpdateRequest(client, 0, 0, client->width, client->height, FALSE);
+            break;
         case InputEvent::Resize: {
             // SetDesktopSize with the screen the server reported, resized.
             // (libvncclient's SendExtDesktopSize leaves the screen's id and
@@ -486,18 +578,26 @@ void VncSession::setLocalClipboard(const QString &text)
         queueInput({InputEvent::Clipboard, 0, false, 0, 0, 0, text});
 }
 
+void VncSession::requestFullUpdate()
+{
+    queueInput({InputEvent::Refresh});
+}
+
 void VncSession::requestDesktopSize(int width, int height)
 {
     queueInput({InputEvent::Resize, 0, false, width, height});
 }
 
-void VncSession::allocateFrame(int width, int height, int depth)
+bool VncSession::allocateFrame(int width, int height, int depth)
 {
     QMutexLocker locker(&m_frameMutex);
     const auto format = depth == 16 ? QImage::Format_RGB16
                         : depth == 8 ? QImage::Format_Indexed8
                                      : QImage::Format_RGB32;
     m_frame = QImage(width, height, format);
+    // A null image: the memory could not be had.
+    if (m_frame.isNull())
+        return false;
     if (depth == 8) {
         // BGR233: blue in the top two bits, green in the middle three.
         QList<QRgb> table(256);
@@ -508,6 +608,7 @@ void VncSession::allocateFrame(int width, int height, int depth)
         m_frame.setColorTable(table);
     }
     m_frame.fill(0);
+    return true;
 }
 
 void VncSession::copyFrame(const unsigned char *buffer, int stride, const QRect &area)

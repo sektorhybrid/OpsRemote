@@ -7,19 +7,21 @@
 #include "sshsession.h"
 #include "vncsession.h"
 
+#include <QElapsedTimer>
 #include <QHash>
-#include <optional>
+#include <QPointer>
 
 class QLabel;
 class QTimer;
+class JumpChain;
 class SessionEndedPanel;
 
 struct VncPageSettings
 {
     VncConnectionSettings connection;
-    // Through an SSH server: its connection, with the VNC host and port as
-    // the forwarding target.
-    std::optional<SshConnectionSettings> tunnel;
+    // Jump hosts to pass through, in order; the VNC host is then as seen
+    // from the last one.
+    std::vector<SshConnectionSettings> jumps;
     // The vault can store a password typed at the log-on prompt.
     bool canSavePassword = false;
 };
@@ -36,6 +38,8 @@ public:
     ~VncPage() override;
 
     bool isConnected() const override { return m_connected; }
+    bool canRefresh() const override { return true; }
+    void refreshScreen() override;
     QString host() const override { return m_settings.connection.host; }
     QImage screenshot() const override;
 
@@ -53,6 +57,7 @@ protected:
     void mouseReleaseEvent(QMouseEvent *event) override;
     void wheelEvent(QWheelEvent *event) override;
     void focusOutEvent(QFocusEvent *event) override;
+    void focusInEvent(QFocusEvent *event) override;
     void showEvent(QShowEvent *event) override;
     bool focusNextPrevChild(bool) override { return false; }
 
@@ -77,7 +82,8 @@ private:
 
     VncPageSettings m_settings;
     VncSession *m_session = nullptr;
-    SshSession *m_tunnel = nullptr;
+    QPointer<JumpChain> m_tunnel;
+    QElapsedTimer m_lastRefresh;
     QWidget *m_overlay = nullptr;
     QLabel *m_overlayText = nullptr;
     SessionEndedPanel *m_endedPanel = nullptr;

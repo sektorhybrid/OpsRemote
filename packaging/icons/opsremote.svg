@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+<!-- SPDX-License-Identifier: GPL-3.0-or-later
+     SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos -->
+<!-- OpsRemote: an "O" ring (white: this computer, navy: the remote one,
+     joined by two nodes) around a terminal prompt and a remote screen. --><defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#cf9a76"/><stop offset="1" stop-color="#a9714f"/></linearGradient></defs><rect x="12" y="12" width="232" height="232" rx="52" fill="url(#bg)"/><g fill="none" stroke-width="20" stroke-linecap="round"><path d="M128 44 A84 84 0 0 0 128 212" stroke="#ffffff"/><path d="M128 44 A84 84 0 0 1 128 212" stroke="#1e293b"/></g><circle cx="128" cy="44" r="17" fill="#ffffff"/><circle cx="128" cy="212" r="17" fill="#1e293b"/>
+
+<g transform="translate(128 128) scale(0.84) translate(-128 -128)">
+<g transform="translate(-7 0)"><path d="M78 102 l28 26 l-28 26" fill="none" stroke="#ffffff" stroke-width="17" stroke-linecap="round" stroke-linejoin="round"/></g>
+<g transform="translate(7 0)"><rect x="122" y="98" width="62" height="46" rx="8" fill="none" stroke="#1e293b" stroke-width="11"/>
+<path d="M140 166 h26 M153 146 v18" stroke="#1e293b" stroke-width="10" stroke-linecap="round"/></g>
+</g>
+</svg>
