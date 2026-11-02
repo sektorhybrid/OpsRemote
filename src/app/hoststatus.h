@@ -6,9 +6,12 @@
 #include <QHash>
 #include <QList>
 #include <QObject>
+#include <QPointer>
 #include <QString>
+#include <QThread>
 #include <atomic>
 #include <memory>
+#include <optional>
 
 // Whether saved sessions' hosts answer: a TCP connection to the session's
 // port, closed at once (nothing is sent, nobody logs on). Serial sessions
@@ -38,12 +41,20 @@ public:
     bool isChecking() const { return m_running; }
     void clear();
 
+    // Cancels the active check and waits only for its normal, cooperative
+    // cleanup. This is used during teardown; it never terminates a thread.
+    bool shutdown(int timeoutMs);
+
 signals:
     void changed();
 
 private:
+    void start(const QList<Target> &targets);
+
     QHash<QString, Status> m_status;
     bool m_running = false;
     std::shared_ptr<std::atomic_bool> m_cancel;
+    QPointer<QThread> m_thread;
+    std::optional<QList<Target>> m_pendingTargets;
     int m_generation = 0; // checks from before clear() are ignored
 };

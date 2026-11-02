@@ -22,14 +22,28 @@ constexpr int TimeoutMs = 3000;
 
 HostStatusChecker::~HostStatusChecker()
 {
-    if (m_cancel)
-        *m_cancel = true;
+    // A normal probe has a three-second timeout. Leave a small margin for
+    // cancellation polling and its final signal, but never block shutdown
+    // indefinitely if an OS settings/serial call is slow.
+    shutdown(TimeoutMs + 500);
 }
 
 void HostStatusChecker::check(const QList<Target> &targets)
 {
-    if (m_running)
+    if (m_running) {
+        // Do not create a second worker while the old one is still unwinding.
+        // The latest tree snapshot is the only useful one, so replace a
+        // previously queued request and ask the current worker to finish.
+        m_pendingTargets = targets;
+        if (m_cancel)
+            *m_cancel = true;
         return;
+    }
+    start(targets);
+}
+
+void HostStatusChecker::start(const QList<Target> &targets)
+{
     m_running = true;
     const int generation = ++m_generation;
     auto cancel = std::make_shared<std::atomic_bool>(false);
@@ -123,12 +137,21 @@ void HostStatusChecker::check(const QList<Target> &targets)
         for (auto *object : sockets.findChildren<QObject *>())
             object->disconnect(&loop);
     });
-    connect(thread, &QThread::finished, this, [this, generation, result] {
-        if (generation != m_generation)
+    m_thread = thread;
+    connect(thread, &QThread::finished, this, [this, thread, generation, result] {
+        if (m_thread != thread)
             return;
-        m_status = *result;
+        m_thread = nullptr;
         m_running = false;
         m_cancel.reset();
+        if (m_pendingTargets) {
+            const auto pending = std::move(*m_pendingTargets);
+            m_pendingTargets.reset();
+            start(pending);
+            return;
+        }
+        if (generation == m_generation)
+            m_status = *result;
         emit changed();
     });
     connect(thread, &QThread::finished, thread, &QObject::deleteLater);
@@ -138,10 +161,32 @@ void HostStatusChecker::check(const QList<Target> &targets)
 void HostStatusChecker::clear()
 {
     ++m_generation;
+    m_pendingTargets.reset();
     if (m_cancel)
         *m_cancel = true;
-    m_cancel.reset();
-    m_running = false;
+    // m_running stays true until the worker has actually exited. That keeps
+    // a timer tick or session reload from starting overlapping probe batches.
+    if (!m_thread) {
+        m_cancel.reset();
+        m_running = false;
+    }
     m_status.clear();
     emit changed();
+}
+
+bool HostStatusChecker::shutdown(int timeoutMs)
+{
+    ++m_generation;
+    m_pendingTargets.reset();
+    if (!m_thread)
+        return true;
+    if (m_cancel)
+        *m_cancel = true;
+    // The worker's local QEventLoop sees the cancellation flag within 50 ms.
+    // quit() is also harmless if it has already returned to QThread's loop.
+    m_thread->quit();
+    const bool finished = m_thread->wait(timeoutMs);
+    if (!finished)
+        qWarning() << "Host-status check did not finish before shutdown deadline";
+    return finished;
 }

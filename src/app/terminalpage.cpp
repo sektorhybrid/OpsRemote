@@ -99,7 +99,7 @@ TerminalPage::TerminalPage(const SshConnectionSettings &settings,
     m_folderTimer->setSingleShot(true);
     m_folderTimer->setInterval(400);
     connect(m_folderTimer, &QTimer::timeout, this, [this] {
-        if (m_ssh)
+        if (m_ssh && m_sshSettings.followTerminalFolder && !m_folderReported)
             m_ssh->queryShellFolder();
     });
     startSsh();
@@ -422,6 +422,8 @@ void TerminalPage::setFollowsFolder(bool on)
     // The tab's own copy of the settings: kept for its reconnects, never saved.
     m_sshSettings.followTerminalFolder = on;
     m_folderReported = false;
+    if (m_folderTimer)
+        m_folderTimer->stop();
     // Straight to the shell's folder, not only after the next command.
     if (on && m_ssh)
         m_ssh->queryShellFolder();
@@ -504,7 +506,13 @@ void TerminalPage::startSsh()
     connect(m_ssh, &SshSession::disconnected, this, &TerminalPage::handleSshDisconnected);
     m_sftpPanel->setSession(m_ssh);
     m_sftpPanel->setFollowControl([this] { return followsFolder(); }, [this](bool on) { setFollowsFolder(on); });
-    connect(m_ssh, &SshSession::shellFolder, m_sftpPanel.data(), &SftpPanel::followFolder);
+    connect(m_ssh, &SshSession::shellFolder, this,
+            [this, session = QPointer<SshSession>(m_ssh)](const QString &path) {
+                // A query may complete after following was turned off or the
+                // tab reconnected. Do not navigate for a stale result.
+                if (session && session == m_ssh && followsFolder() && m_sftpPanel)
+                    m_sftpPanel->followFolder(path);
+            });
     if (m_sshSettings.jumps.empty()) {
         m_ssh->connectToHost(m_sshSettings);
         return;

@@ -29,8 +29,11 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMouseEvent>
+#include <QMutex>
+#include <QMutexLocker>
 #include <QLocalServer>
 #include <QLocalSocket>
+#include <QPointer>
 #include <QStandardPaths>
 #include <QMenu>
 #include <QScrollBar>
@@ -59,11 +62,15 @@ namespace {
 // Deliberately never deleted: Qt may log until the very end of the process,
 // after static objects are destroyed; the system closes the file.
 QFile *logFile = nullptr;
+// qInstallMessageHandler() may call this from any application thread. Both
+// allocations intentionally survive static teardown, when Qt can still log.
+QMutex *logFileMutex = new QMutex;
 
 void writeLog(QtMsgType, const QMessageLogContext &, const QString &message)
 {
     if (!logFile)
         return;
+    QMutexLocker locker(logFileMutex);
     logFile->write(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss.zzz ")).toUtf8()
                    + message.toUtf8() + '\n');
     logFile->flush();
@@ -76,9 +83,20 @@ void watchBusyPointer(QObject *owner)
 {
     struct State
     {
+        ~State()
+        {
+            if (!worker)
+                return;
+            worker->requestInterruption();
+            worker->quit();
+            if (!worker->wait(1000))
+                qWarning("busy-pointer snapshot did not finish before shutdown deadline");
+        }
+
         bool busy = false;
         bool pending = false;
         bool haveSnapshot = false;
+        QPointer<QThread> worker;
         QHash<DWORD, QString> processes;
         QStringList started; // in the last few checks
     };
@@ -90,7 +108,9 @@ void watchBusyPointer(QObject *owner)
             return processes;
         PROCESSENTRY32W entry{};
         entry.dwSize = sizeof entry;
-        for (BOOL more = Process32FirstW(handle, &entry); more; more = Process32NextW(handle, &entry))
+        for (BOOL more = Process32FirstW(handle, &entry);
+             more && !QThread::currentThread()->isInterruptionRequested();
+             more = Process32NextW(handle, &entry))
             processes.insert(entry.th32ProcessID,
                              QStringLiteral("%1 (%2, parent %3)")
                                  .arg(QString::fromWCharArray(entry.szExeFile))
@@ -106,7 +126,11 @@ void watchBusyPointer(QObject *owner)
         state->pending = true;
         auto result = std::make_shared<QHash<DWORD, QString>>();
         auto *thread = QThread::create([snapshot, result] { *result = snapshot(); });
-        QObject::connect(thread, &QThread::finished, owner, [state, result] {
+        state->worker = thread;
+        QObject::connect(thread, &QThread::finished, owner, [state, thread, result] {
+            if (state->worker != thread)
+                return;
+            state->worker = nullptr;
             state->pending = false;
             const auto &now = *result;
             if (state->haveSnapshot) {

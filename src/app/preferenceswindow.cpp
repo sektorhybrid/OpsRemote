@@ -1360,10 +1360,10 @@ void PreferencesWindow::buildSshPage()
     auto *browser = page->addCard(QStringLiteral("File browser"));
     auto *follow = toggle(current.followTerminalFolder);
     browser->addRow(QStringLiteral("Follow the terminal's folder"),
-                    QStringLiteral("After each command, the Files pane shows the folder the "
-                                   "remote shell is in. Sessions can turn it on or off, and the "
-                                   "right-click menus of a terminal and its Files pane switch it "
-                                   "for that tab only."),
+                    QStringLiteral("Off by default. Sets the default for new SSH tabs: after each "
+                                   "command, the Files pane can show the remote shell's folder. "
+                                   "Saved sessions can explicitly enable or disable this. "
+                                   "Right-click a terminal or its Files pane to change the current tab."),
                     follow, QStringLiteral("sftp cd directory cwd sync follow"));
     bindToggle(this, follow, update, &SshPreferences::followTerminalFolder);
     auto *fileTransfer = choiceBox(sshFileTransferChoices(), current.fileTransfer);
@@ -2600,15 +2600,19 @@ void PreferencesWindow::buildSessionListPage()
 
     auto *status = page->addCard(QStringLiteral("Status"));
     auto *check = toggle(current.checkStatus);
-    status->addRow(QStringLiteral("Check whether hosts answer"),
-                   QStringLiteral("A filled dot when the host answers on its port, an empty "
-                                  "one when it does not. Only knocks on the port; never logs on. "
-                                  "Sessions through a jump host or proxy show a dash."),
+    status->addRow(QStringLiteral("Run background host checks"),
+                   QStringLiteral("Off pauses all optional host and serial-port availability "
+                                  "checks immediately. On: a filled dot means the host answers "
+                                  "on its port; an empty one means it does not. Only knocks on "
+                                  "the port; never logs on. Sessions through a jump host or "
+                                  "proxy show a dash."),
                    check, QStringLiteral("reachable online ping up down status"));
     bindToggle(this, check, update, &SessionListPreferences::checkStatus);
     auto *every = spinBox(10, 3600, current.checkSeconds, QStringLiteral(" s"));
     status->addRow(QStringLiteral("Check every"), QString(), every, QStringLiteral("interval"));
     bindSpin(this, every, update, &SessionListPreferences::checkSeconds);
+    every->setEnabled(check->isChecked());
+    connect(check, &QCheckBox::toggled, every, &QWidget::setEnabled);
 }
 
 void PreferencesWindow::buildPresentationPage()
@@ -2922,6 +2926,10 @@ void PreferencesWindow::changeEvent(QEvent *event)
     }
     // Headings have their own font, so follow interface font changes by hand.
     if (event->type() == QEvent::FontChange || event->type() == QEvent::ApplicationFontChange) {
+        // Item views keep the font that existed when their delegate was made.
+        // Make the Preferences navigation follow the current interface font
+        // just like the page text and headings.
+        m_navigation->setFont(QApplication::font());
         for (auto *label : findChildren<QLabel *>()) {
             const auto scale = label->property("headingScale");
             if (scale.isValid())

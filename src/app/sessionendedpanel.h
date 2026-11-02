@@ -27,7 +27,11 @@ signals:
     void reconnectRequested();
     void closeRequested();
 
+protected:
+    void changeEvent(QEvent *event) override;
+
 private:
+    void applyTitleFont();
     Style m_style;
     QLabel *m_title = nullptr;
     QLabel *m_detail = nullptr;

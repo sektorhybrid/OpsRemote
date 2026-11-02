@@ -68,7 +68,7 @@ struct SshPreferences
     int reconnectDelay = 5; // seconds
     int reconnectAttempts = 5;
     QString terminalType = QStringLiteral("xterm-256color");
-    bool followTerminalFolder = true; // the SFTP browser follows the shell's folder
+    bool followTerminalFolder = false; // opt-in: the Files pane follows the shell's folder
     bool forwardX11 = false; // remote X11 programs show on this computer (ssh -Y)
     // The file browser's protocol: auto (SFTP, else SCP), sftp, or scp.
     QString fileTransfer = QStringLiteral("auto");

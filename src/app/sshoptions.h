@@ -65,7 +65,7 @@ private:
     QSpinBox *m_reconnectAttempts = nullptr;
     QComboBox *m_terminalType = nullptr;
     QComboBox *m_backspace = nullptr;
-    QCheckBox *m_followTerminalFolder = nullptr;
+    QComboBox *m_followTerminalFolder = nullptr;
     QCheckBox *m_forwardX11 = nullptr;
     QComboBox *m_fileTransfer = nullptr;
 };

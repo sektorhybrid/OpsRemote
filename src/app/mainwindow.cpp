@@ -797,11 +797,8 @@ public:
         auto *layout = new QVBoxLayout(this);
         layout->setContentsMargins(32, 28, 32, 28);
 
-        auto *title = new QLabel(session.name, this);
-        QFont titleFont = title->font();
-        titleFont.setPointSize(titleFont.pointSize() + 5);
-        titleFont.setBold(true);
-        title->setFont(titleFont);
+        m_title = new QLabel(session.name, this);
+        applyTitleFont();
 
         auto *details = new QLabel(
             QStringLiteral("%1  ·  %2%3")
@@ -818,12 +815,31 @@ public:
         placeholder->setAlignment(Qt::AlignCenter);
         placeholder->setStyleSheet(QStringLiteral("color: palette(placeholder-text);"));
 
-        layout->addWidget(title);
+        layout->addWidget(m_title);
         layout->addWidget(details);
         layout->addStretch();
         layout->addWidget(placeholder, 0, Qt::AlignCenter);
         layout->addStretch();
     }
+
+protected:
+    void changeEvent(QEvent *event) override
+    {
+        if (event->type() == QEvent::FontChange || event->type() == QEvent::ApplicationFontChange)
+            applyTitleFont();
+        QWidget::changeEvent(event);
+    }
+
+private:
+    void applyTitleFont()
+    {
+        QFont titleFont = font();
+        titleFont.setPointSize(titleFont.pointSize() + 5);
+        titleFont.setBold(true);
+        m_title->setFont(titleFont);
+    }
+
+    QLabel *m_title = nullptr;
 };
 
 // Renaming in the session tree: the editor holds just the name (the list

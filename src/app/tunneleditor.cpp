@@ -3,6 +3,7 @@
 
 #include "tunneleditor.h"
 
+#include <QEvent>
 #include "icons.h"
 #include "jumphost.h"
 
@@ -133,12 +134,10 @@ TunnelCard::TunnelCard(const QString &icon, const QString &title, bool optional,
     auto *header = new QHBoxLayout;
     auto *iconLabel = new QLabel(this);
     iconLabel->setPixmap(themedIcon(icon, QStyle::SP_ComputerIcon).pixmap(18, 18));
-    auto *titleLabel = new QLabel(title, this);
-    QFont bold = titleLabel->font();
-    bold.setBold(true);
-    titleLabel->setFont(bold);
+    m_title = new QLabel(title, this);
+    applyTitleFont();
     header->addWidget(iconLabel);
-    header->addWidget(titleLabel, 1);
+    header->addWidget(m_title, 1);
     layout->addLayout(header);
     m_body = new QVBoxLayout;
     m_body->setSpacing(6);
@@ -147,6 +146,20 @@ TunnelCard::TunnelCard(const QString &icon, const QString &title, bool optional,
     m_status->setWordWrap(true);
     m_status->setVisible(false);
     layout->addWidget(m_status);
+}
+
+void TunnelCard::changeEvent(QEvent *event)
+{
+    if (event->type() == QEvent::FontChange || event->type() == QEvent::ApplicationFontChange)
+        applyTitleFont();
+    QFrame::changeEvent(event);
+}
+
+void TunnelCard::applyTitleFont()
+{
+    QFont bold = font();
+    bold.setBold(true);
+    m_title->setFont(bold);
 }
 
 void TunnelCard::setStatus(Level level, const QString &text)

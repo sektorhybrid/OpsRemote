@@ -175,10 +175,17 @@ SshOptionsEditor::SshOptionsEditor(const SshOptions &value, const SshPreferences
                                                "administrators can use your keys while you are "
                                                "connected."),
                                 value.forwardAgent, defaults.forwardAgent);
-    m_followTerminalFolder = makeSwitch(
-        QStringLiteral("Files pane follows the terminal's folder"),
-        QStringLiteral("After each command, the file browser shows the folder the shell is in."),
-        value.followTerminalFolder, defaults.followTerminalFolder);
+    m_followTerminalFolder = new QComboBox(this);
+    m_followTerminalFolder->addItem(
+        QStringLiteral("Use global setting (%1)").arg(defaults.followTerminalFolder
+            ? QStringLiteral("enabled") : QStringLiteral("disabled")), -1);
+    m_followTerminalFolder->addItem(QStringLiteral("Enabled"), 1);
+    m_followTerminalFolder->addItem(QStringLiteral("Disabled"), 0);
+    m_followTerminalFolder->setCurrentIndex(
+        qMax(0, m_followTerminalFolder->findData(value.followTerminalFolder)));
+    m_followTerminalFolder->setToolTip(QStringLiteral(
+        "After each command, show the remote shell's folder in the Files pane. "
+        "Disabled stays off even if the global setting changes. Applies when opening a session."));
     m_forwardX11 = makeSwitch(QStringLiteral("Forward X11 (ssh -Y)"),
                               QStringLiteral("Graphical programs started on the server show on "
                                              "this computer. Needs a local X server (on Windows: "
@@ -244,7 +251,7 @@ SshOptionsEditor::SshOptionsEditor(const SshOptions &value, const SshPreferences
     form->addRow(QString(), m_tryPublicKeys);
     form->addRow(QString(), m_forwardAgent);
     form->addRow(QStringLiteral("File transfer:"), m_fileTransfer);
-    form->addRow(QString(), m_followTerminalFolder);
+    form->addRow(QStringLiteral("Files follow terminal folder:"), m_followTerminalFolder);
     form->addRow(QString(), m_forwardX11);
     // Off stays possible when there is no X server.
     form->addRow(QString(), new AvailabilityNote(&LocalResources::x11Problem, [this](bool available) {
@@ -276,7 +283,7 @@ SshOptions SshOptionsEditor::value() const
     options.compression = flag(m_compression, m_defaults.compression);
     options.tryPublicKeys = flag(m_tryPublicKeys, m_defaults.tryPublicKeys);
     options.forwardAgent = flag(m_forwardAgent, m_defaults.forwardAgent);
-    options.followTerminalFolder = flag(m_followTerminalFolder, m_defaults.followTerminalFolder);
+    options.followTerminalFolder = m_followTerminalFolder->currentData().toInt();
     options.forwardX11 = flag(m_forwardX11, m_defaults.forwardX11);
     options.autoReconnect = flag(m_autoReconnect, m_defaults.autoReconnect);
     options.identityFile = m_identityFile->text().trimmed();

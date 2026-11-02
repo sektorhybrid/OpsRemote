@@ -33,8 +33,13 @@ public:
     QVBoxLayout *body() const { return m_body; }
     void setStatus(Level level, const QString &text);
 
+protected:
+    void changeEvent(QEvent *event) override;
+
 private:
+    void applyTitleFont();
     QVBoxLayout *m_body = nullptr;
+    QLabel *m_title = nullptr;
     QLabel *m_status = nullptr;
 };
 

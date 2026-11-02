@@ -3,6 +3,7 @@
 
 #include "sessionendedpanel.h"
 
+#include <QEvent>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
@@ -23,11 +24,7 @@ SessionEndedPanel::SessionEndedPanel(Style style, QWidget *parent)
 
     m_title = new QLabel(this);
     m_title->setTextFormat(Qt::PlainText);
-    QFont bold = m_title->font();
-    bold.setBold(true);
-    if (style == Style::Card)
-        bold.setPointSizeF(bold.pointSizeF() * 1.2);
-    m_title->setFont(bold);
+    applyTitleFont();
     m_detail = new QLabel(this);
     m_detail->setTextFormat(Qt::PlainText);
     m_detail->setWordWrap(true);
@@ -76,6 +73,22 @@ SessionEndedPanel::SessionEndedPanel(Style style, QWidget *parent)
         layout->addWidget(m_reconnect);
         layout->addWidget(m_close);
     }
+}
+
+void SessionEndedPanel::changeEvent(QEvent *event)
+{
+    if (event->type() == QEvent::FontChange || event->type() == QEvent::ApplicationFontChange)
+        applyTitleFont();
+    QFrame::changeEvent(event);
+}
+
+void SessionEndedPanel::applyTitleFont()
+{
+    QFont bold = font();
+    bold.setBold(true);
+    if (m_style == Style::Card)
+        bold.setPointSizeF(bold.pointSizeF() * 1.2);
+    m_title->setFont(bold);
 }
 
 void SessionEndedPanel::setMessage(const QString &title, const QString &detail, bool error)
