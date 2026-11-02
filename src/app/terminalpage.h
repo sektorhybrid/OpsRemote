@@ -102,6 +102,7 @@ private:
     enum class InputMode { Idle, Prompt, Remote, Closed };
     enum class PromptPurpose { Username, Authentication };
 
+    void applyLinkSettings();
     void createTerminal();
     void showTerminalMenu(const QPoint &position);
     void saveTerminalOutput();

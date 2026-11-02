@@ -626,6 +626,7 @@ TerminalBehaviour loadTerminalBehaviour()
     read(node, "word_characters", value.wordCharacters);
     readChoice(node, "bell", value.bell,
                {QStringLiteral("none"), QStringLiteral("visual"), QStringLiteral("sound")});
+    read(node, "links_enabled", value.linksEnabled);
     read(node, "ctrl_click_opens_links", value.ctrlClickOpensLinks);
     read(node, "mark_activity", value.markActivity);
     return value;
@@ -645,6 +646,7 @@ void saveTerminalBehaviour(const TerminalBehaviour &value)
     node["trim_pasted_newlines"] = value.trimPastedNewlines;
     node["word_characters"] = value.wordCharacters.toStdString();
     node["bell"] = value.bell.toStdString();
+    node["links_enabled"] = value.linksEnabled;
     node["ctrl_click_opens_links"] = value.ctrlClickOpensLinks;
     node["mark_activity"] = value.markActivity;
     saveSection("behaviour", node);

@@ -119,8 +119,13 @@ void FilterChain::setBuffer(const QString* buffer , const QList<int>* linePositi
 void FilterChain::process()
 {
     QListIterator<Filter*> iter(*this);
-    while (iter.hasNext())
-        iter.next()->process();
+    while (iter.hasNext()) {
+        auto *filter = iter.next();
+        if (!_linksEnabled && (qobject_cast<UrlFilter *>(filter) || qobject_cast<HyperlinkFilter *>(filter)))
+            filter->reset();
+        else
+            filter->process();
+    }
 }
 void FilterChain::clear()
 {

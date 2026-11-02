@@ -580,7 +580,8 @@ void RdpSession::run(RdpConnectionSettings settings)
         freerdp_settings_set_bool(rdp, FreeRDP_RedirectHomeDrive, TRUE);
         devices = true;
     } else if (options.drives == QStringLiteral("all")) {
-        addDevice(RDPDR_DTYP_FILESYSTEM, {"*", "*"});
+        // RedirectDrives makes FreeRDP add its wildcard drive device.
+        freerdp_settings_set_bool(rdp, FreeRDP_RedirectDrives, TRUE);
     } else if (options.drives == QStringLiteral("shared")) {
         const QString folder = portableFilePath(QStringLiteral("shared"));
         QDir().mkpath(folder);
@@ -595,8 +596,6 @@ void RdpSession::run(RdpConnectionSettings settings)
                 addDevice(RDPDR_DTYP_FILESYSTEM, {name.toUtf8(), QDir::toNativeSeparators(folder).toUtf8()});
         }
     }
-    if (devices)
-        freerdp_settings_set_bool(rdp, FreeRDP_RedirectDrives, TRUE);
     if (available(options.printers == 1, options.printers == 1 ? LocalResources::printerProblem() : QString(),
                   QStringLiteral("printers"))) {
         addDevice(RDPDR_DTYP_PRINT, {"printer"});

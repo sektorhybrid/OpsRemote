@@ -116,7 +116,7 @@ constexpr int SummaryColumn = 3; // folder summaries when no other column follow
 constexpr int FolderJumpHostRole = Qt::UserRole + 2;
 // A folder's proxy for its sessions (see ProxySettings); empty: its parent's.
 constexpr int FolderProxyRole = Qt::UserRole + 3;
-constexpr int MaximumFolderDepth = 3;
+constexpr int MaximumFolderDepth = 10;
 
 // User state (sessions, preferences, vault, known hosts) lives in settings/
 // next to the executable, so the application folder carries it.
@@ -543,6 +543,8 @@ YAML::Node sessionToYaml(const SessionDefinition &session)
             terminal["font_family"] = session.terminal.fontFamily.toStdString();
         if (session.terminal.fontSize > 0)
             terminal["font_size"] = session.terminal.fontSize;
+        if (session.terminal.linksEnabled >= 0)
+            terminal["links_enabled"] = session.terminal.linksEnabled == 1;
         node["terminal"] = terminal;
     }
     if (!session.rdp.isEmpty()) {
@@ -591,6 +593,8 @@ TerminalAppearance terminalAppearanceFromYaml(const YAML::Node &node)
     appearance.colorScheme = QString::fromStdString(node["color_scheme"].as<std::string>(""));
     appearance.fontFamily = QString::fromStdString(node["font_family"].as<std::string>(""));
     appearance.fontSize = qBound(0, node["font_size"].as<int>(0), 72);
+    if (node["links_enabled"])
+        appearance.linksEnabled = node["links_enabled"].as<bool>() ? 1 : 0;
     return appearance;
 }
 
@@ -1327,7 +1331,8 @@ MainWindow::MainWindow(QWidget *parent)
         if (m_hostStatus->isChecking() && !m_blinkTimer->isActive())
             m_blinkTimer->start();
         m_sessionTree->viewport()->update();
-        fitSessionPanel();
+        if (!m_hostStatus->isChecking())
+            fitSessionPanel();
     });
     m_blinkTimer = new QTimer(this);
     m_blinkTimer->setInterval(500);
@@ -1448,6 +1453,9 @@ MainWindow::MainWindow(QWidget *parent)
         if (!geometry.isEmpty())
             restoreGeometry(geometry);
     }
+    // The first fit happens while building the widget tree, before the
+    // splitter has its final size. Fit again after the restored window shows.
+    QTimer::singleShot(0, this, &MainWindow::fitSessionPanel);
     // After the window is shown, so a vault prompt has a parent on screen.
     QTimer::singleShot(0, this, &MainWindow::restoreStartupTabs);
 
@@ -2167,7 +2175,7 @@ bool MainWindow::appendSessionYaml(const YAML::Node &roots, QTreeWidgetItem *par
         if (kind == QStringLiteral("folder")) {
             const auto name = QString::fromStdString(node["name"].as<std::string>("" )).trimmed();
             if (name.isEmpty() || depth + 1 > MaximumFolderDepth) {
-                if (error) *error = QStringLiteral("Folder names must be set and nesting cannot exceed three levels.");
+                if (error) *error = QStringLiteral("Folder names must be set and nesting cannot exceed %1 levels.").arg(MaximumFolderDepth);
                 return false;
             }
             const auto children = node["children"];
@@ -2316,7 +2324,7 @@ bool MainWindow::appendCompactSessionYaml(const YAML::Node &folders, QTreeWidget
         }
         const auto name = QString::fromStdString(folder["name"].as<std::string>("")).trimmed();
         if (name.isEmpty() || depth + 1 > MaximumFolderDepth) {
-            if (error) *error = QStringLiteral("Folder names must be set and nesting cannot exceed three levels.");
+            if (error) *error = QStringLiteral("Folder names must be set and nesting cannot exceed %1 levels.").arg(MaximumFolderDepth);
             return false;
         }
         if (!validateSessions(folder["sessions"]))
@@ -2668,7 +2676,7 @@ void MainWindow::createFolder()
     const int newDepth = parent ? folderDepth(parent) + 1 : 1;
     if (newDepth > MaximumFolderDepth) {
         QMessageBox::information(this, QStringLiteral("Folder depth limit"),
-                                 QStringLiteral("Folders can be nested up to three levels."));
+                                 QStringLiteral("Folders can be nested up to %1 levels.").arg(MaximumFolderDepth));
         return;
     }
 
@@ -3969,6 +3977,8 @@ SshConnectionSettings MainWindow::sshSettingsFor(const QString &host, quint16 po
     if (!ssh.identityFile.isEmpty())
         settings.keyPassphrase = m_vault.passwordForSession(keyPassphraseVaultKey(ssh.identityFile));
     settings.terminalType = ssh.terminalType;
+    if (!options.backspace.isEmpty())
+        settings.backspace = options.backspace;
     settings.autoReconnect = ssh.autoReconnect;
     settings.reconnectDelay = ssh.reconnectDelay;
     settings.reconnectAttempts = ssh.reconnectAttempts;
@@ -5182,6 +5192,12 @@ void MainWindow::changeEvent(QEvent *event)
     QMainWindow::changeEvent(event);
 }
 
+void MainWindow::resizeEvent(QResizeEvent *event)
+{
+    QMainWindow::resizeEvent(event);
+    QTimer::singleShot(0, this, &MainWindow::fitSessionPanel);
+}
+
 void MainWindow::lockVaultFor(const QString &reason)
 {
     m_vault.lock();
@@ -5589,8 +5605,30 @@ void MainWindow::fitSessionPanel()
 // proxy are not checked: this computer may not reach them directly.
 void MainWindow::checkHostStatus()
 {
-    if (!m_sessionList.checkStatus)
+    if (!m_sessionList.checkStatus || m_hostStatus->isChecking())
         return;
+    // Snapshot folder inheritance in one tree walk. Widgets stay on the GUI
+    // thread; preferences and probes are handled by HostStatusChecker's worker.
+    QHash<QString, QPair<QString, QString>> inherited;
+    std::function<void(QTreeWidgetItem *, QString, QString)> visit =
+        [&](QTreeWidgetItem *item, QString jump, QString proxy) {
+            if (isQuickItem(item))
+                return;
+            if (isFolder(item)) {
+                const auto ownJump = item->data(0, FolderJumpHostRole).toString();
+                const auto ownProxy = item->data(0, FolderProxyRole).toString();
+                if (!ownJump.isEmpty())
+                    jump = ownJump;
+                if (!ownProxy.isEmpty())
+                    proxy = ownProxy;
+            } else {
+                inherited.insert(item->data(0, SessionIdRole).toString(), {jump, proxy});
+            }
+            for (int index = 0; index < item->childCount(); ++index)
+                visit(item->child(index), jump, proxy);
+        };
+    for (int index = 0; index < m_sessionTree->topLevelItemCount(); ++index)
+        visit(m_sessionTree->topLevelItem(index), JumpHost::Direct, QString());
     QList<HostStatusChecker::Target> targets;
     for (const auto &session : std::as_const(m_sessions)) {
         if (session.protocol.compare(QStringLiteral("Serial"), Qt::CaseInsensitive) == 0) {
@@ -5600,10 +5638,13 @@ void MainWindow::checkHostStatus()
         // XDMCP is UDP: a TCP check cannot tell.
         if (session.protocol.compare(QStringLiteral("XDMCP"), Qt::CaseInsensitive) == 0)
             continue;
-        const auto jump = effectiveJumpHost(session);
-        if ((!jump.isEmpty() && jump != JumpHost::Direct)
-            || effectiveProxy(session).type != ProxySettings::Type::None)
+        const auto folder = inherited.value(session.id, {JumpHost::Direct, QString()});
+        auto jump = session.jumpHost.isEmpty() ? folder.first : session.jumpHost;
+        if (session.jumpHost.isEmpty() && jump == JumpHost::SessionPrefix + session.id)
+            jump = JumpHost::Direct;
+        if (!jump.isEmpty() && jump != JumpHost::Direct)
             continue;
+        const auto proxy = session.proxy.isEmpty() ? folder.second : session.proxy;
         QString host = session.host;
         quint16 port = session.port;
         const QString protocol = session.protocol.toUpper();
@@ -5624,16 +5665,13 @@ void MainWindow::checkHostStatus()
             else if (protocol == QStringLiteral("RSH"))
                 port = 514;
             else if (protocol == QStringLiteral("FTP"))
-                port = session.ftp.security == QStringLiteral("implicit")
-                           || (session.ftp.security.isEmpty()
-                               && loadFtpDefaults().security == QStringLiteral("implicit"))
-                    ? 990
-                    : 21;
+                port = session.ftp.security.isEmpty() ? 0
+                       : session.ftp.security == QStringLiteral("implicit") ? 990 : 21;
             else
                 port = 22; // SSH, Mosh
         }
         if (!host.isEmpty())
-            targets.append({session.id, host, port, false});
+            targets.append({session.id, host, port, false, proxy});
     }
     m_hostStatus->check(targets);
 }

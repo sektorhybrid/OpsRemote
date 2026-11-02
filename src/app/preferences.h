@@ -25,6 +25,7 @@ struct TerminalBehaviour
     bool trimPastedNewlines = false;
     QString wordCharacters = QStringLiteral(":@-./_~?&=%+#");
     QString bell = QStringLiteral("visual"); // none, visual, sound
+    bool linksEnabled = true;
     bool ctrlClickOpensLinks = true;
     bool markActivity = true; // Marks background tabs that print output.
 

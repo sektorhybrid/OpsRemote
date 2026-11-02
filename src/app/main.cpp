@@ -35,6 +35,7 @@
 #include <QMenu>
 #include <QScrollBar>
 #include <QTimer>
+#include <QThread>
 #include <QToolButton>
 #include <QTreeWidget>
 
@@ -76,6 +77,8 @@ void watchBusyPointer(QObject *owner)
     struct State
     {
         bool busy = false;
+        bool pending = false;
+        bool haveSnapshot = false;
         QHash<DWORD, QString> processes;
         QStringList started; // in the last few checks
     };
@@ -96,38 +99,50 @@ void watchBusyPointer(QObject *owner)
         CloseHandle(handle);
         return processes;
     };
-    state->processes = snapshot();
     auto *timer = new QTimer(owner);
-    QObject::connect(timer, &QTimer::timeout, owner, [state, snapshot] {
-        const auto now = snapshot();
-        for (auto it = now.cbegin(); it != now.cend(); ++it)
-            if (!state->processes.contains(it.key()))
-                state->started << it.value();
-        while (state->started.size() > 20)
-            state->started.removeFirst();
-        state->processes = now;
-        CURSORINFO cursor{};
-        cursor.cbSize = sizeof cursor;
-        if (!GetCursorInfo(&cursor))
+    QObject::connect(timer, &QTimer::timeout, owner, [owner, state, snapshot] {
+        if (state->pending)
             return;
-        static const HCURSOR starting = LoadCursorW(nullptr, IDC_APPSTARTING);
-        static const HCURSOR wait = LoadCursorW(nullptr, IDC_WAIT);
-        const bool busy = cursor.hCursor == starting || cursor.hCursor == wait;
-        if (busy == state->busy)
-            return;
-        state->busy = busy;
-        if (busy) {
-            POINT point = cursor.ptScreenPos;
-            wchar_t title[256] = {};
-            GetWindowTextW(GetAncestor(WindowFromPoint(point), GA_ROOT), title, 256);
-            qInfo().noquote() << "busy pointer:" << (cursor.hCursor == wait ? "wait" : "starting") << "over"
-                              << QString::fromWCharArray(title) << "| programs started lately:"
-                              << (state->started.isEmpty() ? QStringLiteral("none")
-                                                           : state->started.join(QStringLiteral("; ")));
-            state->started.clear();
-        } else {
-            qInfo("busy pointer: ended");
-        }
+        state->pending = true;
+        auto result = std::make_shared<QHash<DWORD, QString>>();
+        auto *thread = QThread::create([snapshot, result] { *result = snapshot(); });
+        QObject::connect(thread, &QThread::finished, owner, [state, result] {
+            state->pending = false;
+            const auto &now = *result;
+            if (state->haveSnapshot) {
+                for (auto it = now.cbegin(); it != now.cend(); ++it)
+                    if (!state->processes.contains(it.key()))
+                        state->started << it.value();
+            }
+            state->haveSnapshot = true;
+            while (state->started.size() > 20)
+                state->started.removeFirst();
+            state->processes = now;
+            CURSORINFO cursor{};
+            cursor.cbSize = sizeof cursor;
+            if (!GetCursorInfo(&cursor))
+                return;
+            static const HCURSOR starting = LoadCursorW(nullptr, IDC_APPSTARTING);
+            static const HCURSOR wait = LoadCursorW(nullptr, IDC_WAIT);
+            const bool busy = cursor.hCursor == starting || cursor.hCursor == wait;
+            if (busy == state->busy)
+                return;
+            state->busy = busy;
+            if (busy) {
+                POINT point = cursor.ptScreenPos;
+                wchar_t title[256] = {};
+                GetWindowTextW(GetAncestor(WindowFromPoint(point), GA_ROOT), title, 256);
+                qInfo().noquote() << "busy pointer:" << (cursor.hCursor == wait ? "wait" : "starting") << "over"
+                                  << QString::fromWCharArray(title) << "| programs started lately:"
+                                  << (state->started.isEmpty() ? QStringLiteral("none")
+                                                               : state->started.join(QStringLiteral("; ")));
+                state->started.clear();
+            } else {
+                qInfo("busy pointer: ended");
+            }
+        });
+        QObject::connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+        thread->start();
     });
     timer->start(500);
 }

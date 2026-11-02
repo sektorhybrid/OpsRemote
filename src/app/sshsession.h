@@ -31,6 +31,7 @@ struct SshConnectionSettings
     QString password;
     QString knownHostsPath;
     QString terminalType = QStringLiteral("xterm-256color");
+    QString backspace = QStringLiteral("del");
     int connectTimeout = 15; // seconds
     int keepaliveSeconds = 60; // 0 turns keepalives off
     bool compression = false;

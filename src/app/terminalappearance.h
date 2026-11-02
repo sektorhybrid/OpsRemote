@@ -17,14 +17,16 @@ class QTermWidget;
 
 // Colors and font of a terminal. Empty fields mean "not set": in the default
 // appearance they select QTermWidget's built-in scheme and font; in a session
-// override they inherit the default appearance.
+// override they inherit the default appearance. linksEnabled is a per-session
+// behaviour override; -1 follows the global terminal behaviour setting.
 struct TerminalAppearance
 {
     QString colorScheme;
     QString fontFamily;
     int fontSize = 0;
+    int linksEnabled = -1; // -1: global behaviour, 0: disabled, 1: enabled
 
-    bool isEmpty() const { return colorScheme.isEmpty() && fontFamily.isEmpty() && fontSize == 0; }
+    bool isEmpty() const { return colorScheme.isEmpty() && fontFamily.isEmpty() && fontSize == 0 && linksEnabled < 0; }
     // Returns this appearance with every field set in override replacing it.
     TerminalAppearance overriddenBy(const TerminalAppearance &override) const;
     QFont font() const;
@@ -63,6 +65,7 @@ private:
     bool m_overrideMode = false;
     TerminalAppearance m_defaults;
     QComboBox *m_schemeCombo = nullptr;
+    QComboBox *m_linksCombo = nullptr;
     QCheckBox *m_overrideFont = nullptr;
     QFontComboBox *m_fontCombo = nullptr;
     QSpinBox *m_sizeSpin = nullptr;

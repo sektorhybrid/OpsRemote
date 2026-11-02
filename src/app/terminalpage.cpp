@@ -20,6 +20,7 @@
 #include <QTimer>
 #include <QUrl>
 #include <QMenu>
+#include <QKeyEvent>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QRegularExpression>
@@ -121,11 +122,24 @@ void TerminalPage::setAppearance(const TerminalAppearance &appearance)
         return;
     m_appearance = appearance;
     applyTerminalAppearance(m_terminal, m_appearance);
+    applyLinkSettings();
 }
 
 // Ctrl+wheel zooms instead of scrolling or reaching the remote program.
 bool TerminalPage::eventFilter(QObject *watched, QEvent *event)
 {
+    // Only physical terminal keys: pasted DEL bytes and search fields keep
+    // their meaning. Modified Backspace combinations still reach the emulator.
+    if (event->type() == QEvent::KeyPress && watched->inherits("Konsole::TerminalDisplay")
+        && !m_sshSettings.host.isEmpty()) {
+        auto *key = static_cast<QKeyEvent *>(event);
+        if (key->key() == Qt::Key_Backspace && key->modifiers() == Qt::NoModifier) {
+            const char erase = m_sshSettings.backspace == QStringLiteral("ctrl-h") ? '\x08' : '\x7f';
+            handleTerminalInput(&erase, 1);
+            key->accept();
+            return true;
+        }
+    }
     if (event->type() == QEvent::Wheel) {
         auto *wheel = static_cast<QWheelEvent *>(event);
         if (wheel->modifiers() & Qt::ControlModifier) {
@@ -160,6 +174,15 @@ void TerminalPage::setBehaviour(const TerminalBehaviour &behaviour)
     m_terminal->setConfirmMultilinePaste(behaviour.confirmMultilinePaste);
     m_terminal->setTrimPastedTrailingNewlines(behaviour.trimPastedNewlines);
     m_terminal->setWordCharacters(behaviour.wordCharacters);
+    applyLinkSettings();
+}
+
+void TerminalPage::applyLinkSettings()
+{
+    const bool enabled = m_appearance.linksEnabled < 0 ? m_behaviour.linksEnabled
+                                                     : m_appearance.linksEnabled == 1;
+    m_terminal->setLinksEnabled(enabled);
+    m_terminal->setLinkTooltipsEnabled(enabled);
 }
 
 void TerminalPage::setShortcuts(const QHash<QString, QKeySequence> &shortcuts)
@@ -184,7 +207,12 @@ void TerminalPage::setShortcuts(const QHash<QString, QKeySequence> &shortcuts)
     m_zoomOutAction->setShortcuts(zoomKeys(QStringLiteral("zoom_out"), {keypad(Qt::Key_Minus)}));
     m_resetZoomAction->setShortcuts(zoomKeys(QStringLiteral("zoom_reset"), {keypad(Qt::Key_0)}));
     m_copyAction->setShortcut(shortcuts.value(QStringLiteral("copy")));
-    m_pasteAction->setShortcut(shortcuts.value(QStringLiteral("paste")));
+    const auto paste = shortcuts.value(QStringLiteral("paste"));
+    const QKeySequence shiftInsert(Qt::SHIFT | Qt::Key_Insert);
+    QList<QKeySequence> pasteKeys{shiftInsert};
+    if (!paste.isEmpty() && paste != shiftInsert)
+        pasteKeys.prepend(paste);
+    m_pasteAction->setShortcuts(pasteKeys);
     m_findAction->setShortcut(shortcuts.value(QStringLiteral("find")));
     m_clearAction->setShortcut(shortcuts.value(QStringLiteral("clear")));
 }
@@ -288,7 +316,7 @@ void TerminalPage::createTerminal()
             QApplication::clipboard()->setText(m_terminal->selectedText());
     });
     connect(m_terminal, &QTermWidget::urlActivated, this, [this](const QUrl &url, bool fromMenu) {
-        if (fromMenu || m_behaviour.ctrlClickOpensLinks)
+        if (m_terminal->linksEnabled() && (fromMenu || m_behaviour.ctrlClickOpensLinks))
             QDesktopServices::openUrl(url);
     });
     connect(m_terminal, &QTermWidget::bell, this, [this] {

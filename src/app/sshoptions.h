@@ -28,6 +28,7 @@ struct SshOptions
     int reconnectDelay = 0; // seconds
     int reconnectAttempts = -1;
     QString terminalType;
+    QString backspace; // empty or "del": DEL; "ctrl-h": BS
     int followTerminalFolder = -1;
     int forwardX11 = -1;
     QString fileTransfer; // auto, sftp, scp
@@ -63,6 +64,7 @@ private:
     QSpinBox *m_reconnectDelay = nullptr;
     QSpinBox *m_reconnectAttempts = nullptr;
     QComboBox *m_terminalType = nullptr;
+    QComboBox *m_backspace = nullptr;
     QCheckBox *m_followTerminalFolder = nullptr;
     QCheckBox *m_forwardX11 = nullptr;
     QComboBox *m_fileTransfer = nullptr;

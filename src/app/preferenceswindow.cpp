@@ -984,6 +984,12 @@ void PreferencesWindow::buildTerminalPage()
     connect(wordChars, &QLineEdit::editingFinished, this, [update, wordChars] {
         update([&](TerminalBehaviour &b) { b.wordCharacters = wordChars->text(); });
     });
+    auto *linkable = toggle(current.linksEnabled);
+    mouse->addRow(QStringLiteral("Enable terminal links"),
+                  QStringLiteral("Make web addresses and application-provided links clickable. "
+                                 "Saved sessions can override this setting."), linkable,
+                  QStringLiteral("url hyperlink browser osc8 disable"));
+    connectToggle(linkable, &TerminalBehaviour::linksEnabled);
     auto *links = toggle(current.ctrlClickOpensLinks);
     mouse->addRow(QStringLiteral("Ctrl+click opens links"),
                   QStringLiteral("Web addresses in the output open in your browser."), links,

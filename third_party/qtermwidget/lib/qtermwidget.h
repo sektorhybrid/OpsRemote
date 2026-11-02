@@ -275,6 +275,8 @@ public:
     void setConfirmMultilinePaste(bool confirmMultilinePaste) override;
     void setTrimPastedTrailingNewlines(bool trimPastedTrailingNewlines) override;
 
+    void setLinksEnabled(bool enabled) override;
+    bool linksEnabled() const override;
     void setOsc8HyperlinksEnabled(bool enabled) override;
     bool osc8HyperlinksEnabled() const override;
     void setLinkTooltipsEnabled(bool enabled) override;

@@ -435,6 +435,8 @@ public:
      * Processes each filter in the chain
      */
     void process();
+    void setLinksEnabled(bool enabled) { _linksEnabled = enabled; }
+    bool linksEnabled() const { return _linksEnabled; }
 
     /** Sets the buffer for each filter in the chain to process. */
     void setBuffer(const QString* buffer , const QList<int>* linePositions);
@@ -452,6 +454,8 @@ public:
     /** Returns a list of all hotspots at the given line in all the chain's filters */
     QList<Filter::HotSpot> hotSpotsAtLine(int line) const;
 
+private:
+    bool _linksEnabled = true;
 };
 
 /** A filter chain which processes character images from terminal displays */

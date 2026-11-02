@@ -871,6 +871,22 @@ void QTermWidget::setTrimPastedTrailingNewlines(bool trimPastedTrailingNewlines)
     m_impl->m_terminalDisplay->setTrimPastedTrailingNewlines(trimPastedTrailingNewlines);
 }
 
+void QTermWidget::setLinksEnabled(bool enabled)
+{
+    auto *display = m_impl->m_terminalDisplay;
+    if (display->filterChain()->linksEnabled() == enabled)
+        return;
+    display->filterChain()->setLinksEnabled(enabled);
+    display->processFilters();
+    if (!enabled)
+        display->setLinkTooltipsEnabled(false);
+}
+
+bool QTermWidget::linksEnabled() const
+{
+    return m_impl->m_terminalDisplay->filterChain()->linksEnabled();
+}
+
 void QTermWidget::setOsc8HyperlinksEnabled(bool enabled)
 {
     if (auto* filter = m_impl->m_terminalDisplay->filterChain()->getHyperlinkFilter()) {

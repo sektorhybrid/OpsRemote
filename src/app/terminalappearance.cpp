@@ -76,6 +76,8 @@ TerminalAppearance TerminalAppearance::overriddenBy(const TerminalAppearance &ov
         result.fontFamily = override.fontFamily;
     if (override.fontSize > 0)
         result.fontSize = override.fontSize;
+    if (override.linksEnabled >= 0)
+        result.linksEnabled = override.linksEnabled;
     return result;
 }
 
@@ -279,6 +281,15 @@ TerminalAppearanceEditor::TerminalAppearanceEditor(const TerminalAppearance &val
     m_sizeSpin->setValue(shownFont.pointSize());
     fontRow->addWidget(m_sizeSpin);
     form->addRow(QStringLiteral("Font:"), fontRow);
+    if (overrideMode) {
+        m_linksCombo = new QComboBox(this);
+        m_linksCombo->addItem(QStringLiteral("Use global setting"), -1);
+        m_linksCombo->addItem(QStringLiteral("Enabled"), 1);
+        m_linksCombo->addItem(QStringLiteral("Disabled"), 0);
+        m_linksCombo->setCurrentIndex(qMax(0, m_linksCombo->findData(value.linksEnabled)));
+        m_linksCombo->setToolTip(QStringLiteral("Controls detected URLs and application-provided links."));
+        form->addRow(QStringLiteral("Terminal links:"), m_linksCombo);
+    }
 
     m_preview = new QTermWidget(0, this);
     registerTerminalResources(m_preview);
@@ -299,6 +310,8 @@ TerminalAppearanceEditor::TerminalAppearanceEditor(const TerminalAppearance &val
             changed();
     };
     connect(m_schemeCombo, &QComboBox::currentIndexChanged, this, refresh);
+    if (m_linksCombo)
+        connect(m_linksCombo, &QComboBox::currentIndexChanged, this, refresh);
     connect(m_fontCombo, &QFontComboBox::currentFontChanged, this, refresh);
     connect(m_sizeSpin, &QSpinBox::valueChanged, this, refresh);
     if (m_overrideFont)
@@ -317,6 +330,8 @@ TerminalAppearance TerminalAppearanceEditor::value() const
 {
     TerminalAppearance result;
     result.colorScheme = m_schemeCombo->currentData().toString();
+    if (m_linksCombo)
+        result.linksEnabled = m_linksCombo->currentData().toInt();
     if (!m_overrideFont || m_overrideFont->isChecked()) {
         result.fontFamily = m_fontCombo->currentFont().family();
         result.fontSize = m_sizeSpin->value();

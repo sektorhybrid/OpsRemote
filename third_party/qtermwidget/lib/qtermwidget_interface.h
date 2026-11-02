@@ -98,6 +98,8 @@ class QTermWidgetInterface {
    virtual void setBoldIntense(bool boldIntense) = 0;
    virtual void setConfirmMultilinePaste(bool confirmMultilinePaste) = 0;
    virtual void setTrimPastedTrailingNewlines(bool trimPastedTrailingNewlines) = 0;
+   virtual void setLinksEnabled(bool enabled) = 0;
+   virtual bool linksEnabled() const = 0;
    virtual void setOsc8HyperlinksEnabled(bool enabled) = 0;
    virtual bool osc8HyperlinksEnabled() const = 0;
    virtual void setLinkTooltipsEnabled(bool enabled) = 0;

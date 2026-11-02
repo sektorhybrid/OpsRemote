@@ -83,6 +83,9 @@ SshOptions sshOptionsFromYaml(const YAML::Node &node)
         number("reconnect_delay", options.reconnectDelay, 1, 600);
         number("reconnect_attempts", options.reconnectAttempts, 0, 100);
         text("terminal_type", options.terminalType);
+        text("backspace", options.backspace);
+        if (options.backspace != QStringLiteral("del") && options.backspace != QStringLiteral("ctrl-h"))
+            options.backspace.clear();
     } catch (const YAML::Exception &) {
         // Keep what was read; invalid values use the defaults.
     }
@@ -117,6 +120,8 @@ void sshOptionsToYaml(const SshOptions &options, YAML::Node &node)
         node["reconnect_attempts"] = options.reconnectAttempts;
     if (!options.terminalType.isEmpty())
         node["terminal_type"] = options.terminalType.toStdString();
+    if (!options.backspace.isEmpty())
+        node["backspace"] = options.backspace.toStdString();
 }
 
 QList<QPair<QString, QString>> sshFileTransferChoices()
@@ -226,6 +231,11 @@ SshOptionsEditor::SshOptionsEditor(const SshOptions &value, const SshPreferences
     else
         m_terminalType->setEditText(value.terminalType);
     m_terminalType->setToolTip(QStringLiteral("The TERM name sent to the server."));
+    m_backspace = new QComboBox(this);
+    m_backspace->addItem(QStringLiteral("DEL (default, ^?)"), QString());
+    m_backspace->addItem(QStringLiteral("Ctrl+H (^H)"), QStringLiteral("ctrl-h"));
+    m_backspace->setCurrentIndex(value.backspace == QStringLiteral("ctrl-h") ? 1 : 0);
+    m_backspace->setToolTip(QStringLiteral("Match the remote system's erase character (stty -a)."));
 
     auto *form = new QFormLayout(this);
     form->addRow(QStringLiteral("Connect timeout:"), m_connectTimeout);
@@ -245,6 +255,7 @@ SshOptionsEditor::SshOptionsEditor(const SshOptions &value, const SshPreferences
     form->addRow(QStringLiteral("Reconnect after:"), m_reconnectDelay);
     form->addRow(QStringLiteral("Reconnect attempts:"), m_reconnectAttempts);
     form->addRow(QStringLiteral("Terminal type:"), m_terminalType);
+    form->addRow(QStringLiteral("Backspace sends:"), m_backspace);
 }
 
 SshOptions SshOptionsEditor::value() const
@@ -270,6 +281,7 @@ SshOptions SshOptionsEditor::value() const
     options.autoReconnect = flag(m_autoReconnect, m_defaults.autoReconnect);
     options.identityFile = m_identityFile->text().trimmed();
     options.fileTransfer = m_fileTransfer->currentData().toString();
+    options.backspace = m_backspace->currentData().toString();
     const int index = m_terminalType->currentIndex();
     options.terminalType = index >= 0 && m_terminalType->itemText(index) == m_terminalType->currentText()
                                ? m_terminalType->itemData(index).toString()

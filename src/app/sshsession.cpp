@@ -16,6 +16,7 @@
 #include <QFileDevice>
 #include <QFileInfo>
 #include <QSaveFile>
+#include <QScopeGuard>
 #include <QSocketNotifier>
 #include <QDeadlineTimer>
 #include <QMutex>
@@ -282,6 +283,8 @@ public:
     void cancelPrompts();
 
     void queryShellFolder();
+    void pumpShellFolder();
+    void finishShellFolder(bool report);
     void addForwards(const QList<PortForward> &forwards, int firstIndex);
     void removeForwards(int firstIndex, int count);
     void probe(int id, const QString &host, quint16 port);
@@ -364,6 +367,13 @@ private:
     ssh_channel m_channel = nullptr;
     // The LC_OPSREMOTE_TAG value given to the shell, if the server took it.
     QByteArray m_shellTag;
+    enum class FolderStage { Opening, Executing, Reading };
+    ssh_channel m_folderChannel = nullptr;
+    QTimer *m_folderPoll = nullptr;
+    QElapsedTimer m_folderElapsed;
+    FolderStage m_folderStage = FolderStage::Opening;
+    QByteArray m_folderCommand;
+    QByteArray m_folderOutput;
     QSocketNotifier *m_notifier = nullptr;
     // One SSH channel per forwarded connection. A SOCKS connection has no
     // channel until its request has been read.
@@ -2129,6 +2139,7 @@ void SshWorker::finish(const QString &reason, bool error)
 
 void SshWorker::closeSession()
 {
+    finishShellFolder(false);
     delete m_notifier;
     m_notifier = nullptr;
     while (!m_forwards.isEmpty())
@@ -2299,38 +2310,111 @@ void SshWorker::schedulePump()
 // or without the tag report nothing.
 void SshWorker::queryShellFolder()
 {
-    if (m_shellTag.isEmpty() || !m_session)
+    // Coalesce requests while one lookup is already in flight.
+    if (m_shellTag.isEmpty() || !m_session || m_finished || m_folderChannel)
         return;
-    ssh_channel channel = ssh_channel_new(m_session);
-    if (!channel)
+    m_folderChannel = ssh_channel_new(m_session);
+    if (!m_folderChannel)
         return;
-    const QByteArray command =
+    m_folderCommand =
         "for f in $(grep -lzx 'LC_OPSREMOTE_TAG=" + m_shellTag
         + "' /proc/[0-9]*/environ 2>/dev/null); do d=${f%/environ}; "
           "case $(cat \"$d/comm\" 2>/dev/null) in bash|zsh|sh|fish|dash|ksh|mksh|tcsh|csh|ash) "
           "echo \"${d#/proc/} $(readlink \"$d/cwd\")\";; esac; done | sort -n | tail -n 1";
-    QByteArray output;
-    if (ssh_channel_open_session(channel) == SSH_OK
-        && ssh_channel_request_exec(channel, command.constData()) == SSH_OK) {
-        char buffer[1024];
-        QElapsedTimer timer;
-        timer.start();
-        while (output.size() < 8192 && timer.elapsed() < 3000) {
-            const int read = ssh_channel_read_timeout(channel, buffer, sizeof buffer, 0, 500);
-            if (read > 0)
-                output.append(buffer, read);
-            else if (read < 0 || ssh_channel_is_eof(channel))
+    m_folderOutput.clear();
+    m_folderStage = FolderStage::Opening;
+    m_folderElapsed.start();
+    if (!m_folderPoll) {
+        m_folderPoll = new QTimer(this);
+        m_folderPoll->setInterval(20);
+        connect(m_folderPoll, &QTimer::timeout, this, [this] {
+            pumpShellFolder();
+            // Query replies can buffer terminal data without another socket
+            // notification. Drain it after restoring the session's mode.
+            if (m_session && !m_finished)
+                readAvailable();
+        });
+    }
+    m_folderPoll->start();
+    pumpShellFolder();
+}
+
+void SshWorker::pumpShellFolder()
+{
+    if (!m_folderChannel || !m_session)
+        return;
+    const int blocking = ssh_is_blocking(m_session);
+    ssh_set_blocking(m_session, 0);
+    const auto restore = qScopeGuard([this, blocking] { ssh_set_blocking(m_session, blocking); });
+    if (m_folderElapsed.elapsed() >= 3000) {
+        finishShellFolder(false);
+        return;
+    }
+    if (m_folderStage == FolderStage::Opening) {
+        const int rc = ssh_channel_open_session(m_folderChannel);
+        if (rc == SSH_AGAIN)
+            return;
+        if (rc != SSH_OK) {
+            finishShellFolder(false);
+            return;
+        }
+        m_folderStage = FolderStage::Executing;
+    }
+    if (m_folderStage == FolderStage::Executing) {
+        const int rc = ssh_channel_request_exec(m_folderChannel, m_folderCommand.constData());
+        if (rc == SSH_AGAIN)
+            return;
+        if (rc != SSH_OK) {
+            finishShellFolder(false);
+            return;
+        }
+        m_folderStage = FolderStage::Reading;
+    }
+    char buffer[1024];
+    // Bound both streams per tick, including stderr from unusual login scripts.
+    for (const int stream : {0, 1}) {
+        for (int batch = 0; batch < 8; ++batch) {
+            const int count = ssh_channel_read_nonblocking(m_folderChannel, buffer, sizeof buffer, stream);
+            if (count == SSH_ERROR) {
+                finishShellFolder(false);
+                return;
+            }
+            if (count <= 0)
                 break;
+            if (stream == 0)
+                m_folderOutput.append(buffer, count);
+            if (m_folderOutput.size() >= 8192) {
+                finishShellFolder(false);
+                return;
+            }
         }
     }
-    ssh_channel_close(channel);
-    ssh_channel_free(channel);
-    readAvailable();
-    // "<pid> <folder>"
-    const QString line = QString::fromUtf8(output).trimmed();
-    const QString folder = line.section(QLatin1Char(' '), 1);
-    if (folder.startsWith(QLatin1Char('/')))
-        emit shellFolder(folder);
+    if (ssh_channel_is_eof(m_folderChannel) || ssh_channel_is_closed(m_folderChannel))
+        finishShellFolder(true);
+}
+
+void SshWorker::finishShellFolder(bool report)
+{
+    if (m_folderPoll)
+        m_folderPoll->stop();
+    if (!m_folderChannel)
+        return;
+    const int blocking = ssh_is_blocking(m_session);
+    ssh_set_blocking(m_session, 0);
+    ssh_channel_free(m_folderChannel);
+    m_folderChannel = nullptr;
+    ssh_set_blocking(m_session, blocking);
+    const auto output = std::exchange(m_folderOutput, {});
+    m_folderCommand.clear();
+    if (report) {
+        const QString line = QString::fromUtf8(output).trimmed();
+        const QString folder = line.section(QLatin1Char(' '), 1);
+        if (folder.startsWith(QLatin1Char('/')))
+            emit shellFolder(folder);
+    }
+    // Nonblocking channel operations may have consumed other channels' packets.
+    if (!m_finished)
+        schedulePump();
 }
 
 SshSession::SshSession(QObject *parent)
