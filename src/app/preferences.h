@@ -40,6 +40,9 @@ struct StartupPreferences
     bool confirmExit = true;
     bool newTabNextToCurrent = false;
     bool middleClickCloses = true;
+    // Off: choosing an already-open saved session focuses its existing tab.
+    // On: every Open command starts an independent tab/connection.
+    bool allowDuplicateSessionTabs = false;
     QString tabTitle = QStringLiteral("name"); // name, userhost
     bool rememberWindow = true;
     // Session list entries read "Name (host)".

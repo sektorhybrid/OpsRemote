@@ -1084,6 +1084,13 @@ void PreferencesWindow::buildStartupPage()
                  QStringLiteral("Otherwise new tabs open at the end."), nextTo,
                  QStringLiteral("position order"));
     connectToggle(nextTo, &StartupPreferences::newTabNextToCurrent);
+    auto *duplicates = toggle(current.allowDuplicateSessionTabs);
+    tabs->addRow(QStringLiteral("Allow the same saved session in multiple tabs"),
+                 QStringLiteral("Off: opening an already-open saved session selects its tab. "
+                                "On: every Open command creates an independent connection. "
+                                "Applies to every session type."),
+                 duplicates, QStringLiteral("duplicate same session multiple tabs connections"));
+    connectToggle(duplicates, &StartupPreferences::allowDuplicateSessionTabs);
     auto *middle = toggle(current.middleClickCloses);
     tabs->addRow(QStringLiteral("Middle-click closes a tab"), QString(), middle,
                  QStringLiteral("mouse wheel button"));

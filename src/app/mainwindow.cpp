@@ -3529,14 +3529,16 @@ void MainWindow::addSession(const SessionDefinition &session, QTreeWidgetItem *p
 
 void MainWindow::openSession(const SessionDefinition &session)
 {
-    for (int index = 0; index < m_sessionTabs->count(); ++index) {
-        auto *page = m_sessionTabs->widget(index);
-        bool open = page && page->property("sessionId").toString() == session.id;
-        for (auto *pane : terminalPagesIn(page))
-            open = open || pane->property("sessionId").toString() == session.id;
-        if (open) {
-            m_sessionTabs->setCurrentIndex(index);
-            return;
+    if (!m_startup.allowDuplicateSessionTabs) {
+        for (int index = 0; index < m_sessionTabs->count(); ++index) {
+            auto *page = m_sessionTabs->widget(index);
+            bool open = page && page->property("sessionId").toString() == session.id;
+            for (auto *pane : terminalPagesIn(page))
+                open = open || pane->property("sessionId").toString() == session.id;
+            if (open) {
+                m_sessionTabs->setCurrentIndex(index);
+                return;
+            }
         }
     }
 
@@ -5187,12 +5189,20 @@ void MainWindow::restoreStartupTabs()
         if (LocalTerminalSupported)
             openLocalTerminal();
     } else if (m_startup.onStartup == QStringLiteral("restore")) {
+        // Startup restoration opens each saved definition once. The separate
+        // duplicate-tabs preference controls only a deliberate Open action in
+        // this run; it must not turn a former duplicated view into a new
+        // persistence rule.
+        QSet<QString> restored;
         for (const auto &id : loadOpenSessions()) {
             if (id == QStringLiteral("local")) {
                 if (LocalTerminalSupported)
                     openLocalTerminal();
                 continue;
             }
+            if (restored.contains(id))
+                continue;
+            restored.insert(id);
             const auto session = m_sessions.constFind(id);
             if (session != m_sessions.cend())
                 openSession(*session);

@@ -662,6 +662,7 @@ StartupPreferences loadStartupPreferences()
     read(node, "confirm_exit", value.confirmExit);
     read(node, "new_tab_next_to_current", value.newTabNextToCurrent);
     read(node, "middle_click_closes", value.middleClickCloses);
+    read(node, "allow_duplicate_session_tabs", value.allowDuplicateSessionTabs);
     readChoice(node, "tab_title", value.tabTitle,
                {QStringLiteral("name"), QStringLiteral("userhost")});
     read(node, "remember_window", value.rememberWindow);
@@ -692,6 +693,7 @@ void saveStartupPreferences(const StartupPreferences &value)
     node["confirm_exit"] = value.confirmExit;
     node["new_tab_next_to_current"] = value.newTabNextToCurrent;
     node["middle_click_closes"] = value.middleClickCloses;
+    node["allow_duplicate_session_tabs"] = value.allowDuplicateSessionTabs;
     node["tab_title"] = value.tabTitle.toStdString();
     node["remember_window"] = value.rememberWindow;
     node["single_instance"] = value.singleInstance;
