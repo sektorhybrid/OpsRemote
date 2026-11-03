@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "sshsession.h"
+#include "workerthreads.h"
 #include "sshfiles.h"
 
 #include "appdirs.h"
@@ -71,10 +72,6 @@ constexpr long ConnectTimeoutSeconds = 15;
 constexpr qsizetype MaximumReadBatch = 256 * 1024;
 constexpr qint64 SftpQuietPeriodMs = 250;
 constexpr qint64 SftpMaximumDrainMs = 2000;
-
-// Worker threads that have not finished yet; see SshSession::shutdownAll().
-QMutex workerThreadsMutex;
-QSet<QThread *> workerThreads;
 
 void ensureLibsshInitialized()
 {
@@ -2418,24 +2415,14 @@ void SshWorker::finishShellFolder(bool report)
 }
 
 SshSession::SshSession(QObject *parent)
-    : RemoteFileSession(parent), m_thread(new QThread), m_worker(new SshWorker)
+    : RemoteFileSession(parent), m_worker(new SshWorker)
 {
-    m_thread->setObjectName(QStringLiteral("ssh-session"));
-    m_worker->moveToThread(m_thread);
-    // The thread and worker outlive this handle until a blocking libssh call
-    // (for example a connection attempt) returns; they then delete themselves.
-    connect(m_thread, &QThread::finished, m_worker, &QObject::deleteLater);
-    connect(m_thread, &QThread::finished, m_thread, &QObject::deleteLater);
-    {
-        QMutexLocker locker(&workerThreadsMutex);
-        workerThreads.insert(m_thread);
-    }
-    // Runs in the worker thread as it ends, after the worker has been
-    // deleted (which disconnects the session).
-    connect(m_thread, &QThread::finished, m_thread, [thread = m_thread] {
-        QMutexLocker locker(&workerThreadsMutex);
-        workerThreads.remove(thread);
-    }, Qt::DirectConnection);
+    // A kept thread (see workerthreads.h); the worker outlives this handle
+    // until a blocking libssh call (a connection attempt, say) returns.
+    QThread *thread = WorkerThreads::acquire(QStringLiteral("ssh-session"));
+    m_worker->moveToThread(thread);
+    // At shutdownAll(), when the thread does end.
+    connect(thread, &QThread::finished, m_worker, &QObject::deleteLater);
 
     connect(m_worker, &SshWorker::statusMessage, this, &SshSession::statusMessage);
     connect(m_worker, &SshWorker::hostKeyVerificationRequired,
@@ -2458,38 +2445,18 @@ SshSession::SshSession(QObject *parent)
     connect(m_worker, &SshWorker::sftpUnavailable, this, &SshSession::sftpUnavailable);
     connect(m_worker, &SshWorker::shellFolder, this, &SshSession::shellFolder);
     relay(m_worker->files());
-    m_thread->start();
 }
 
 SshSession::~SshSession()
 {
     // The worker may still be inside a blocking libssh call. It is not waited
-    // for here: stop listening to it, then let its event loop end, which
-    // deletes the worker and then the thread in that thread (see the
-    // constructor). Calls queued to it after quit() are dropped, never run.
-    // shutdownAll() waits for every such thread before the process exits.
+    // for here: stop listening to it; it is deleted in its thread (closing
+    // the channel and disconnecting) once that call returns, and the thread
+    // is kept for the next session. WorkerThreads::shutdownAll() waits for
+    // them all before the process exits.
     disconnect(m_worker, nullptr, this, nullptr);
-    m_thread->quit();
+    WorkerThreads::release(m_worker);
     m_worker = nullptr;
-    m_thread = nullptr;
-}
-
-bool SshSession::shutdownAll(int timeoutMs)
-{
-    QList<QThread *> threads;
-    {
-        QMutexLocker locker(&workerThreadsMutex);
-        threads = workerThreads.values();
-    }
-    // Quitting a worker's event loop deletes the worker in its thread, which
-    // closes the channel and disconnects.
-    for (auto *thread : std::as_const(threads))
-        thread->quit();
-    const QDeadlineTimer deadline(timeoutMs);
-    bool finished = true;
-    for (auto *thread : std::as_const(threads))
-        finished = thread->wait(deadline) && finished;
-    return finished;
 }
 
 void SshSession::connectToHost(const SshConnectionSettings &settings)

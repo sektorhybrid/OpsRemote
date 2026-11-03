@@ -22,6 +22,7 @@
 #include <QMenu>
 #include <QKeyEvent>
 #include <QMessageBox>
+#include <QMouseEvent>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QSaveFile>
@@ -137,6 +138,24 @@ bool TerminalPage::eventFilter(QObject *watched, QEvent *event)
             const char erase = m_sshSettings.backspace == QStringLiteral("ctrl-h") ? '\x08' : '\x7f';
             handleTerminalInput(&erase, 1);
             key->accept();
+            return true;
+        }
+    }
+    // Middle-click, unless the program in the terminal takes the mouse (Shift overrides).
+    if (event->type() == QEvent::MouseButtonPress && watched->inherits("Konsole::TerminalDisplay")) {
+        auto *mouse = static_cast<QMouseEvent *>(event);
+        if (mouse->button() == Qt::MiddleButton
+            && (!m_terminal->terminalUsesMouse() || (mouse->modifiers() & Qt::ShiftModifier))) {
+            const auto &action = m_behaviour.middleClick;
+            if (action == QStringLiteral("paste"))
+                m_terminal->pasteSelection();
+            else if (action == QStringLiteral("clipboard"))
+                m_terminal->pasteClipboard();
+            else if (action == QStringLiteral("menu"))
+                showTerminalMenu(static_cast<QWidget *>(watched)->mapTo(m_terminal,
+                                                                         mouse->position().toPoint()),
+                                 true);
+            mouse->accept();
             return true;
         }
     }
@@ -338,7 +357,7 @@ void TerminalPage::createTerminal()
     });
 
     connect(m_terminal, &QWidget::customContextMenuRequested,
-            this, &TerminalPage::showTerminalMenu);
+            this, [this](const QPoint &position) { showTerminalMenu(position); });
     for (auto *child : m_terminal->findChildren<QWidget *>()) {
         child->installEventFilter(this);
         child->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -349,12 +368,13 @@ void TerminalPage::createTerminal()
     }
 }
 
-void TerminalPage::showTerminalMenu(const QPoint &position)
+void TerminalPage::showTerminalMenu(const QPoint &position, bool always)
 {
     // Like PuTTY and MobaXterm: right-click pastes, Shift+right-click opens the menu.
-    if (m_behaviour.rightClick == QStringLiteral("paste")
+    if (!always && m_behaviour.rightClick != QStringLiteral("menu")
         && !(QApplication::keyboardModifiers() & Qt::ShiftModifier)) {
-        m_terminal->pasteClipboard();
+        if (m_behaviour.rightClick == QStringLiteral("paste"))
+            m_terminal->pasteClipboard();
         return;
     }
     QMenu menu(this);

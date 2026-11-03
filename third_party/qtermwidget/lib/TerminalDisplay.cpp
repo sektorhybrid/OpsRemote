@@ -3161,6 +3161,9 @@ void TerminalDisplay::emitSelection(bool useXselection,bool appendReturn)
       return;
 
   // Paste Clipboard by simulating keypress events
+  // Windows and macOS have no X11 primary selection: use the clipboard there.
+  if (useXselection && !QApplication::clipboard()->supportsSelection())
+      useXselection = false;
   QString text = QApplication::clipboard()->text(useXselection ? QClipboard::Selection :
                                                                  QClipboard::Clipboard);
   if ( ! text.isEmpty() )

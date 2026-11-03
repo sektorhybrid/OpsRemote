@@ -5,6 +5,7 @@
 
 #include <QHash>
 #include <QList>
+#include <QMutex>
 #include <QObject>
 #include <QPointer>
 #include <QString>
@@ -32,7 +33,7 @@ public:
         QString proxy; // empty inherits SSH preferences, resolved off the GUI thread
     };
 
-    using QObject::QObject;
+    explicit HostStatusChecker(QObject *parent = nullptr);
     ~HostStatusChecker() override;
 
     // Checks these, a few at a time; Unknown for sessions not listed.
@@ -49,12 +50,25 @@ signals:
     void changed();
 
 private:
+    // Who a finishing batch reports to; cleared (under the lock) when the
+    // checker goes, so the worker never posts to a destroyed object.
+    struct Owner
+    {
+        QMutex mutex;
+        HostStatusChecker *checker = nullptr;
+    };
+
     void start(const QList<Target> &targets);
+    void finished(int generation, const QHash<QString, Status> &result);
+    static void run(const QList<Target> &targets, const std::shared_ptr<std::atomic_bool> &cancel,
+                    const std::shared_ptr<QHash<QString, Status>> &result);
 
     QHash<QString, Status> m_status;
     bool m_running = false;
     std::shared_ptr<std::atomic_bool> m_cancel;
-    QPointer<QThread> m_thread;
+    std::shared_ptr<Owner> m_owner;
+    QThread *m_thread = nullptr; // started with the first check, kept until shutdown
+    QObject *m_worker = nullptr; // lives in m_thread
     std::optional<QList<Target>> m_pendingTargets;
     int m_generation = 0; // checks from before clear() are ignored
 };

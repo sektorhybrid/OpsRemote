@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
+#include "stallwatch.h"
+#include "workerthreads.h"
 #include "mainwindow.h"
 #ifdef Q_OS_WIN
 #include "conpty.h"
@@ -77,62 +79,41 @@ void writeLog(QtMsgType, const QMessageLogContext &, const QString &message)
 }
 
 #ifdef Q_OS_WIN
-// With OPSREMOTE_LOG: notes when Windows shows its busy or "starting"
+// With OPSREMOTE_LOG (unless OPSREMOTE_LOG_BUSY_POINTER=0): notes when Windows shows its busy or "starting"
 // pointer, and which programs started shortly before, to find what causes it.
 void watchBusyPointer(QObject *owner)
 {
-    struct State
-    {
-        ~State()
+    // All of it on one thread that lives as long as the program: on Windows
+    // every thread that ends pauses the whole program for about a second,
+    // and this used to start one every half second.
+    auto *thread = new QThread(owner);
+    thread->setObjectName(QStringLiteral("Busy-pointer watch"));
+    auto *worker = new QObject;
+    worker->moveToThread(thread);
+    QObject::connect(thread, &QThread::finished, worker, &QObject::deleteLater);
+    QObject::connect(thread, &QThread::started, worker, [worker] {
+        struct State
         {
-            if (!worker)
-                return;
-            worker->requestInterruption();
-            worker->quit();
-            if (!worker->wait(1000))
-                qWarning("busy-pointer snapshot did not finish before shutdown deadline");
-        }
-
-        bool busy = false;
-        bool pending = false;
-        bool haveSnapshot = false;
-        QPointer<QThread> worker;
-        QHash<DWORD, QString> processes;
-        QStringList started; // in the last few checks
-    };
-    auto state = std::make_shared<State>();
-    const auto snapshot = [] {
-        QHash<DWORD, QString> processes;
-        HANDLE handle = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-        if (handle == INVALID_HANDLE_VALUE)
-            return processes;
-        PROCESSENTRY32W entry{};
-        entry.dwSize = sizeof entry;
-        for (BOOL more = Process32FirstW(handle, &entry);
-             more && !QThread::currentThread()->isInterruptionRequested();
-             more = Process32NextW(handle, &entry))
-            processes.insert(entry.th32ProcessID,
-                             QStringLiteral("%1 (%2, parent %3)")
-                                 .arg(QString::fromWCharArray(entry.szExeFile))
-                                 .arg(entry.th32ProcessID)
-                                 .arg(entry.th32ParentProcessID));
-        CloseHandle(handle);
-        return processes;
-    };
-    auto *timer = new QTimer(owner);
-    QObject::connect(timer, &QTimer::timeout, owner, [owner, state, snapshot] {
-        if (state->pending)
-            return;
-        state->pending = true;
-        auto result = std::make_shared<QHash<DWORD, QString>>();
-        auto *thread = QThread::create([snapshot, result] { *result = snapshot(); });
-        state->worker = thread;
-        QObject::connect(thread, &QThread::finished, owner, [state, thread, result] {
-            if (state->worker != thread)
-                return;
-            state->worker = nullptr;
-            state->pending = false;
-            const auto &now = *result;
+            bool busy = false;
+            bool haveSnapshot = false;
+            QHash<DWORD, QString> processes;
+            QStringList started; // in the last few checks
+        };
+        auto state = std::make_shared<State>();
+        auto *timer = new QTimer(worker);
+        QObject::connect(timer, &QTimer::timeout, worker, [state] {
+            QHash<DWORD, QString> now;
+            HANDLE handle = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if (handle != INVALID_HANDLE_VALUE) {
+                PROCESSENTRY32W entry{};
+                entry.dwSize = sizeof entry;
+                for (BOOL more = Process32FirstW(handle, &entry); more; more = Process32NextW(handle, &entry))
+                    now.insert(entry.th32ProcessID, QStringLiteral("%1 (%2, parent %3)")
+                                                         .arg(QString::fromWCharArray(entry.szExeFile))
+                                                         .arg(entry.th32ProcessID)
+                                                         .arg(entry.th32ParentProcessID));
+                CloseHandle(handle);
+            }
             if (state->haveSnapshot) {
                 for (auto it = now.cbegin(); it != now.cend(); ++it)
                     if (!state->processes.contains(it.key()))
@@ -153,9 +134,10 @@ void watchBusyPointer(QObject *owner)
                 return;
             state->busy = busy;
             if (busy) {
-                POINT point = cursor.ptScreenPos;
+                // InternalGetWindowText sends no message, so a stuck window
+                // (OpsRemote's own, say) cannot hold this thread up.
                 wchar_t title[256] = {};
-                GetWindowTextW(GetAncestor(WindowFromPoint(point), GA_ROOT), title, 256);
+                InternalGetWindowText(GetAncestor(WindowFromPoint(cursor.ptScreenPos), GA_ROOT), title, 256);
                 qInfo().noquote() << "busy pointer:" << (cursor.hCursor == wait ? "wait" : "starting") << "over"
                                   << QString::fromWCharArray(title) << "| programs started lately:"
                                   << (state->started.isEmpty() ? QStringLiteral("none")
@@ -165,10 +147,14 @@ void watchBusyPointer(QObject *owner)
                 qInfo("busy pointer: ended");
             }
         });
-        QObject::connect(thread, &QThread::finished, thread, &QObject::deleteLater);
-        thread->start();
+        timer->start(500);
     });
-    timer->start(500);
+    QObject::connect(qApp, &QCoreApplication::aboutToQuit, thread, [thread] {
+        thread->quit();
+        if (!thread->wait(1000))
+            qWarning("busy-pointer watch did not finish before shutdown deadline");
+    });
+    thread->start();
 }
 #endif
 
@@ -224,10 +210,14 @@ int main(int argc, char *argv[])
         qputenv("QT_WAYLAND_DISABLED_INTERFACES", "xdg_activation_v1");
 #endif
     QApplication application(argc, argv);
+    // Each diagnostic can be left out (=0), to tell whether one of them
+    // changes what it is looking for.
 #ifdef Q_OS_WIN
-    if (logFile)
+    if (logFile && qEnvironmentVariable("OPSREMOTE_LOG_BUSY_POINTER") != QStringLiteral("0"))
         watchBusyPointer(&application);
 #endif
+    if (logFile && qEnvironmentVariable("OPSREMOTE_LOG_STALLS") != QStringLiteral("0"))
+        watchGuiStalls(&application);
     // For automated tests: a write, read, and remove in the system credential
     // store, reported to the file OPSREMOTE_TEST_CREDENTIALS names.
     if (const auto report = qEnvironmentVariable("OPSREMOTE_TEST_CREDENTIALS"); !report.isEmpty()) {
@@ -634,10 +624,12 @@ int main(int argc, char *argv[])
         }).detach();
     }
 
-    // Finish SSH connections so servers see a clean logout. Settings were
-    // saved when the window closed, so if a worker is stuck (for example in a
-    // connection attempt), end at once.
-    const bool finished = SshSession::shutdownAll(5000);
+    // Finish SSH and FTP connections so servers see a clean logout, and end
+    // the kept worker threads: exiting while a worker is still inside libssh
+    // or OpenSSL can hang the process on Windows. Settings were saved when
+    // the window closed, so if a worker is stuck (for example in a connection
+    // attempt), end at once.
+    const bool finished = WorkerThreads::shutdownAll(5000);
     if (loadBackupPreferences().removeRuntimeOnExit)
         scheduleRuntimeRemoval();
 #ifdef Q_OS_WIN

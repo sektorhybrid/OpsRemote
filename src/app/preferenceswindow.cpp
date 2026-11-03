@@ -958,12 +958,25 @@ void PreferencesWindow::buildTerminalPage()
                   copyOnSelect, QStringLiteral("clipboard selection"));
     connectToggle(copyOnSelect, &TerminalBehaviour::copyOnSelect);
     auto *rightClick = choiceBox({{QStringLiteral("menu"), QStringLiteral("Show menu")},
-                                  {QStringLiteral("paste"), QStringLiteral("Paste")}},
+                                  {QStringLiteral("paste"), QStringLiteral("Paste")},
+                                  {QStringLiteral("none"), QStringLiteral("Nothing")}},
                                  current.rightClick);
     mouse->addRow(QStringLiteral("Right-click"),
-                  QStringLiteral("With Paste, Shift+right-click still opens the menu."),
+                  QStringLiteral("With Paste or Nothing, Shift+right-click still opens the menu."),
                   rightClick, QStringLiteral("context menu mouse button putty mobaxterm"));
     connectChoice(rightClick, &TerminalBehaviour::rightClick);
+    auto *middleClick = choiceBox(
+        {{QStringLiteral("paste"), QStringLiteral("Paste selection")},
+         {QStringLiteral("clipboard"), QStringLiteral("Paste clipboard")},
+         {QStringLiteral("menu"), QStringLiteral("Show menu")},
+         {QStringLiteral("none"), QStringLiteral("Nothing")}},
+        current.middleClick);
+    mouse->addRow(QStringLiteral("Middle-click"),
+                  QStringLiteral("Paste selection uses the last selected text on Linux and the "
+                                 "clipboard on Windows and macOS. Programs that use the mouse "
+                                 "(vim, mc) still get the click unless Shift is held."),
+                  middleClick, QStringLiteral("middle mouse button wheel paste primary selection"));
+    connectChoice(middleClick, &TerminalBehaviour::middleClick);
     auto *confirmPaste = toggle(current.confirmMultilinePaste);
     mouse->addRow(QStringLiteral("Confirm multi-line paste"),
                   QStringLiteral("Asks first, so a pasted script does not run line by line by "
@@ -2034,6 +2047,14 @@ void PreferencesWindow::buildSftpPage()
                                     "a folder is next listed."),
                      hidden, QStringLiteral("dotfiles"));
     bindToggle(this, hidden, update, &SftpPreferences::showHidden);
+    auto *places = toggle(current.showPlaces);
+    browsing->addRow(QStringLiteral("Show . and .. entries"),
+                     QStringLiteral("At the top of the list, as in classic file-transfer programs: "
+                                    "\"..\" opens the folder above, \".\" lists this one again. Drop "
+                                    "files on them to upload or move there. Applies when a folder is "
+                                    "next listed."),
+                     places, QStringLiteral("parent up dot"));
+    bindToggle(this, places, update, &SftpPreferences::showPlaces);
     auto *confirmDelete = toggle(current.confirmDelete);
     browsing->addRow(QStringLiteral("Ask before deleting"), QString(), confirmDelete,
                      QStringLiteral("confirm remove"));
@@ -2567,6 +2588,28 @@ void PreferencesWindow::buildSessionListPage()
     folders->addRow(QStringLiteral("Recent sessions"), QString(), recentCount,
                     QStringLiteral("history count"));
     bindSpin(this, recentCount, update, &SessionListPreferences::recentCount);
+    auto *indentation = spinBox(4, 40, current.indentation, QStringLiteral(" px"));
+    folders->addRow(QStringLiteral("Indent per folder level"),
+                    QStringLiteral("How far the sessions and folders inside a folder move right."),
+                    indentation, QStringLiteral("indentation indent nesting width"));
+    bindSpin(this, indentation, update, &SessionListPreferences::indentation);
+    auto *folderGap = spinBox(0, 30, current.folderGap, QStringLiteral(" px"));
+    folders->addRow(QStringLiteral("Space after a folder's arrow"),
+                    QStringLiteral("Between a folder's open/close arrow and its icon; sessions have "
+                                   "their status dot there. Styles draw the arrow differently, so "
+                                   "set it to what looks even."),
+                    folderGap, QStringLiteral("gap spacing arrow icon align"));
+    bindSpin(this, folderGap, update, &SessionListPreferences::folderGap);
+    auto *foldersAtStart = choiceBox({{QStringLiteral("remember"), QStringLiteral("As they were when closed")},
+                                      {QStringLiteral("expanded"), QStringLiteral("All expanded")},
+                                      {QStringLiteral("collapsed"), QStringLiteral("All collapsed")}},
+                                     current.foldersAtStart);
+    folders->addRow(QStringLiteral("Folders at startup"),
+                    QStringLiteral("Which folders are open when OpsRemote starts. As they were: "
+                                   "folders it has no record of start collapsed. Pinned and Recent "
+                                   "keep their own state."),
+                    foldersAtStart, QStringLiteral("expand collapse open closed remember tree"));
+    bindChoice(this, foldersAtStart, update, &SessionListPreferences::foldersAtStart);
 
     auto *search = page->addCard(QStringLiteral("Search"));
     auto *showSearch = toggle(current.showSearch);
@@ -2611,8 +2654,8 @@ void PreferencesWindow::buildSessionListPage()
                    QStringLiteral("Off pauses all optional host and serial-port availability "
                                   "checks immediately. On: a filled dot means the host answers "
                                   "on its port; an empty one means it does not. Only knocks on "
-                                  "the port; never logs on. Sessions through a jump host or "
-                                  "proxy show a dash."),
+                                  "the port; never logs on. Sessions not checked (through a jump host "
+                                  "or proxy, or with checks off) show an empty grey circle."),
                    check, QStringLiteral("reachable online ping up down status"));
     bindToggle(this, check, update, &SessionListPreferences::checkStatus);
     auto *every = spinBox(10, 3600, current.checkSeconds, QStringLiteral(" s"));

@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "iperf.h"
+#include "workerthreads.h"
 #include "listenaddress.h"
 
 #include <QJsonArray>
@@ -67,14 +68,16 @@ QString amount(qint64 bytes)
 
 IperfTest *IperfTest::start(const Settings &settings)
 {
-    auto *thread = new QThread;
+    // A kept thread (see workerthreads.h).
+    QThread *thread = WorkerThreads::acquire(QStringLiteral("iperf"));
     auto *test = new IperfTest(settings);
     test->moveToThread(thread);
-    connect(thread, &QThread::started, test, &IperfTest::begin);
-    // The test deletes itself when it is over; its thread then ends.
-    connect(test, &QObject::destroyed, thread, &QThread::quit);
-    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
-    thread->start();
+    QMetaObject::invokeMethod(test, &IperfTest::begin, Qt::QueuedConnection);
+    // The test deletes itself when it is over; its thread is then kept.
+    connect(test, &QObject::destroyed, thread, [thread] { WorkerThreads::park(thread); },
+            Qt::DirectConnection);
+    // At shutdownAll(), when the thread does end.
+    connect(thread, &QThread::finished, test, &QObject::deleteLater);
     return test;
 }
 

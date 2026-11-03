@@ -351,6 +351,9 @@ public slots:
     // Paste selection to terminal
     void pasteSelection();
 
+    // True while the program in the terminal has asked for mouse events.
+    bool terminalUsesMouse() const;
+
     // Set zoom
     void zoomIn();
     void zoomOut();

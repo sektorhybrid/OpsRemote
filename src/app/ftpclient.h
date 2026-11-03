@@ -87,7 +87,6 @@ signals:
     void disconnected(const QString &reason, bool error);
 
 private:
-    QThread *m_thread = nullptr;
     FtpWorker *m_worker = nullptr;
     int m_nextJobId = 1;
     QString m_protocol = QStringLiteral("FTP");

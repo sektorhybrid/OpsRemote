@@ -71,6 +71,8 @@ private:
     void uploadFilesDialog();
     void uploadFolderDialog();
     void downloadSelected();
+    void movePaths(const QStringList &paths, const QString &folder);
+    void moveSelectedDialog();
     void editFile(const QString &remotePath);
     void openEditor(const QString &localPath);
     void uploadEdited(const QString &localPath);

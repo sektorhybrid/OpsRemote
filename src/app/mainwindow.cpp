@@ -478,7 +478,7 @@ QHash<QString, bool> loadFolderExpansionStates()
             states.insert(QString::fromStdString(entry.first.as<std::string>()),
                           entry.second.as<bool>(true));
     } catch (const YAML::Exception &) {
-        // Missing or invalid tree state uses the default expanded folders.
+        // Missing or invalid tree state: every folder starts collapsed.
     }
     return states;
 }
@@ -844,9 +844,10 @@ private:
 
 // Renaming in the session tree: the editor holds just the name (the list
 // may show "name (host)"), and the new name goes through MainWindow.
-// The session list's look: a status dot before every row's icon (folders
-// keep the space, so icons line up), and folder summaries like 3 ● 1 ○
-// after the name or in a column of their own.
+// The session list's look: a status dot before every session's icon, a
+// chosen space between a folder's arrow and its icon (so both gaps can look
+// alike), and folder summaries like 3 ● 1 ○ after the name or in a column
+// of their own.
 struct SessionListLook
 {
     enum class Dot { None, Unknown, Checking, Up, Down };
@@ -856,6 +857,16 @@ struct SessionListLook
     std::function<std::optional<QPair<int, int>>(const QModelIndex &index)> summaryOf;
     // The column showing folder summaries; 0 means after the name.
     std::function<int()> summaryColumn;
+    // Pixels between a folder's (or Pinned's, Recent's) arrow and its icon.
+    std::function<int()> folderGap;
+
+    // Where the row's icon starts, from the left of its cell.
+    int shiftOf(const QModelIndex &index) const
+    {
+        if (folderGap && dotOf && dotOf(index) == Dot::None)
+            return folderGap();
+        return DotSpace;
+    }
 
     static constexpr int DotSize = 5;
     static constexpr int DotSpace = DotSize + 7;
@@ -871,16 +882,9 @@ struct SessionListLook
         painter->save();
         painter->setRenderHint(QPainter::Antialiasing);
         const QColor color = dot == Dot::Up ? upColor() : dot == Dot::Down ? downColor() : greyColor();
-        // Sessions that cannot be checked: a short dash, unlike any dot.
-        if (dot == Dot::Unknown) {
-            painter->setPen(QPen(color, 1.2, Qt::SolidLine, Qt::RoundCap));
-            painter->drawLine(QPointF(center.x() - DotSize / 2.0, center.y()),
-                              QPointF(center.x() + DotSize / 2.0, center.y()));
-            painter->restore();
-            return;
-        }
         // The shape carries the meaning (filled answers, empty does not), so
-        // it reads without telling green from red.
+        // it reads without telling green from red. Sessions not checked (the
+        // checks are off, or through a jump host) are empty too, in grey.
         const QRectF circle(center.x() - DotSize / 2.0, center.y() - DotSize / 2.0, DotSize, DotSize);
         const bool filled = dot == Dot::Up || (dot == Dot::Checking && blinkOn);
         painter->setPen(QPen(color, 1.1));
@@ -947,7 +951,7 @@ public:
                                              option.rect.center().y() + 0.5),
                                      look.dotOf(index), look.blinkOn && look.blinkOn());
         QStyleOptionViewItem content = option;
-        content.rect.adjust(SessionListLook::DotSpace, 0, 0, 0);
+        content.rect.adjust(look.shiftOf(index), 0, 0, 0);
         QStyledItemDelegate::paint(painter, content, index);
 
         if (look.summaryOf && look.summaryColumn && look.summaryColumn() == 0) {
@@ -966,7 +970,7 @@ public:
     QSize sizeHint(const QStyleOptionViewItem &option, const QModelIndex &index) const override
     {
         QSize size = QStyledItemDelegate::sizeHint(option, index);
-        size.rwidth() += SessionListLook::DotSpace;
+        size.rwidth() += look.shiftOf(index);
         if (look.summaryOf && look.summaryColumn && look.summaryColumn() == 0) {
             if (const auto counts = look.summaryOf(index))
                 size.rwidth() += 8 + SessionListLook::drawSummary(nullptr, option.fontMetrics, 0, 0,
@@ -979,7 +983,7 @@ public:
                               const QModelIndex &index) const override
     {
         QStyleOptionViewItem shifted = option;
-        shifted.rect.adjust(SessionListLook::DotSpace, 0, 0, 0);
+        shifted.rect.adjust(look.shiftOf(index), 0, 0, 0);
         QStyledItemDelegate::updateEditorGeometry(editor, shifted, index);
     }
 
@@ -1066,6 +1070,49 @@ public:
     std::function<void(QTreeWidgetItem *item)> itemMoved;
 
 protected:
+    // On a selected folder some styles (Kvantum's light ones) draw the
+    // open/close arrow in the normal text colour on the dark selection,
+    // where it cannot be seen. Only then, the arrow is drawn again in the
+    // selection's text colour; every style that shows it well stays as it is.
+    void drawBranches(QPainter *painter, const QRect &rect, const QModelIndex &index) const override
+    {
+        QTreeWidget::drawBranches(painter, rect, index);
+        const auto *item = itemFromIndex(index);
+        if (!item || item->childCount() == 0 || !selectionModel()->isSelected(index)
+            || !style()->styleHint(QStyle::SH_ItemView_ShowDecorationSelected, nullptr, this))
+            return;
+        const QPalette colors = palette();
+        const auto brightness = [](const QColor &color) {
+            return 0.299 * color.redF() + 0.587 * color.greenF() + 0.114 * color.blueF();
+        };
+        const QColor selection = colors.color(QPalette::Highlight);
+        if (std::abs(brightness(colors.color(QPalette::Text)) - brightness(selection)) > 0.35)
+            return; // the style's own arrow shows
+        const QColor arrowColor = colors.color(QPalette::HighlightedText);
+        if (std::abs(brightness(arrowColor) - brightness(selection)) <= 0.35)
+            return; // no colour would show better
+        const int width = indentation();
+        const QRectF cell(rect.right() - width + 1, rect.top(), width, rect.height());
+        const double half = std::min<double>(width, cell.height()) / 4.0;
+        const QPointF center = cell.center();
+        QPolygonF arrow;
+        if (item->isExpanded())
+            arrow << center + QPointF(-half, -half / 2) << center + QPointF(half, -half / 2)
+                  << center + QPointF(0, half / 2 + 1);
+        else if (layoutDirection() == Qt::RightToLeft)
+            arrow << center + QPointF(half / 2, -half) << center + QPointF(half / 2, half)
+                  << center + QPointF(-half / 2 - 1, 0);
+        else
+            arrow << center + QPointF(-half / 2, -half) << center + QPointF(-half / 2, half)
+                  << center + QPointF(half / 2 + 1, 0);
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing);
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(arrowColor);
+        painter->drawPolygon(arrow);
+        painter->restore();
+    }
+
     void dragMoveEvent(QDragMoveEvent *event) override
     {
         QTreeWidget::dragMoveEvent(event);
@@ -1286,6 +1333,7 @@ MainWindow::MainWindow(QWidget *parent)
         return SessionListLook::Dot::Unknown;
     };
     look.blinkOn = [this] { return m_blinkOn; };
+    look.folderGap = [this] { return m_sessionList.folderGap; };
     look.summaryOf = [this, sessionTree](const QModelIndex &index) -> std::optional<QPair<int, int>> {
         auto *item = sessionTree->item(index);
         if (!m_sessionList.checkStatus || !item
@@ -1433,7 +1481,18 @@ MainWindow::MainWindow(QWidget *parent)
     createMenus();
     createToolbar();
     loadSessions();
-    restoreFolderExpansion();
+    if (m_sessionList.foldersAtStart == QStringLiteral("remember")) {
+        restoreFolderExpansion();
+    } else {
+        // All open or all closed; saved, so the state is remembered (a search
+        // puts the folders back as they were) from here on.
+        const bool open = m_sessionList.foldersAtStart == QStringLiteral("expanded");
+        for (QTreeWidgetItemIterator it(m_sessionTree); *it; ++it) {
+            if (isFolder(*it))
+                (*it)->setExpanded(open);
+        }
+        saveFolderExpansion();
+    }
     refreshSessionList();
     applySessionListPreferences();
     m_tunnelsWindow = new TunnelsWindow(
@@ -1485,6 +1544,23 @@ MainWindow::MainWindow(QWidget *parent)
             lockVaultFor(QStringLiteral("after %1 min without activity").arg(m_security.autoLockMinutes));
     });
     idleCheck->start(15000);
+
+    // Preferences takes most of a second to build, the first time: done
+    // while nobody uses the window (no input for 2 s, no dialog or menu
+    // open), so opening it later is instant.
+    auto *prepare = new QTimer(this);
+    connect(prepare, &QTimer::timeout, this, [this, prepare] {
+        if (m_preferencesWindow) {
+            prepare->deleteLater();
+            return;
+        }
+        if (m_lastInput.elapsed() < 2000 || QApplication::activeModalWidget()
+            || QApplication::activePopupWidget())
+            return;
+        m_preferencesWindow = new PreferencesWindow(this);
+        prepare->deleteLater();
+    });
+    QTimer::singleShot(5000, prepare, [prepare] { prepare->start(1000); });
 
     m_broadcastIndicator = new QLabel(QStringLiteral("  BROADCAST  "), this);
     m_broadcastIndicator->setStyleSheet(QStringLiteral(
@@ -3472,13 +3548,12 @@ QString MainWindow::folderStateKey(const QTreeWidgetItem *folder) const
 
 void MainWindow::restoreFolderExpansion()
 {
+    // A folder with no record (new, or settings from an older version) is
+    // collapsed.
     const auto states = loadFolderExpansionStates();
-    if (states.isEmpty())
-        return;
-
     std::function<void(QTreeWidgetItem *)> restore = [this, &states, &restore](QTreeWidgetItem *item) {
         if (isFolder(item))
-            item->setExpanded(states.value(folderStateKey(item), true));
+            item->setExpanded(states.value(folderStateKey(item), false));
         for (int index = 0; index < item->childCount(); ++index)
             restore(item->child(index));
     };
@@ -5375,6 +5450,7 @@ void MainWindow::setSessionListPreferences(const SessionListPreferences &prefere
 
 void MainWindow::applySessionListPreferences()
 {
+    m_sessionTree->setIndentation(m_sessionList.indentation);
     m_sessionTree->setColumnHidden(HostColumn, !m_sessionList.showHost);
     m_sessionTree->setColumnHidden(ProtocolColumn, !m_sessionList.showProtocol);
     m_sessionTree->setColumnHidden(SummaryColumn, summaryColumn() != SummaryColumn);

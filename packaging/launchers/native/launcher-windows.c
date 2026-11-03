@@ -123,7 +123,12 @@ static BOOL unpack(const wchar_t *zstd, const wchar_t *archive, const wchar_t *f
     STARTUPINFOW start;
     ZeroMemory(&start, sizeof start);
     start.cb = sizeof start;
-    start.dwFlags = STARTF_USESTDHANDLES;
+    // No busy pointer for these hidden helpers (Windows would show one for
+    // each until a timeout, as they never open a window).
+    start.dwFlags = STARTF_USESTDHANDLES | STARTF_FORCEOFFFEEDBACK;
+    // Below normal priority: unpacking takes all CPUs and the disk for a
+    // while, which made the whole computer (the mouse too) lag meanwhile.
+    const DWORD flags = CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS;
     PROCESS_INFORMATION decompress = {0}, extract = {0};
 
     start.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
@@ -131,8 +136,7 @@ static BOOL unpack(const wchar_t *zstd, const wchar_t *archive, const wchar_t *f
     start.hStdError = GetStdHandle(STD_ERROR_HANDLE);
     SetHandleInformation(read_end, HANDLE_FLAG_INHERIT, 0);
     swprintf(command, sizeof command / sizeof *command, L"\"%ls\" -dcq \"%ls\"", zstd, archive);
-    BOOL ok = CreateProcessW(zstd, command, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &start,
-                             &decompress);
+    BOOL ok = CreateProcessW(zstd, command, NULL, NULL, TRUE, flags, NULL, NULL, &start, &decompress);
     SetHandleInformation(read_end, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
     SetHandleInformation(write_end, HANDLE_FLAG_INHERIT, 0);
     if (ok) {
@@ -140,8 +144,7 @@ static BOOL unpack(const wchar_t *zstd, const wchar_t *archive, const wchar_t *f
         start.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
         swprintf(command, sizeof command / sizeof *command, L"\"%ls\" -x%lsf - -C \"%ls\"", tar,
                  keep ? L"k" : L"", folder);
-        ok = CreateProcessW(tar, command, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &start,
-                            &extract);
+        ok = CreateProcessW(tar, command, NULL, NULL, TRUE, flags, NULL, NULL, &start, &extract);
     }
     CloseHandle(read_end);
     CloseHandle(write_end);
@@ -289,6 +292,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR arguments, int
     if (!exists(app) || !exists(qt))
         fail(L"This copy of OpsRemote is incomplete. Extract the whole archive again.");
 
+    // Written by the program as it ends when it should be removed (Preferences:
+    // remove the unpacked program on exit); one left by an earlier start that
+    // did not get to remove it is no longer meant.
+    wchar_t removal[MAX_PATH];
+    format_path(removal, L"%ls\\remove-on-exit", folder);
+    DeleteFileW(removal);
+
     // The program finds its settings next to this launcher.
     wchar_t home[MAX_PATH];
     wcsncpy(home, here, MAX_PATH);
@@ -323,6 +333,18 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR arguments, int
     if (!GetExitCodeProcess(process.hProcess, &code))
         code = 0;
     CloseHandle(process.hProcess);
+    // Renamed first: Windows refuses that while another OpsRemote runs from
+    // the folder, which then keeps its files; a start after the rename finds
+    // no folder and unpacks a new one. The runtime folder goes too once empty.
+    if (exists(removal)) {
+        wchar_t removing[MAX_PATH];
+        format_path(removing, L"%ls.removing%lu", folder, GetCurrentProcessId());
+        if (MoveFileW(folder, removing))
+            remove_tree(removing);
+        wchar_t runtime_root[MAX_PATH];
+        path(runtime_root, L"runtime");
+        RemoveDirectoryW(runtime_root);
+    }
     if (code == 0)
         return 0;
     wchar_t reason[256];

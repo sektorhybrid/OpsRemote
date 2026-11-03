@@ -20,7 +20,9 @@ struct TerminalBehaviour
     QString scrollBar = QStringLiteral("right"); // left, right, hidden
     int padding = 2;
     bool copyOnSelect = false;
-    QString rightClick = QStringLiteral("menu"); // menu, paste
+    QString rightClick = QStringLiteral("menu"); // menu, paste, none
+    // paste: the X11 selection where there is one (Linux), else the clipboard.
+    QString middleClick = QStringLiteral("paste"); // paste, clipboard, menu, none
     bool confirmMultilinePaste = true;
     bool trimPastedNewlines = false;
     QString wordCharacters = QStringLiteral(":@-./_~?&=%+#");
@@ -83,6 +85,7 @@ struct SshPreferences
 struct SftpPreferences
 {
     bool showHidden = true;
+    bool showPlaces = true; // "." and ".." at the top of the list
     bool askDownloadFolder = true;
     QString downloadFolder; // empty: the system's Downloads folder
     QString conflict = QStringLiteral("ask"); // ask, overwrite, rename, skip
@@ -175,6 +178,12 @@ struct SessionListPreferences
     QString folderSummary = QStringLiteral("name");
     bool showSearch = true; // the search box above the list
     bool fitPanel = true; // the side panel widens to fit the list
+    int indentation = 12; // pixels per folder level
+    int folderGap = 4; // pixels between a folder's arrow and its icon
+    // Folders when OpsRemote starts: "remember" (as they were when it was
+    // closed; folders it knows nothing about are collapsed), "expanded", or
+    // "collapsed".
+    QString foldersAtStart = QStringLiteral("remember");
 
     bool operator==(const SessionListPreferences &) const = default;
 };

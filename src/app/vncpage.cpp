@@ -200,9 +200,17 @@ VncPage::VncPage(const VncPageSettings &settings, QWidget *parent)
             m_settings.connection.password.fill(QChar(0));
             m_settings.connection.password.clear();
         }
-        emit statusMessage(QStringLiteral("%1: %2").arg(host(), reason));
+        // The server blocks this computer for a while after failed log-ons;
+        // trying again would only keep it blocked.
+        QString shown = reason;
+        const bool blocked = reason.contains(QStringLiteral("too many security failures"), Qt::CaseInsensitive);
+        if (blocked)
+            shown = QStringLiteral("The VNC server refuses connections from this computer for a while, "
+                                   "after too many failed log-ons. Wait a few minutes, then reconnect "
+                                   "(with the right password).");
+        emit statusMessage(QStringLiteral("%1: %2").arg(host(), shown));
         constexpr int attempts = 6;
-        if (error && m_wasConnected && m_settings.connection.options.autoReconnect == 1
+        if (error && !blocked && m_wasConnected && m_settings.connection.options.autoReconnect == 1
             && m_reconnectAttempts < attempts) {
             ++m_reconnectAttempts;
             showOverlay(QStringLiteral("Connection lost. Reconnecting (attempt %1 of %2)…")
@@ -215,7 +223,7 @@ VncPage::VncPage(const VncPageSettings &settings, QWidget *parent)
             });
             return;
         }
-        showOverlay(reason, true, error);
+        showOverlay(shown, true, error);
     });
     showOverlay(QStringLiteral("Connecting to %1…").arg(host()), false);
 }

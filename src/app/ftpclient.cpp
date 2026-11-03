@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "ftpclient.h"
+#include "workerthreads.h"
 #include "appdirs.h"
 
 #include <QCryptographicHash>
@@ -43,7 +44,7 @@ constexpr qint64 MaximumListingMs = 10 * 60 * 1000;
 // The worker's session was closed: stop waiting.
 bool interrupted()
 {
-    return QThread::currentThread()->isInterruptionRequested();
+    return WorkerThreads::stopRequested();
 }
 
 QString hex(const QByteArray &digest)
@@ -1276,12 +1277,13 @@ QString ftpFingerprint(const QByteArray &digest)
 }
 
 FtpSession::FtpSession(QObject *parent)
-    : RemoteFileSession(parent), m_thread(new QThread), m_worker(new FtpWorker)
+    : RemoteFileSession(parent), m_worker(new FtpWorker)
 {
-    m_thread->setObjectName(QStringLiteral("ftp-session"));
-    m_worker->moveToThread(m_thread);
-    connect(m_thread, &QThread::finished, m_worker, &QObject::deleteLater);
-    connect(m_thread, &QThread::finished, m_thread, &QObject::deleteLater);
+    // A kept thread (see workerthreads.h).
+    QThread *thread = WorkerThreads::acquire(QStringLiteral("ftp-session"));
+    m_worker->moveToThread(thread);
+    // At shutdownAll(), when the thread does end.
+    connect(thread, &QThread::finished, m_worker, &QObject::deleteLater);
     connect(m_worker, &FtpWorker::statusMessage, this, &FtpSession::statusMessage);
     connect(m_worker, &FtpWorker::logLine, this, &FtpSession::logLine);
     connect(m_worker, &FtpWorker::certificateQuestion, this, &FtpSession::certificateQuestion);
@@ -1294,17 +1296,15 @@ FtpSession::FtpSession(QObject *parent)
     connect(m_worker, &FtpWorker::sftpReady, this, &FtpSession::sftpReady);
     connect(m_worker, &FtpWorker::disconnected, this, &FtpSession::disconnected);
     relay(m_worker->files());
-    m_thread->start();
 }
 
 FtpSession::~FtpSession()
 {
     // As with SSH: the worker may be inside a blocking call; it is deleted in
-    // its own thread when that returns.
+    // its own thread when that returns, and waits in it see stopRequested()
+    // and give up.
     disconnect(m_worker, nullptr, this, nullptr);
-    // Waits in the worker check this and give up.
-    m_thread->requestInterruption();
-    m_thread->quit();
+    WorkerThreads::release(m_worker);
 }
 
 void FtpSession::connectToHost(const FtpConnectionSettings &settings)

@@ -104,7 +104,8 @@ private:
 
     void applyLinkSettings();
     void createTerminal();
-    void showTerminalMenu(const QPoint &position);
+    // always: open the menu even when right-click is set to paste.
+    void showTerminalMenu(const QPoint &position, bool always = false);
     void saveTerminalOutput();
 
     void startSsh();

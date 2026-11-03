@@ -101,13 +101,6 @@ public:
     explicit SshSession(QObject *parent = nullptr);
     ~SshSession() override;
 
-    // Disconnects every session and waits up to timeoutMs for their worker
-    // threads to finish. Call once the event loop has ended: exiting while a
-    // worker is still inside libssh or OpenSSL can hang the process on
-    // Windows. Returns false if a worker is still running (for example, stuck
-    // in a connection attempt).
-    static bool shutdownAll(int timeoutMs);
-
     void connectToHost(const SshConnectionSettings &settings);
     void write(const QByteArray &data);
     void resizeTerminal(int columns, int rows);
@@ -175,7 +168,6 @@ signals:
     void disconnected(const QString &reason, bool error);
 
 private:
-    QThread *m_thread = nullptr;
     SshWorker *m_worker = nullptr;
     int m_nextJobId = 1;
     QString m_fileProtocol = QStringLiteral("SFTP");

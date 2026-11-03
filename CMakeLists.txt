@@ -142,6 +142,10 @@ qt_add_executable(opsremote
     src/app/localservers.h
     src/app/hoststatus.cpp
     src/app/hoststatus.h
+    src/app/stallwatch.cpp
+    src/app/workerthreads.cpp
+    src/app/workerthreads.h
+    src/app/stallwatch.h
     src/app/quickconnect.cpp
     src/app/quickconnect.h
     src/app/wakeonlan.cpp
@@ -189,7 +193,7 @@ if(WIN32)
     # The executable's own icon (Explorer, shortcuts).
     target_sources(opsremote PRIVATE src/app/resources/opsremote.rc)
     # Sockets for SSH connections through jump hosts.
-    target_link_libraries(opsremote PRIVATE ws2_32)
+    target_link_libraries(opsremote PRIVATE ws2_32 psapi)
 endif()
 
 option(OPSREMOTE_BUNDLE

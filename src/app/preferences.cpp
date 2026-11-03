@@ -6,7 +6,6 @@
 
 #include <QCoreApplication>
 #include <QDateTime>
-#include <QProcess>
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
@@ -184,6 +183,7 @@ SftpPreferences loadSftpPreferences()
     const auto node = loadSection("sftp");
     SftpPreferences value;
     read(node, "show_hidden", value.showHidden);
+    read(node, "show_places", value.showPlaces);
     read(node, "ask_download_folder", value.askDownloadFolder);
     read(node, "download_folder", value.downloadFolder);
     readChoice(node, "conflict", value.conflict,
@@ -203,6 +203,7 @@ void saveSftpPreferences(const SftpPreferences &value)
 {
     YAML::Node node(YAML::NodeType::Map);
     node["show_hidden"] = value.showHidden;
+    node["show_places"] = value.showPlaces;
     node["ask_download_folder"] = value.askDownloadFolder;
     node["download_folder"] = value.downloadFolder.toStdString();
     node["conflict"] = value.conflict.toStdString();
@@ -353,6 +354,12 @@ SessionListPreferences loadSessionListPreferences()
                {QStringLiteral("name"), QStringLiteral("column"), QStringLiteral("off")});
     read(node, "show_search", value.showSearch);
     read(node, "fit_panel", value.fitPanel);
+    read(node, "indentation", value.indentation);
+    value.indentation = qBound(4, value.indentation, 40);
+    read(node, "folder_gap", value.folderGap);
+    readChoice(node, "folders_at_start", value.foldersAtStart,
+               {QStringLiteral("remember"), QStringLiteral("expanded"), QStringLiteral("collapsed")});
+    value.folderGap = qBound(0, value.folderGap, 30);
     return value;
 }
 
@@ -369,6 +376,9 @@ void saveSessionListPreferences(const SessionListPreferences &value)
     node["folder_summary"] = value.folderSummary.toStdString();
     node["show_search"] = value.showSearch;
     node["fit_panel"] = value.fitPanel;
+    node["indentation"] = value.indentation;
+    node["folder_gap"] = value.folderGap;
+    node["folders_at_start"] = value.foldersAtStart.toStdString();
     saveSection("session_list", node);
 }
 
@@ -620,7 +630,10 @@ TerminalBehaviour loadTerminalBehaviour()
     value.padding = qBound(0, value.padding, 32);
     read(node, "copy_on_select", value.copyOnSelect);
     readChoice(node, "right_click", value.rightClick,
-               {QStringLiteral("menu"), QStringLiteral("paste")});
+               {QStringLiteral("menu"), QStringLiteral("paste"), QStringLiteral("none")});
+    readChoice(node, "middle_click", value.middleClick,
+               {QStringLiteral("paste"), QStringLiteral("clipboard"), QStringLiteral("menu"),
+                QStringLiteral("none")});
     read(node, "confirm_multiline_paste", value.confirmMultilinePaste);
     read(node, "trim_pasted_newlines", value.trimPastedNewlines);
     read(node, "word_characters", value.wordCharacters);
@@ -642,6 +655,7 @@ void saveTerminalBehaviour(const TerminalBehaviour &value)
     node["padding"] = value.padding;
     node["copy_on_select"] = value.copyOnSelect;
     node["right_click"] = value.rightClick.toStdString();
+    node["middle_click"] = value.middleClick.toStdString();
     node["confirm_multiline_paste"] = value.confirmMultilinePaste;
     node["trim_pasted_newlines"] = value.trimPastedNewlines;
     node["word_characters"] = value.wordCharacters.toStdString();
@@ -879,27 +893,13 @@ void scheduleRuntimeRemoval()
     if (QFileInfo(folder).dir().absolutePath() != runtimeRoot || otherProcessUses(folder))
         return;
 #ifdef Q_OS_WIN
-    // A running program's files cannot be deleted on Windows: a hidden
-    // command interpreter waits a few seconds, until this process is gone.
-    // It renames the folder first and deletes only if that worked: OpsRemote
-    // started again meanwhile reuses this folder, and Windows refuses to
-    // rename a folder whose programs run, so that copy keeps its files (it
-    // used to lose every one it had not loaded yet). A start after the
-    // rename finds no folder and unpacks a new one.
-    const QString removing = folder + QStringLiteral(".removing");
-    QProcess helper;
-    helper.setProgram(QStringLiteral("cmd.exe"));
-    // The runtime folder goes too once empty (rmdir without /s keeps it otherwise).
-    helper.setNativeArguments(
-        QStringLiteral("/d /c \"ping -n 4 127.0.0.1 >nul & ren \"%1\" \"%2\" && rmdir /s /q \"%3\" & "
-                       "rmdir \"%4\" 2>nul\"")
-            .arg(QDir::toNativeSeparators(folder), QFileInfo(removing).fileName(),
-                 QDir::toNativeSeparators(removing), QDir::toNativeSeparators(runtimeRoot)));
-    helper.setWorkingDirectory(portableHome());
-    helper.setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments *arguments) {
-        arguments->flags |= CREATE_NO_WINDOW;
-    });
-    helper.startDetached();
+    // A running program's files cannot be deleted on Windows: the launcher,
+    // which waits for this process, removes the folder once it has ended
+    // when it finds this file (it used to be a hidden cmd.exe, ping and
+    // rmdir, each showing Windows' busy pointer for a while).
+    QFile marker(QDir(folder).filePath(QStringLiteral("remove-on-exit")));
+    if (marker.open(QIODevice::WriteOnly))
+        marker.close();
 #else
     // Open and mapped files stay usable on Linux until the process ends.
     // Renamed first, so a start from now on unpacks a new copy instead of

@@ -37,6 +37,7 @@
 #include <QStyle>
 #include <QToolButton>
 #include <QTreeWidget>
+#include <QDrag>
 #include <QUrl>
 #include <QVBoxLayout>
 
@@ -48,6 +49,11 @@ constexpr int IsDirectoryRole = Qt::UserRole + 1;
 constexpr int SizeRole = Qt::UserRole + 2;
 constexpr int ModifiedRole = Qt::UserRole + 3;
 constexpr int IsSymlinkRole = Qt::UserRole + 4;
+// "." (this folder) and ".." (its parent) at the top: places, not files, so
+// they cannot be selected and nothing acts on them but opening and drops.
+constexpr int IsPlaceRole = Qt::UserRole + 5;
+// Remote paths dragged inside one Files pane (moved on the server).
+const QString RemotePathsMime = QStringLiteral("application/x-opsremote-remote-paths");
 constexpr int ProgressScale = 1000;
 constexpr int MaximumListedErrors = 15;
 
@@ -110,6 +116,15 @@ public:
 
     bool operator<(const QTreeWidgetItem &other) const override
     {
+        const bool ascending = treeWidget()->header()->sortIndicatorOrder() == Qt::AscendingOrder;
+        // "." then ".." stay on top in either sort order.
+        const bool place = data(0, IsPlaceRole).toBool();
+        const bool otherPlace = other.data(0, IsPlaceRole).toBool();
+        if (place || otherPlace) {
+            if (place && otherPlace)
+                return (text(NameColumn) < other.text(NameColumn)) == ascending;
+            return ascending ? place : otherPlace;
+        }
         const bool directory = data(0, IsDirectoryRole).toBool();
         const bool otherDirectory = other.data(0, IsDirectoryRole).toBool();
         // Folders stay above files in either sort order.
@@ -138,6 +153,8 @@ public:
     // Returns whether the key is handled; only performs it when execute is set.
     std::function<bool(int, Qt::KeyboardModifiers, bool execute)> keyHandler;
     std::function<void(const QStringList &, QTreeWidgetItem *)> dropHandler;
+    // Remote paths dragged from this view onto one of its folders.
+    std::function<void(const QStringList &, QTreeWidgetItem *)> moveHandler;
 
 protected:
     bool event(QEvent *event) override
@@ -162,9 +179,37 @@ protected:
         QTreeWidget::keyPressEvent(event);
     }
 
+    // Our own drag: the selected remote paths, to move them (never removed
+    // from the list here; the folder is listed again once the server moved them).
+    void startDrag(Qt::DropActions) override
+    {
+        QStringList paths;
+        for (auto *item : selectedItems())
+            paths.append(item->data(0, PathRole).toString());
+        if (paths.isEmpty() || !moveHandler)
+            return;
+        auto *mime = new QMimeData;
+        mime->setData(RemotePathsMime, paths.join(QLatin1Char('\n')).toUtf8());
+        auto *drag = new QDrag(this);
+        drag->setMimeData(mime);
+        drag->exec(Qt::MoveAction);
+    }
+
+    bool ownDrag(const QDropEvent *event) const
+    {
+        return event->source() == this && event->mimeData()->hasFormat(RemotePathsMime);
+    }
+
+    // A folder under the pointer that is not one of the dragged items.
+    QTreeWidgetItem *moveTarget(const QDropEvent *event) const
+    {
+        auto *item = itemAt(event->position().toPoint());
+        return item && item->data(0, IsDirectoryRole).toBool() && !item->isSelected() ? item : nullptr;
+    }
+
     void dragEnterEvent(QDragEnterEvent *event) override
     {
-        if (dropHandler && !localPathsFromMime(event->mimeData()).isEmpty())
+        if (ownDrag(event) || (dropHandler && !localPathsFromMime(event->mimeData()).isEmpty()))
             event->acceptProposedAction();
         else
             event->ignore();
@@ -172,6 +217,15 @@ protected:
 
     void dragMoveEvent(QDragMoveEvent *event) override
     {
+        if (ownDrag(event)) {
+            if (moveTarget(event)) {
+                event->setDropAction(Qt::MoveAction);
+                event->accept();
+            } else {
+                event->ignore();
+            }
+            return;
+        }
         if (dropHandler && event->mimeData()->hasUrls())
             event->acceptProposedAction();
         else
@@ -180,6 +234,19 @@ protected:
 
     void dropEvent(QDropEvent *event) override
     {
+        if (ownDrag(event)) {
+            auto *target = moveTarget(event);
+            if (!target || !moveHandler) {
+                event->ignore();
+                return;
+            }
+            event->setDropAction(Qt::MoveAction);
+            event->accept();
+            moveHandler(QString::fromUtf8(event->mimeData()->data(RemotePathsMime))
+                            .split(QLatin1Char('\n'), Qt::SkipEmptyParts),
+                        target);
+            return;
+        }
         const auto paths = localPathsFromMime(event->mimeData());
         if (!dropHandler || paths.isEmpty()) {
             event->ignore();
@@ -258,6 +325,8 @@ SftpPanel::SftpPanel(QWidget *parent)
     m_view->setContextMenuPolicy(Qt::CustomContextMenu);
     m_view->setAcceptDrops(true);
     m_view->viewport()->setAcceptDrops(true);
+    m_view->setDragEnabled(true);
+    m_view->setDragDropMode(QAbstractItemView::DragDrop);
     m_view->setSortingEnabled(true);
     m_view->sortByColumn(NameColumn, Qt::AscendingOrder);
     m_view->header()->setStretchLastSection(false);
@@ -276,10 +345,16 @@ SftpPanel::SftpPanel(QWidget *parent)
         const bool intoFolder = target && target->data(0, IsDirectoryRole).toBool();
         uploadPaths(paths, intoFolder ? target->data(0, PathRole).toString() : m_currentPath);
     };
+    m_view->moveHandler = [this](const QStringList &paths, QTreeWidgetItem *target) {
+        if (m_ready)
+            movePaths(paths, target->data(0, PathRole).toString());
+    };
     connect(m_view, &QTreeWidget::itemActivated, this, [this](QTreeWidgetItem *item) {
         if (!item)
             return;
-        if (item->data(0, IsDirectoryRole).toBool())
+        if (item->data(0, IsPlaceRole).toBool() && item->text(NameColumn) == QStringLiteral("."))
+            refresh();
+        else if (item->data(0, IsDirectoryRole).toBool())
             navigate(item->data(0, PathRole).toString());
         else
             editFile(item->data(0, PathRole).toString());
@@ -471,9 +546,28 @@ void SftpPanel::populate(const QString &path, const QList<SftpEntry> &entries,
 
     m_view->setSortingEnabled(false);
     m_view->clear();
-    const bool showHidden = loadSftpPreferences().showHidden;
+    const auto preferences = loadSftpPreferences();
+    if (preferences.showPlaces) {
+        const auto addPlace = [this](const QString &name, const QString &target, const QString &tip) {
+            auto *item = new SftpItem(m_view);
+            item->setText(NameColumn, name);
+            item->setData(0, PathRole, target);
+            item->setData(0, IsDirectoryRole, true);
+            item->setData(0, IsPlaceRole, true);
+            item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsDropEnabled);
+            item->setIcon(NameColumn, fileTypeIcon(name, true, false));
+            item->setToolTip(NameColumn, tip);
+        };
+        addPlace(QStringLiteral("."), path, QStringLiteral("This folder (%1): open to list it again").arg(path));
+        if (path != QStringLiteral("/"))
+            addPlace(QStringLiteral(".."), parentRemotePath(path),
+                     QStringLiteral("The folder above (%1); drop here to move or upload into it")
+                         .arg(parentRemotePath(path)));
+    }
     for (const auto &entry : entries) {
-        if (!showHidden && entry.name.startsWith(QLatin1Char('.')))
+        if (entry.name == QStringLiteral(".") || entry.name == QStringLiteral(".."))
+            continue;
+        if (!preferences.showHidden && entry.name.startsWith(QLatin1Char('.')))
             continue;
         auto *item = new SftpItem(m_view);
         const auto fullPath = joinRemotePath(path, entry.name);
@@ -599,6 +693,9 @@ void SftpPanel::showContextMenu(const QPoint &position)
     if (selection.size() == 1)
         menu.addAction(icon("edit-rename", QStyle::SP_FileDialogDetailedView),
                        QStringLiteral("Rename…\tF2"), this, &SftpPanel::renameSelected);
+    if (!selection.isEmpty())
+        menu.addAction(icon("go-jump", QStyle::SP_ArrowForward), QStringLiteral("Move to Folder…"), this,
+                       &SftpPanel::moveSelectedDialog);
     if (!selection.isEmpty()) {
         menu.addAction(icon("edit-delete", QStyle::SP_TrashIcon), QStringLiteral("Delete…\tDel"),
                        this, &SftpPanel::deleteSelected);
@@ -872,6 +969,42 @@ void SftpPanel::renameSelected()
         return;
     }
     m_session->renamePath(oldPath, joinRemotePath(parentRemotePath(oldPath), newName));
+}
+
+// Moves remote files and folders into another folder on the same server.
+void SftpPanel::movePaths(const QStringList &paths, const QString &folder)
+{
+    if (!m_session || folder.isEmpty())
+        return;
+    const QString target = folder.size() > 1 && folder.endsWith(QLatin1Char('/')) ? folder.chopped(1) : folder;
+    for (const auto &path : paths) {
+        if (parentRemotePath(path) == target)
+            continue; // already there
+        if (target == path || target.startsWith(path + QLatin1Char('/'))) {
+            showMessage(QStringLiteral("\"%1\" cannot be moved into itself.").arg(path), true);
+            continue;
+        }
+        m_session->renamePath(path, joinRemotePath(target, path.section(QLatin1Char('/'), -1)));
+    }
+}
+
+void SftpPanel::moveSelectedDialog()
+{
+    const auto paths = selectedPaths();
+    if (paths.isEmpty() || !m_session)
+        return;
+    bool accepted = false;
+    const auto folder = QInputDialog::getText(
+                            this, QStringLiteral("Move to Folder"),
+                            paths.size() == 1
+                                ? QStringLiteral("Move \"%1\" to this folder on the server:")
+                                      .arg(paths.first().section(QLatin1Char('/'), -1))
+                                : QStringLiteral("Move %1 items to this folder on the server:").arg(paths.size()),
+                            QLineEdit::Normal, m_currentPath, &accepted)
+                            .trimmed();
+    if (!accepted || folder.isEmpty())
+        return;
+    movePaths(paths, folder.startsWith(QLatin1Char('/')) ? folder : joinRemotePath(m_currentPath, folder));
 }
 
 void SftpPanel::deleteSelected()

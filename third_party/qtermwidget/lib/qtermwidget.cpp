@@ -611,6 +611,11 @@ void QTermWidget::pasteSelection()
     m_impl->m_terminalDisplay->pasteSelection();
 }
 
+bool QTermWidget::terminalUsesMouse() const
+{
+    return m_impl->m_terminalDisplay->usesMouse();
+}
+
 void QTermWidget::setZoom(int step)
 {
     QFont font = m_impl->m_terminalDisplay->getVTFont();
