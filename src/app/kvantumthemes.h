@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <QColor>
+#include <QList>
 #include <QStringList>
 
 class QStyle;
@@ -17,4 +19,7 @@ QStringList available();
 bool isKvantumKey(const QString &styleKey);
 // The style for one theme, or nullptr if the theme is not there.
 QStyle *create(const QString &styleKey);
+// A theme's own colours (its [GeneralColors]): window, base, text, and
+// highlight; empty if the theme or a colour is missing.
+QList<QColor> colours(const QString &styleKey);
 }

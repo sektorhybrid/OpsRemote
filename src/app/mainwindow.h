@@ -135,6 +135,14 @@ public:
     bool saveCurrentLookAs(const QString &name);
     void renameLook(const QString &id, const QString &name);
     void deleteLook(const QString &id);
+    // The look the current appearance started from (applied, saved or
+    // overwritten last), also once it was changed by hand; empty if none.
+    QString baseLookId() const;
+    // Your own look id gets the current appearance (name and id stay).
+    void overwriteLook(const QString &id);
+    // Adds a copy (a duplicate, an imported file) as one of your own looks
+    // under a new id; false if the limit is reached.
+    bool addLook(Look look);
     QStringList availableUiStyles() const;
     void setUiStyle(const QString &styleKey);
     QString colorTheme() const { return m_colorThemeKey; }
@@ -317,6 +325,7 @@ private:
     QHash<QString, SessionDefinition> m_sessions;
     QHash<QString, QColor> m_customColors;
     QList<Look> m_userLooks;
+    QString m_baseLookId; // see baseLookId()
     QPalette m_systemPalette;
     QFont m_systemFont;
     QString m_iconTheme;

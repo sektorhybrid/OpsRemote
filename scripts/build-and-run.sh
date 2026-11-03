@@ -25,6 +25,10 @@ in one folder with a shared settings/ folder; built in Docker containers):
                              (dist/OpsRemote/OpsRemote, or legacy/OpsRemote.sh).
   package-linux-and-run      package-linux, then run-package (the default).
   package-all-and-run        package-all, then run-package.
+  build-qt-windows           Rebuild Qt's Windows DLLs with packaging/qt/patches
+                             (Fedora's Qt package, rebuilt; about half an hour). Only
+                             when the patches or the image's Qt version change: the
+                             Windows build warns when it is needed.
 
 A developer build in ./build/dev, against this computer's own libraries (quick to
 rebuild, not portable):
@@ -92,6 +96,7 @@ case "${command}" in
     run-package) run_package ;;
     package-linux-and-run) build_linux_program; update_package; run_package ;;
     package-all-and-run) build_linux_program; build_windows_program; update_package; run_package ;;
+    build-qt-windows) "${PROJECT_DIR}/scripts/internal/build-qt-windows-docker.sh" ;;
     dev-build) dev_build ;;
     dev-run) dev_run ;;
     dev-build-and-run) dev_build; dev_run ;;

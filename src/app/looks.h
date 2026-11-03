@@ -7,6 +7,9 @@
 #include <QHash>
 #include <QList>
 #include <QString>
+#include <QStringList>
+
+#include <optional>
 
 // A look: the appearance settings that belong together, applied in one go
 // from Preferences → Appearance → Looks or View → Look. Built-in looks come
@@ -44,3 +47,8 @@ constexpr int MaximumUserLooks = 20;
 QList<Look> builtInLooks();
 QList<Look> loadUserLooks();
 void saveUserLooks(const QList<Look> &looks);
+// One look in a file of its own, to share it ("opsremote_look:" in YAML).
+bool exportLook(const Look &look, const QString &path);
+std::optional<Look> importLook(const QString &path, QString *error = nullptr);
+// What differs from one look to another ("style", "terminal font", …).
+QStringList lookDifferences(const Look &from, const Look &to);

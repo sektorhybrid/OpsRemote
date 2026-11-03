@@ -1,0 +1,26 @@
+From: OpsRemote
+Subject: Windows: no null dereference when a thread with thread_local Qt data ends (MinGW)
+
+GCC on MinGW destroys emulated thread_local storage before the C++
+thread_local destructors run, so destroy_current_thread_data() receives
+nullptr from ~Cleanup when a QThread ends. The fault is caught by Windows
+during thread exit and reported silently through Windows Error Reporting,
+which freezes the process for about a second and shows a busy pointer.
+See msys2/MINGW-packages#2519.
+---
+--- a/src/corelib/thread/qthread_win.cpp	2026-11-03 23:22:31.940195996 +0200
++++ b/src/corelib/thread/qthread_win.cpp	2026-11-03 23:22:31.952043388 +0200
+@@ -53,6 +53,13 @@
+ static void destroy_current_thread_data(void *p)
+ {
+     QThreadData *data = static_cast<QThreadData *>(p);
++    // MinGW (GCC's emulated TLS) frees thread_local storage before it runs
++    // the thread_local destructors, so ~Cleanup below reads nullptr here when
++    // a QThread ends (msys2/MINGW-packages#2519). Nothing is left to clean up
++    // then; dereferencing it faulted, and Windows Error Reporting's silent
++    // report of that froze the whole process for about a second.
++    if (!data)
++        return;
+     QThread *thread = data->thread.loadAcquire();
+ 
+     if (data->isAdopted) {

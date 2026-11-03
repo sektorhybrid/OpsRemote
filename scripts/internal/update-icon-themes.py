@@ -314,8 +314,18 @@ def build_theme(theme, cache, output):
 # greys, black and white stay. The licence is the base theme's.
 TINTED = [
     ("Papirus-Orange", "Papirus Orange", "Papirus", (0xE0, 0x95, 0x5A)),
+    ("WhiteSur-Orange", "WhiteSur Orange", "WhiteSur", (0xE0, 0x95, 0x5A)),
+    # From the dark variant (DARKENED, made first).
+    ("WhiteSur-Dark-Orange", "WhiteSur Dark Orange", "WhiteSur-Dark", (0xE0, 0x95, 0x5A)),
 ]
 HEX_COLOUR = re.compile(rb"#([0-9a-fA-F]{6}|[0-9a-fA-F]{3})\b")
+# Dark variants made the way their upstream installers make them: these exact
+# colours replaced in these folders only (the colourful folder and file-type
+# icons stay as they are). id, display name, base, {old: new}, folders.
+DARKENED = [
+    # WhiteSur's install.sh: #363636 -> #dedede in its small and symbolic icons.
+    ("WhiteSur-Dark", "WhiteSur Dark", "WhiteSur", {b"#363636": b"#dedede"}, ["scalable/actions"]),
+]
 
 
 def tint_colour(match, tint):
@@ -354,6 +364,30 @@ def build_tinted(theme, output):
                    .replace(f"Comment=Subset of {base} ", f"Comment=Recoloured subset of {base} "))
 
 
+def build_darkened(theme, output):
+    theme_id, display, base, colours, folders = theme
+    directory = os.path.join(output, theme_id)
+    shutil.copytree(os.path.join(output, base), directory)
+    for subfolder in folders:
+        for folder, _, files in os.walk(os.path.join(directory, subfolder)):
+            for name in files:
+                if not name.endswith(".svg"):
+                    continue
+                path = os.path.join(folder, name)
+                with open(path, "rb") as svg:
+                    data = svg.read()
+                for old, new in colours.items():
+                    data = re.sub(re.escape(old), new, data, flags=re.I)
+                with open(path, "wb") as svg:
+                    svg.write(data)
+    index = os.path.join(directory, "index.theme")
+    with open(index) as file:
+        text = file.read()
+    with open(index, "w") as file:
+        file.write(re.sub(r"^Name=.*$", f"Name={display}", text, count=1, flags=re.M)
+                   .replace(f"Comment=Subset of {base} ", f"Comment=Dark subset of {base} "))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--cache", help="directory to keep downloaded archives in")
@@ -362,6 +396,8 @@ def main():
     staging = tempfile.mkdtemp(dir=os.path.dirname(TARGET) if os.path.isdir(os.path.dirname(TARGET)) else None)
     try:
         results = [build_theme(theme, arguments.cache, staging) for theme in THEMES]
+        for theme in DARKENED:
+            build_darkened(theme, staging)
         for theme in TINTED:
             build_tinted(theme, staging)
         with open(os.path.join(staging, "README.md"), "w") as out:
@@ -375,6 +411,9 @@ def main():
             for theme_id, display, base, _ in TINTED:
                 out.write(f"| {display} | (from {base}) | | as {base} | {base}, recoloured by "
                           f"`update-icon-themes.py` |\n")
+            for theme_id, display, base, _, _ in DARKENED:
+                out.write(f"| {display} | (from {base}) | | as {base} | {base}'s dark variant, made as "
+                          f"its installer makes it, by `update-icon-themes.py` |\n")
             out.write("\nEach theme's folder contains its upstream license files. Icons a theme does not "
                       "provide fall back to the application's built-in icons. Recoloured themes are "
                       "modified copies: their coloured parts take a pale, matte tint "

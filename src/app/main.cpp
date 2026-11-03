@@ -24,6 +24,7 @@
 #include <QDateTime>
 #include <QDir>
 #include <QDebug>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QHash>
 #include <QIcon>
@@ -218,6 +219,8 @@ int main(int argc, char *argv[])
 #endif
     if (logFile && qEnvironmentVariable("OPSREMOTE_LOG_STALLS") != QStringLiteral("0"))
         watchGuiStalls(&application);
+    if (logFile)
+        logCrashes();
     // For automated tests: a write, read, and remove in the system credential
     // store, reported to the file OPSREMOTE_TEST_CREDENTIALS names.
     if (const auto report = qEnvironmentVariable("OPSREMOTE_TEST_CREDENTIALS"); !report.isEmpty()) {
@@ -615,6 +618,7 @@ int main(int argc, char *argv[])
             closeAfter > 0)
             QTimer::singleShot(closeAfter, &window, &QWidget::close);
         result = application.exec();
+        qInfo("shutdown: event loop ended");
         // Whatever hangs from here on (window teardown, a worker thread stuck
         // in libssh or OpenSSL), the process must not outlive its window: a
         // watchdog ends it after a grace period.
@@ -629,7 +633,11 @@ int main(int argc, char *argv[])
     // or OpenSSL can hang the process on Windows. Settings were saved when
     // the window closed, so if a worker is stuck (for example in a connection
     // attempt), end at once.
+    QElapsedTimer shutdownClock;
+    shutdownClock.start();
     const bool finished = WorkerThreads::shutdownAll(5000);
+    qInfo("shutdown: worker threads %s after %lld ms", finished ? "ended" : "still running",
+          qlonglong(shutdownClock.elapsed()));
     if (loadBackupPreferences().removeRuntimeOnExit)
         scheduleRuntimeRemoval();
 #ifdef Q_OS_WIN

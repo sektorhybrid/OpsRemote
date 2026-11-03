@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "preferenceswindow.h"
+#include "kvantumthemes.h"
 #include "availabilitynote.h"
 #include "localresources.h"
 #include "systemcredentials.h"
@@ -165,6 +166,35 @@ QCheckBox *toggle(bool checked)
 
 // One rounded card of setting rows. Each row remembers the text it can be
 // found by.
+// A full-width row's frame: the rows' usual space above and below, none
+// while its content hides itself (an availability note with nothing to say).
+class WideRow final : public QWidget
+{
+public:
+    WideRow(QWidget *content, QWidget *parent)
+        : QWidget(parent), m_layout(new QVBoxLayout(this))
+    {
+        setObjectName(QStringLiteral("settingsRow"));
+        content->setParent(this);
+        m_layout->addWidget(content);
+        content->installEventFilter(this);
+        fit(!content->isHidden());
+    }
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override
+    {
+        if (event->type() == QEvent::Show || event->type() == QEvent::Hide)
+            fit(event->type() == QEvent::Show);
+        return QWidget::eventFilter(watched, event);
+    }
+
+private:
+    void fit(bool shown) { m_layout->setContentsMargins(0, shown ? 8 : 0, 0, shown ? 8 : 0); }
+
+    QVBoxLayout *m_layout;
+};
+
 class SettingsCard final : public QFrame
 {
 public:
@@ -207,12 +237,13 @@ public:
         return row;
     }
 
-    // A row whose content spans the card's width.
+    // A row whose content spans the card's width, with the same space above
+    // and below as the other rows (not right against the dividers).
     QWidget *addWideRow(QWidget *content, const QString &keywords)
     {
-        content->setParent(this);
-        registerRow(content, keywords);
-        return content;
+        auto *row = new WideRow(content, this);
+        registerRow(row, keywords);
+        return row;
     }
 
     // Shows the rows matching every word of the search; returns whether any did.
@@ -311,9 +342,14 @@ public:
     enum Role { NameRole = Qt::UserRole + 1, DescriptionRole, InUseRole, ColorsRole };
     using QStyledItemDelegate::QStyledItemDelegate;
 
+    static constexpr int PaddingX = 10;
+    static constexpr int PaddingY = 8;
+    static constexpr int LineGap = 4;
+
     QSize sizeHint(const QStyleOptionViewItem &option, const QModelIndex &) const override
     {
-        return {200, option.fontMetrics.height() * 2 + 18};
+        // Name and description, LineGap apart, with Padding all round.
+        return {200, option.fontMetrics.height() * 2 + LineGap + 2 * PaddingY};
     }
 
     void paint(QPainter *painter, const QStyleOptionViewItem &option,
@@ -326,7 +362,7 @@ public:
         option.widget->style()->drawControl(QStyle::CE_ItemViewItem, &base, painter, option.widget);
         painter->save();
         painter->setRenderHint(QPainter::Antialiasing);
-        const QRect rect = option.rect.adjusted(8, 6, -8, -6);
+        const QRect rect = option.rect.adjusted(PaddingX, PaddingY, -PaddingX, -PaddingY);
         // Preview: window colour, a panel in the base colour with a line of
         // text, and the accent.
         const auto colors = index.data(ColorsRole).toList();
@@ -359,17 +395,23 @@ public:
         QFont nameFont = option.font;
         nameFont.setBold(true);
         const QRect textRect = rect.adjusted(int(tile.width()) + 12, 0, 0, 0);
+        const int lineHeight = option.fontMetrics.height();
+        // Both lines together, centred in the row, LineGap apart.
+        const int top = textRect.top() + (textRect.height() - (2 * lineHeight + LineGap)) / 2;
         painter->setFont(nameFont);
         painter->setPen(text);
         QString name = index.data(NameRole).toString();
         if (index.data(InUseRole).toBool())
             name += QStringLiteral("  ✓ in use");
-        painter->drawText(textRect, Qt::AlignLeft | Qt::AlignTop, name);
+        painter->drawText(QRect(textRect.left(), top, textRect.width(), lineHeight),
+                          Qt::AlignLeft | Qt::AlignVCenter,
+                          QFontMetrics(nameFont).elidedText(name, Qt::ElideRight, textRect.width()));
         painter->setFont(option.font);
         QColor muted = text;
         muted.setAlphaF(selected ? 0.85 : 0.65);
         painter->setPen(muted);
-        painter->drawText(textRect, Qt::AlignLeft | Qt::AlignBottom,
+        painter->drawText(QRect(textRect.left(), top + lineHeight + LineGap, textRect.width(), lineHeight),
+                          Qt::AlignLeft | Qt::AlignVCenter,
                           QFontMetrics(option.font).elidedText(index.data(DescriptionRole).toString(),
                                                                Qt::ElideRight, textRect.width()));
         painter->restore();
@@ -426,6 +468,12 @@ void PreferencesWindow::buildPages()
     buildAppearancePage();
     buildSessionListPage();
     endCategory();
+    beginCategory(QStringLiteral("workspace"), QStringLiteral("Workspace"),
+                  QStringLiteral("preferences-system"), QStyle::SP_TitleBarMaxButton);
+    buildStartupPage();
+    buildShortcutsPage();
+    buildPresentationPage();
+    endCategory();
     beginCategory(QStringLiteral("terminal-category"), QStringLiteral("Terminal"),
                   QStringLiteral("utilities-terminal"), QStyle::SP_ComputerIcon);
     buildTerminalPage();
@@ -446,12 +494,6 @@ void PreferencesWindow::buildPages()
     buildXdmcpPage();
     buildRunCommandPage();
     buildHttpRequestPage();
-    endCategory();
-    beginCategory(QStringLiteral("workspace"), QStringLiteral("Workspace"),
-                  QStringLiteral("preferences-system"), QStyle::SP_TitleBarMaxButton);
-    buildStartupPage();
-    buildShortcutsPage();
-    buildPresentationPage();
     endCategory();
     beginCategory(QStringLiteral("security"), QStringLiteral("Security and vault"),
                   QStringLiteral("security-high"), QStyle::SP_MessageBoxWarning);
@@ -594,22 +636,26 @@ void PreferencesWindow::filter(const QString &text)
 
 // Looks: ready-made combinations of the settings on the Interface and
 // Terminal tabs, and the user's own (up to MaximumUserLooks).
-void PreferencesWindow::buildLooksPage()
+// One page for the whole appearance: the looks, and below them what a look
+// sets (interface and terminal), changed by hand there.
+SettingsPage *PreferencesWindow::buildLooksPage()
 {
     auto *mainWindow = m_mainWindow;
     auto *page = addPage(QStringLiteral("appearance-looks"), QStringLiteral("Looks"),
                          QStringLiteral("preferences-desktop-theme"), QStyle::SP_DesktopIcon);
     auto *card = page->addCard(QStringLiteral("Looks"));
-    auto *intro = new QLabel(QStringLiteral(
-        "A look sets the colours, style, icons, fonts, terminal colours and window border "
-        "together. Changing any of them by hand makes the appearance Custom; save it as a look "
-        "of your own to keep it."));
-    intro->setWordWrap(true);
+    // Faded, like the explanations under every setting.
+    auto *intro = secondaryLabel(QStringLiteral(
+        "A look sets the interface colours, style, icons and fonts, the window border and the "
+        "terminal colours and font together; all of them are below. Changing one by hand makes "
+        "the appearance Custom: save it as a new look, into one of your own looks, or go back "
+        "to the look it came from."), nullptr);
     card->addWideRow(intro, QStringLiteral("look theme preset"));
 
     auto *content = new QWidget;
     auto *layout = new QHBoxLayout(content);
     layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(12);
     auto *list = new QListWidget(content);
     list->setMinimumHeight(300);
     list->setItemDelegate(new LookDelegate(list));
@@ -617,15 +663,31 @@ void PreferencesWindow::buildLooksPage()
     layout->addWidget(list, 1);
     auto *buttons = new QVBoxLayout;
     auto *apply = new QPushButton(QStringLiteral("Apply"), content);
-    auto *save = new QPushButton(QStringLiteral("Save Current as…"), content);
+    auto *saveNew = new QPushButton(QStringLiteral("Save as New Look…"), content);
+    auto *saveInto = new QPushButton(content);
+    auto *revert = new QPushButton(content);
+    auto *duplicate = new QPushButton(QStringLiteral("Duplicate"), content);
     auto *rename = new QPushButton(QStringLiteral("Rename…"), content);
     auto *remove = new QPushButton(QStringLiteral("Delete"), content);
-    for (auto *button : {apply, save, rename, remove})
+    auto *exportButton = new QPushButton(QStringLiteral("Export…"), content);
+    auto *importButton = new QPushButton(QStringLiteral("Import…"), content);
+    saveInto->setToolTip(QStringLiteral("Replaces the selected look of yours with the current appearance."));
+    revert->setToolTip(QStringLiteral("Undoes the changes made by hand since that look."));
+    exportButton->setToolTip(QStringLiteral("Saves the selected look to a file, to use it on another "
+                                            "computer or share it."));
+    for (auto *button : {apply, saveNew, saveInto, revert})
+        buttons->addWidget(button);
+    buttons->addSpacing(8);
+    for (auto *button : {duplicate, rename, remove})
+        buttons->addWidget(button);
+    buttons->addSpacing(8);
+    for (auto *button : {exportButton, importButton})
         buttons->addWidget(button);
     buttons->addStretch();
     layout->addLayout(buttons);
-    card->addWideRow(content, QStringLiteral("look apply save rename delete custom"));
+    card->addWideRow(content, QStringLiteral("look apply save rename delete custom duplicate export import revert"));
     auto *current = new QLabel;
+    current->setWordWrap(true);
     card->addWideRow(current, QStringLiteral("current look custom"));
 
     const auto describe = [mainWindow](const Look &look) {
@@ -649,11 +711,19 @@ void PreferencesWindow::buildLooksPage()
                              : QStringLiteral("%1 / %2").arg(look.terminalScheme, look.darkTerminalScheme));
         return parts.join(QStringLiteral(" · "));
     };
+    const auto lookById = [mainWindow](const QString &id) -> std::optional<Look> {
+        for (const auto &look : mainWindow->looks()) {
+            if (look.id == id)
+                return look;
+        }
+        return std::nullopt;
+    };
     // Fills the list; the look in use is marked and selected.
-    const auto refresh = [mainWindow, list, current, describe] {
+    const auto refresh = [mainWindow, list, current, describe, lookById] {
         const QString selected = list->currentItem() ? list->currentItem()->data(Qt::UserRole).toString()
                                                      : QString();
         const QString active = mainWindow->matchingLookId();
+        const QString base = mainWindow->baseLookId();
         list->clear();
         for (const auto &look : mainWindow->looks()) {
             const bool inUse = look.id == active;
@@ -668,46 +738,72 @@ void PreferencesWindow::buildLooksPage()
             const QStringList variants = look.colorTheme == QStringLiteral("auto")
                                              ? QStringList{QStringLiteral("light"), QStringLiteral("dark")}
                                              : QStringList{look.colorTheme};
-            for (const auto &variant : variants) {
-                const QPalette colours = mainWindow->paletteFor(variant, look.customColors);
-                colors << colours.color(QPalette::Window) << colours.color(QPalette::Base)
-                       << colours.color(QPalette::Text) << colours.color(QPalette::Highlight);
+            // A Kvantum look with the style's own colours shows the theme's
+            // colours, not the ones in use now.
+            const auto own = look.colorTheme == QStringLiteral("system") && KvantumThemes::isKvantumKey(look.style)
+                                 ? KvantumThemes::colours(look.style)
+                                 : QList<QColor>();
+            if (own.size() == 4) {
+                for (const auto &colour : own)
+                    colors << colour;
+            } else {
+                for (const auto &variant : variants) {
+                    const QPalette colours = mainWindow->paletteFor(variant, look.customColors);
+                    colors << colours.color(QPalette::Window) << colours.color(QPalette::Base)
+                           << colours.color(QPalette::Text) << colours.color(QPalette::Highlight);
+                }
             }
             item->setData(LookDelegate::ColorsRole, colors);
-            if (look.id == (selected.isEmpty() ? active : selected))
+            if (look.id == (selected.isEmpty() ? (active.isEmpty() ? base : active) : selected))
                 list->setCurrentItem(item);
         }
-        QString name = QStringLiteral("Custom");
-        for (const auto &look : mainWindow->looks()) {
-            if (look.id == active)
-                name = look.name;
+        if (const auto look = lookById(active)) {
+            current->setText(QStringLiteral("In use: <b>%1</b>").arg(look->name.toHtmlEscaped()));
+        } else if (const auto from = lookById(base)) {
+            current->setText(QStringLiteral("In use: <b>Custom</b>, from \"%1\" with changed %2.")
+                                 .arg(from->name.toHtmlEscaped(),
+                                      lookDifferences(*from, mainWindow->currentLook())
+                                          .join(QStringLiteral(", ")).toHtmlEscaped()));
+        } else {
+            current->setText(QStringLiteral("In use: <b>Custom</b>"));
         }
-        current->setText(QStringLiteral("In use: <b>%1</b>").arg(name.toHtmlEscaped()));
     };
-    const auto selectedLook = [mainWindow, list]() -> std::optional<Look> {
-        if (!list->currentItem())
-            return std::nullopt;
-        const auto id = list->currentItem()->data(Qt::UserRole).toString();
-        for (const auto &look : mainWindow->looks()) {
-            if (look.id == id)
-                return look;
-        }
-        return std::nullopt;
+    const auto selectedLook = [list, lookById]() -> std::optional<Look> {
+        return list->currentItem() ? lookById(list->currentItem()->data(Qt::UserRole).toString())
+                                   : std::nullopt;
     };
-    const auto updateButtons = [list, apply, rename, remove, save, selectedLook, mainWindow] {
-        const auto look = selectedLook();
-        apply->setEnabled(look.has_value());
-        rename->setEnabled(look && !look->isBuiltIn());
-        remove->setEnabled(look && !look->isBuiltIn());
+    const auto ownCount = [mainWindow] {
         int own = 0;
         for (const auto &each : mainWindow->looks())
             own += each.isBuiltIn() ? 0 : 1;
-        save->setEnabled(own < MaximumUserLooks);
-        save->setToolTip(own < MaximumUserLooks
-                             ? QString()
-                             : QStringLiteral("Up to %1 looks of your own; delete one first.")
-                                   .arg(MaximumUserLooks));
-        Q_UNUSED(list);
+        return own;
+    };
+    const auto updateButtons = [=] {
+        const auto look = selectedLook();
+        const Look now = mainWindow->currentLook();
+        apply->setEnabled(look.has_value());
+        rename->setEnabled(look && !look->isBuiltIn());
+        remove->setEnabled(look && !look->isBuiltIn());
+        exportButton->setEnabled(look.has_value());
+        const bool room = ownCount() < MaximumUserLooks;
+        const QString full = QStringLiteral("Up to %1 looks of your own; delete one first.").arg(MaximumUserLooks);
+        for (auto *button : {saveNew, duplicate, importButton}) {
+            button->setEnabled(room && (button != duplicate || look.has_value()));
+            button->setToolTip(room ? QString() : full);
+        }
+        const bool own = look && !look->isBuiltIn();
+        saveInto->setText(own ? QStringLiteral("Save into \"%1\"…").arg(look->name)
+                              : QStringLiteral("Save into Selected…"));
+        saveInto->setEnabled(own && !look->sameAppearance(now));
+        const auto base = lookById(mainWindow->baseLookId());
+        revert->setText(base ? QStringLiteral("Back to \"%1\"").arg(base->name) : QStringLiteral("Back to the Look"));
+        revert->setEnabled(base && !base->sameAppearance(now));
+    };
+    const auto askName = [this](const QString &title, const QString &name) {
+        bool ok = false;
+        const QString text = QInputDialog::getText(this, title, QStringLiteral("Name of the look:"),
+                                                   QLineEdit::Normal, name, &ok).trimmed();
+        return ok ? text : QString();
     };
     refresh();
     updateButtons();
@@ -717,27 +813,53 @@ void PreferencesWindow::buildLooksPage()
         if (const auto look = selectedLook())
             mainWindow->applyLook(*look);
     });
-    connect(save, &QPushButton::clicked, this, [this, mainWindow] {
-        bool ok = false;
-        const QString name = QInputDialog::getText(this, QStringLiteral("Save Look"),
-                                                   QStringLiteral("Name of the look:"),
-                                                   QLineEdit::Normal, QString(), &ok)
-                                 .trimmed();
-        if (ok && !name.isEmpty() && !mainWindow->saveCurrentLookAs(name))
+    connect(saveNew, &QPushButton::clicked, this, [this, mainWindow, askName] {
+        const QString name = askName(QStringLiteral("Save as New Look"), QString());
+        if (!name.isEmpty() && !mainWindow->saveCurrentLookAs(name))
             QMessageBox::information(this, QStringLiteral("Save Look"),
                                      QStringLiteral("You can keep up to %1 looks of your own. "
                                                     "Delete one first.").arg(MaximumUserLooks));
     });
-    connect(rename, &QPushButton::clicked, this, [this, mainWindow, selectedLook] {
+    connect(saveInto, &QPushButton::clicked, this, [this, mainWindow, selectedLook] {
         const auto look = selectedLook();
         if (!look || look->isBuiltIn())
             return;
-        bool ok = false;
-        const QString name = QInputDialog::getText(this, QStringLiteral("Rename Look"),
-                                                   QStringLiteral("Name of the look:"),
-                                                   QLineEdit::Normal, look->name, &ok)
-                                 .trimmed();
-        if (ok && !name.isEmpty())
+        // Named and with what changes, so the wrong look is not replaced by mistake.
+        QMessageBox confirm(this);
+        confirm.setIcon(QMessageBox::Question);
+        confirm.setWindowTitle(QStringLiteral("Save into Look"));
+        confirm.setText(QStringLiteral("Replace your look \"%1\" with the current appearance?").arg(look->name));
+        confirm.setInformativeText(QStringLiteral("Changes: %1. This cannot be undone.")
+                                       .arg(lookDifferences(*look, mainWindow->currentLook())
+                                                .join(QStringLiteral(", "))));
+        auto *replace = confirm.addButton(QStringLiteral("Replace \"%1\"").arg(look->name),
+                                          QMessageBox::AcceptRole);
+        confirm.addButton(QMessageBox::Cancel);
+        confirm.setDefaultButton(QMessageBox::Cancel);
+        confirm.exec();
+        if (confirm.clickedButton() == replace)
+            mainWindow->overwriteLook(look->id);
+    });
+    connect(revert, &QPushButton::clicked, this, [mainWindow, lookById] {
+        if (const auto look = lookById(mainWindow->baseLookId()))
+            mainWindow->applyLook(*look);
+    });
+    connect(duplicate, &QPushButton::clicked, this, [mainWindow, selectedLook, askName] {
+        auto look = selectedLook();
+        if (!look)
+            return;
+        const QString name = askName(QStringLiteral("Duplicate Look"), QStringLiteral("%1 (copy)").arg(look->name));
+        if (name.isEmpty())
+            return;
+        look->name = name;
+        mainWindow->addLook(*look);
+    });
+    connect(rename, &QPushButton::clicked, this, [mainWindow, selectedLook, askName] {
+        const auto look = selectedLook();
+        if (!look || look->isBuiltIn())
+            return;
+        const QString name = askName(QStringLiteral("Rename Look"), look->name);
+        if (!name.isEmpty())
             mainWindow->renameLook(look->id, name);
     });
     connect(remove, &QPushButton::clicked, this, [this, mainWindow, selectedLook] {
@@ -748,22 +870,49 @@ void PreferencesWindow::buildLooksPage()
                    == QMessageBox::Yes)
             mainWindow->deleteLook(look->id);
     });
+    connect(exportButton, &QPushButton::clicked, this, [this, selectedLook] {
+        const auto look = selectedLook();
+        if (!look)
+            return;
+        const QString path = QFileDialog::getSaveFileName(
+            this, QStringLiteral("Export Look"),
+            QDir::home().filePath(look->name + QStringLiteral(".opsremote-look.yaml")),
+            QStringLiteral("OpsRemote looks (*.opsremote-look.yaml *.yaml)"));
+        if (!path.isEmpty() && !exportLook(*look, path))
+            QMessageBox::warning(this, QStringLiteral("Export Look"),
+                                 QStringLiteral("Could not write %1.").arg(QDir::toNativeSeparators(path)));
+    });
+    connect(importButton, &QPushButton::clicked, this, [this, mainWindow] {
+        const QString path = QFileDialog::getOpenFileName(
+            this, QStringLiteral("Import Look"), QDir::homePath(),
+            QStringLiteral("OpsRemote looks (*.opsremote-look.yaml *.yaml)"));
+        if (path.isEmpty())
+            return;
+        QString error;
+        const auto look = importLook(path, &error);
+        if (!look)
+            QMessageBox::warning(this, QStringLiteral("Import Look"), error);
+        else if (!mainWindow->addLook(*look))
+            QMessageBox::information(this, QStringLiteral("Import Look"),
+                                     QStringLiteral("You can keep up to %1 looks of your own. "
+                                                    "Delete one first.").arg(MaximumUserLooks));
+    });
     // Settings changed one by one only move the "in use" mark.
     connect(mainWindow, &MainWindow::appearanceChanged, list, [refresh, updateButtons] {
         refresh();
         updateButtons();
     });
+    return page;
 }
 
 void PreferencesWindow::buildAppearancePage()
 {
     auto *mainWindow = m_mainWindow;
-    buildLooksPage();
-    auto *page = addPage(QStringLiteral("appearance-interface"), QStringLiteral("Interface"),
-                         QStringLiteral("preferences-desktop-theme"), QStyle::SP_DesktopIcon);
+    // What a look sets, on the Looks page below the looks themselves.
+    auto *page = buildLooksPage();
 
     // Colours and style
-    auto *colours = page->addCard(QStringLiteral("Colours and style"));
+    auto *colours = page->addCard(QStringLiteral("Interface: colours and style"));
     auto *colourMode = new QComboBox;
     for (const auto &choice : mainWindow->colorThemeChoices())
         colourMode->addItem(choice.second, choice.first);
@@ -813,7 +962,7 @@ void PreferencesWindow::buildAppearancePage()
 
 
     // Icons and text
-    auto *iconsAndText = page->addCard(QStringLiteral("Icons and text"));
+    auto *iconsAndText = page->addCard(QStringLiteral("Interface: icons and text"));
     auto *iconTheme = new QComboBox;
     iconTheme->addItem(QStringLiteral("Built-in"), QString());
     for (const auto &theme : availableIconThemes())
@@ -846,7 +995,7 @@ void PreferencesWindow::buildAppearancePage()
     fontLayout->addWidget(fontSize);
     iconsAndText->addRow(QStringLiteral("Interface font"),
                          QStringLiteral("Menus, panels, and dialogs. Terminals have their own "
-                                        "font on the Terminal tab."),
+                                        "font, below."),
                          fontControls, QStringLiteral("text size font family"));
     auto applyFont = [mainWindow, useSystemFont, fontFamily, fontSize] {
         fontFamily->setEnabled(!useSystemFont->isChecked());
@@ -863,9 +1012,7 @@ void PreferencesWindow::buildAppearancePage()
     connect(fontSize, &QSpinBox::valueChanged, this, applyFont);
 
     // Terminal
-    page = addPage(QStringLiteral("appearance-terminal"), QStringLiteral("Terminal"),
-                   QStringLiteral("utilities-terminal"), QStyle::SP_ComputerIcon);
-    auto *terminal = page->addCard(QStringLiteral("Terminal"));
+    auto *terminal = page->addCard(QStringLiteral("Terminal: colours and font"));
     auto *editor = new TerminalAppearanceEditor(mainWindow->defaultTerminalAppearance(), false);
     editor->changed = [mainWindow, editor] {
         mainWindow->setDefaultTerminalAppearance(editor->value());
@@ -1029,7 +1176,7 @@ void PreferencesWindow::buildTerminalPage()
 void PreferencesWindow::buildStartupPage()
 {
     auto *mainWindow = m_mainWindow;
-    auto *page = addPage(QStringLiteral("startup"), QStringLiteral("Startup and tabs"),
+    auto *page = addPage(QStringLiteral("startup"), QStringLiteral("Startup and exit"),
                          QStringLiteral("system-run"), QStyle::SP_MediaPlay);
     auto update = [mainWindow](auto change) {
         auto preferences = mainWindow->startupPreferences();
@@ -1083,6 +1230,14 @@ void PreferencesWindow::buildStartupPage()
     connectToggle(activation, &StartupPreferences::waylandActivation);
 #endif
 
+    auto *closing = page->addCard(QStringLiteral("When OpsRemote closes"));
+    auto *exit = toggle(current.confirmExit);
+    closing->addRow(QStringLiteral("Ask before exiting with open terminals"), QString(), exit,
+                    QStringLiteral("confirm quit close"));
+    connectToggle(exit, &StartupPreferences::confirmExit);
+
+    page = addPage(QStringLiteral("tabs"), QStringLiteral("Tabs"), QStringLiteral("tab-new"),
+                   QStyle::SP_FileDialogDetailedView);
     auto *tabs = page->addCard(QStringLiteral("Tabs"));
     auto *title = choiceBox({{QStringLiteral("name"), QStringLiteral("Session name")},
                              {QStringLiteral("userhost"), QStringLiteral("user@host")}},
@@ -1109,15 +1264,27 @@ void PreferencesWindow::buildStartupPage()
                  QStringLiteral("mouse wheel button"));
     connectToggle(middle, &StartupPreferences::middleClickCloses);
 
-    auto *confirm = page->addCard(QStringLiteral("Confirmations"));
     auto *closeConnected = toggle(current.confirmCloseConnected);
-    confirm->addRow(QStringLiteral("Ask before closing a connected SSH tab"), QString(),
-                    closeConnected, QStringLiteral("confirm disconnect"));
+    tabs->addRow(QStringLiteral("Ask before closing a connected SSH tab"), QString(),
+                 closeConnected, QStringLiteral("confirm disconnect"));
     connectToggle(closeConnected, &StartupPreferences::confirmCloseConnected);
-    auto *exit = toggle(current.confirmExit);
-    confirm->addRow(QStringLiteral("Ask before exiting with open terminals"), QString(), exit,
-                    QStringLiteral("confirm quit close"));
-    connectToggle(exit, &StartupPreferences::confirmExit);
+
+    page = addPage(QStringLiteral("mouse"), QStringLiteral("Mouse"), QStringLiteral("input-mouse"),
+                   QStyle::SP_ArrowUp);
+    auto *mouse = page->addCard(QStringLiteral("Mouse wheel"));
+    auto *wheel = choiceBox({{QStringLiteral("focused"), QStringLiteral("Only after clicking the field")},
+                             {QStringLiteral("always"), QStringLiteral("Always")},
+                             {QStringLiteral("never"), QStringLiteral("Never")}},
+                            current.wheelOnFields);
+    mouse->addRow(QStringLiteral("Wheel on drop-down lists and number fields"),
+                  QStringLiteral("In Preferences, the session window, and every other window. Only "
+                                 "after clicking: scrolling over a field that is not selected scrolls "
+                                 "the page, so a choice does not change by accident. Never: change "
+                                 "them with a click or the keyboard."),
+                  wheel, QStringLiteral("scroll wheel combo box spin accident change select"));
+    connect(wheel, &QComboBox::activated, this, [update, wheel] {
+        update([&](StartupPreferences &p) { p.wheelOnFields = wheel->currentData().toString(); });
+    });
 }
 
 void PreferencesWindow::buildShortcutsPage()
@@ -2588,13 +2755,14 @@ void PreferencesWindow::buildSessionListPage()
     folders->addRow(QStringLiteral("Recent sessions"), QString(), recentCount,
                     QStringLiteral("history count"));
     bindSpin(this, recentCount, update, &SessionListPreferences::recentCount);
+    auto *tree = page->addCard(QStringLiteral("Folders"));
     auto *indentation = spinBox(4, 40, current.indentation, QStringLiteral(" px"));
-    folders->addRow(QStringLiteral("Indent per folder level"),
+    tree->addRow(QStringLiteral("Indent per folder level"),
                     QStringLiteral("How far the sessions and folders inside a folder move right."),
                     indentation, QStringLiteral("indentation indent nesting width"));
     bindSpin(this, indentation, update, &SessionListPreferences::indentation);
     auto *folderGap = spinBox(0, 30, current.folderGap, QStringLiteral(" px"));
-    folders->addRow(QStringLiteral("Space after a folder's arrow"),
+    tree->addRow(QStringLiteral("Space after a folder's arrow"),
                     QStringLiteral("Between a folder's open/close arrow and its icon; sessions have "
                                    "their status dot there. Styles draw the arrow differently, so "
                                    "set it to what looks even."),
@@ -2604,7 +2772,7 @@ void PreferencesWindow::buildSessionListPage()
                                       {QStringLiteral("expanded"), QStringLiteral("All expanded")},
                                       {QStringLiteral("collapsed"), QStringLiteral("All collapsed")}},
                                      current.foldersAtStart);
-    folders->addRow(QStringLiteral("Folders at startup"),
+    tree->addRow(QStringLiteral("Folders at startup"),
                     QStringLiteral("Which folders are open when OpsRemote starts. As they were: "
                                    "folders it has no record of start collapsed. Pinned and Recent "
                                    "keep their own state."),

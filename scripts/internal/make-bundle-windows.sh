@@ -98,6 +98,21 @@ mkdir -p "${BUNDLE}/ossl-modules"
 cp "${SYSROOT}/lib/ossl-modules/legacy.dll" "${BUNDLE}/ossl-modules/"
 plugin_files+=("${BUNDLE}/ossl-modules/legacy.dll")
 bundle_dependencies "${BUNDLE}/OpsRemote.exe" "${BUNDLE}/libqtermwidget6.dll" "${plugin_files[@]}"
+# Qt DLLs rebuilt with OpsRemote's patches (packaging/qt/patches), made by
+# ./scripts/build-and-run.sh build-qt-windows for this exact Qt version.
+qt_package="$(rpm -q --qf '%{VERSION}-%{RELEASE}' mingw64-qt6-qtbase)"
+patched_qt="${PROJECT_DIR}/third_party/qt-windows/${qt_package}"
+patches_now="$(cd "${PROJECT_DIR}" && sha256sum packaging/qt/patches/*.patch)"
+if [[ -d "${patched_qt}/bin" ]] && [[ "$(tail -n +2 "${patched_qt}/BUILT-FROM.txt" 2>/dev/null)" == "${patches_now}" ]]; then
+    echo "==> Using the patched Qt DLLs of ${qt_package}"
+    cp "${patched_qt}"/bin/*.dll "${BUNDLE}/"
+else
+    {
+        echo "WARNING: no patched Qt DLLs for Qt ${qt_package} and the current patches."
+        echo "  Windows will stall about a second whenever a thread ends (see packaging/qt/patches)."
+        echo "  Run once: ./scripts/build-and-run.sh build-qt-windows"
+    } >&2
+fi
 x86_64-w64-mingw32-strip --strip-unneeded "${BUNDLE}"/*.exe "${BUNDLE}"/*.dll \
     "${BUNDLE}"/plugins/*/*.dll "${BUNDLE}"/ossl-modules/*.dll
 "${PROJECT_DIR}/scripts/internal/collect-licenses.sh" "${BUNDLE}" windows "${SYSROOT}"

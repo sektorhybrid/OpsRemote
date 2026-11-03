@@ -1,0 +1,4 @@
+WhiteSur-opaqueOrange: WhiteSur-opaque with its blue accents made orange by scripts/internal/make-kvantum-orange.py (OpsRemote, 2026).
+WhiteSur-opaque itself:
+From WhiteSur-kde (https://github.com/vinceliuice/WhiteSur-kde), commit cf4df59 (2026-08-07),
+Kvantum/WhiteSur-opaque/WhiteSur-opaque.*, unmodified. GPL-3.0 (LICENSE); authors: AUTHORS.

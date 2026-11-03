@@ -296,6 +296,9 @@ TerminalAppearanceEditor::TerminalAppearanceEditor(const TerminalAppearance &val
     m_preview->setScrollBarPosition(QTermWidget::NoScrollBar);
     m_preview->setFixedHeight(130);
     m_preview->setFocusPolicy(Qt::NoFocus);
+    // The wheel over it follows Preferences → Workspace → Mouse, like the
+    // drop-down lists (it cannot be clicked into, so it scrolls the page).
+    m_preview->setProperty("opsremoteWheelField", true);
     for (auto *child : m_preview->findChildren<QWidget *>())
         child->setFocusPolicy(Qt::NoFocus);
     m_preview->startTerminalTeletype();

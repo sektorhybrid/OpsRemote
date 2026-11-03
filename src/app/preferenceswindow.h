@@ -53,7 +53,7 @@ private:
     void buildRshPage();
     void buildXdmcpPage();
     void buildProxyPage();
-    void buildLooksPage();
+    SettingsPage *buildLooksPage();
     void buildPages();
     // Builds every page again (after a look changed many settings at once).
     void rebuild();

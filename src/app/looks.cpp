@@ -79,6 +79,21 @@ QList<Look> builtInLooks()
                 "Atom One Light", ""),
         builtIn("kvantum-mojave-orange", "Mojave Orange", "system", "kvantum:KvMojaveLightOrange",
                 "Papirus-Orange", "Nord", ""),
+        builtIn("kvantum-mojave-dark", "Mojave Dark", "system", "kvantum:KvMojave", "WhiteSur-Dark",
+                "Apple System Colors", ""),
+        // WhiteSur (macOS Big Sur), its opaque variants: OpsRemote draws no
+        // translucency or blur.
+        builtIn("kvantum-whitesur", "WhiteSur", "system", "kvantum:WhiteSur-opaque", "WhiteSur",
+                "Apple System Colors Light", ""),
+        builtIn("kvantum-whitesur-dark", "WhiteSur Dark", "system", "kvantum:WhiteSur-opaqueDark",
+                "WhiteSur-Dark", "Apple System Colors", ""),
+        // The orange variants (scripts/internal/make-kvantum-orange.py).
+        builtIn("kvantum-mojave-dark-orange", "Mojave Dark Orange", "system", "kvantum:KvMojaveDarkOrange",
+                "WhiteSur-Dark-Orange", "Apple System Colors", ""),
+        builtIn("kvantum-whitesur-orange", "WhiteSur Orange", "system", "kvantum:WhiteSur-opaqueOrange",
+                "WhiteSur-Orange", "Apple System Colors Light", ""),
+        builtIn("kvantum-whitesur-dark-orange", "WhiteSur Dark Orange", "system",
+                "kvantum:WhiteSur-opaqueDarkOrange", "WhiteSur-Dark-Orange", "Apple System Colors", ""),
         builtIn("kvantum-adapta-dark", "Adapta Dark", "system", "kvantum:KvAdaptaDark",
                 "Papirus-Dark", "Atom One Dark", ""),
     };
@@ -94,29 +109,79 @@ QList<Look> builtInLooks()
     return looks;
 }
 
+namespace {
+
+Look lookFromNode(const YAML::Node &node)
+{
+    Look look;
+    look.id = text(node, "id");
+    look.name = text(node, "name");
+    look.colorTheme = text(node, "color_theme");
+    for (const auto &color : node["custom_colors"])
+        look.customColors.insert(QString::fromStdString(color.first.as<std::string>()),
+                                 QColor(QString::fromStdString(color.second.as<std::string>())));
+    look.style = text(node, "style");
+    look.iconTheme = text(node, "icon_theme");
+    look.terminalScheme = text(node, "terminal_scheme");
+    look.darkTerminalScheme = text(node, "dark_terminal_scheme");
+    look.terminalFontFamily = text(node, "terminal_font_family");
+    look.terminalFontSize = qBound(0, node["terminal_font_size"].as<int>(0), 72);
+    look.interfaceFontFamily = text(node, "interface_font_family");
+    look.interfaceFontSize = qBound(0, node["interface_font_size"].as<int>(0), 48);
+    look.windowBorder = node["window_border"].as<bool>(true);
+    return look;
+}
+
+YAML::Node lookToNode(const Look &look)
+{
+    YAML::Node node;
+    node["id"] = look.id.toStdString();
+    node["name"] = look.name.toStdString();
+    node["color_theme"] = look.colorTheme.toStdString();
+    if (look.colorTheme == QStringLiteral("custom")) {
+        for (auto it = look.customColors.cbegin(); it != look.customColors.cend(); ++it)
+            node["custom_colors"][it.key().toStdString()] = it.value().name().toStdString();
+    }
+    node["style"] = look.style.toStdString();
+    node["icon_theme"] = look.iconTheme.toStdString();
+    node["terminal_scheme"] = look.terminalScheme.toStdString();
+    node["dark_terminal_scheme"] = look.darkTerminalScheme.toStdString();
+    node["terminal_font_family"] = look.terminalFontFamily.toStdString();
+    node["terminal_font_size"] = look.terminalFontSize;
+    node["interface_font_family"] = look.interfaceFontFamily.toStdString();
+    node["interface_font_size"] = look.interfaceFontSize;
+    node["window_border"] = look.windowBorder;
+    return node;
+}
+
+bool writeYaml(const QString &path, const YAML::Node &document)
+{
+    if (!QDir().mkpath(QFileInfo(path).absolutePath()))
+        return false;
+    YAML::Emitter emitter;
+    emitter << document;
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly))
+        return false;
+    QByteArray contents(emitter.c_str());
+    contents.append('\n');
+    if (file.write(contents) != contents.size()) {
+        file.cancelWriting();
+        return false;
+    }
+    return file.commit();
+}
+
+}
+
 QList<Look> loadUserLooks()
 {
     QList<Look> looks;
     try {
         for (const auto &node : YAML::LoadFile(looksFilePath().toStdString())["looks"]) {
-            Look look;
-            look.id = text(node, "id");
-            look.name = text(node, "name");
+            const Look look = lookFromNode(node);
             if (!look.id.startsWith(QStringLiteral("user:")) || look.name.isEmpty())
                 continue;
-            look.colorTheme = text(node, "color_theme");
-            for (const auto &color : node["custom_colors"])
-                look.customColors.insert(QString::fromStdString(color.first.as<std::string>()),
-                                         QColor(QString::fromStdString(color.second.as<std::string>())));
-            look.style = text(node, "style");
-            look.iconTheme = text(node, "icon_theme");
-            look.terminalScheme = text(node, "terminal_scheme");
-            look.darkTerminalScheme = text(node, "dark_terminal_scheme");
-            look.terminalFontFamily = text(node, "terminal_font_family");
-            look.terminalFontSize = qBound(0, node["terminal_font_size"].as<int>(0), 72);
-            look.interfaceFontFamily = text(node, "interface_font_family");
-            look.interfaceFontSize = qBound(0, node["interface_font_size"].as<int>(0), 48);
-            look.windowBorder = node["window_border"].as<bool>(true);
             looks.append(look);
             if (looks.size() == MaximumUserLooks)
                 break;
@@ -130,41 +195,57 @@ QList<Look> loadUserLooks()
 void saveUserLooks(const QList<Look> &looks)
 {
     YAML::Node list(YAML::NodeType::Sequence);
-    for (const auto &look : looks) {
-        YAML::Node node;
-        node["id"] = look.id.toStdString();
-        node["name"] = look.name.toStdString();
-        node["color_theme"] = look.colorTheme.toStdString();
-        if (look.colorTheme == QStringLiteral("custom")) {
-            for (auto it = look.customColors.cbegin(); it != look.customColors.cend(); ++it)
-                node["custom_colors"][it.key().toStdString()] = it.value().name().toStdString();
-        }
-        node["style"] = look.style.toStdString();
-        node["icon_theme"] = look.iconTheme.toStdString();
-        node["terminal_scheme"] = look.terminalScheme.toStdString();
-        node["dark_terminal_scheme"] = look.darkTerminalScheme.toStdString();
-        node["terminal_font_family"] = look.terminalFontFamily.toStdString();
-        node["terminal_font_size"] = look.terminalFontSize;
-        node["interface_font_family"] = look.interfaceFontFamily.toStdString();
-        node["interface_font_size"] = look.interfaceFontSize;
-        node["window_border"] = look.windowBorder;
-        list.push_back(node);
-    }
+    for (const auto &look : looks)
+        list.push_back(lookToNode(look));
     YAML::Node document;
     document["looks"] = list;
-    const auto path = looksFilePath();
-    if (!QDir().mkpath(QFileInfo(path).absolutePath()))
-        return;
-    YAML::Emitter emitter;
-    emitter << document;
-    QSaveFile file(path);
-    if (!file.open(QIODevice::WriteOnly))
-        return;
-    QByteArray contents(emitter.c_str());
-    contents.append('\n');
-    if (file.write(contents) != contents.size()) {
-        file.cancelWriting();
-        return;
+    writeYaml(looksFilePath(), document);
+}
+
+bool exportLook(const Look &look, const QString &path)
+{
+    YAML::Node document;
+    document["opsremote_look"] = lookToNode(look);
+    return writeYaml(path, document);
+}
+
+std::optional<Look> importLook(const QString &path, QString *error)
+{
+    try {
+        const auto node = YAML::LoadFile(path.toStdString())["opsremote_look"];
+        if (!node || !node.IsMap()) {
+            if (error)
+                *error = QStringLiteral("This file holds no OpsRemote look.");
+            return std::nullopt;
+        }
+        Look look = lookFromNode(node);
+        if (look.name.isEmpty())
+            look.name = QFileInfo(path).completeBaseName();
+        return look;
+    } catch (const YAML::Exception &exception) {
+        if (error)
+            *error = QString::fromStdString(exception.what());
+        return std::nullopt;
     }
-    file.commit();
+}
+
+QStringList lookDifferences(const Look &from, const Look &to)
+{
+    QStringList parts;
+    if (from.colorTheme != to.colorTheme
+        || (to.colorTheme == QStringLiteral("custom") && from.customColors != to.customColors))
+        parts << QStringLiteral("colours");
+    if (from.style != to.style)
+        parts << QStringLiteral("style");
+    if (from.iconTheme != to.iconTheme)
+        parts << QStringLiteral("icon theme");
+    if (from.interfaceFontFamily != to.interfaceFontFamily || from.interfaceFontSize != to.interfaceFontSize)
+        parts << QStringLiteral("interface font");
+    if (from.windowBorder != to.windowBorder)
+        parts << QStringLiteral("window border");
+    if (from.terminalScheme != to.terminalScheme || from.darkTerminalScheme != to.darkTerminalScheme)
+        parts << QStringLiteral("terminal colours");
+    if (from.terminalFontFamily != to.terminalFontFamily || from.terminalFontSize != to.terminalFontSize)
+        parts << QStringLiteral("terminal font");
+    return parts;
 }

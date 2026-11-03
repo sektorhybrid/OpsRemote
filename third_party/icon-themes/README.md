@@ -16,5 +16,8 @@ Subsets of freedesktop icon themes: only the icons Portable Terminal uses (actio
 | WhiteSur | 2026-09-10 | 97 | GPL-3.0-only | https://codeload.github.com/vinceliuice/WhiteSur-icon-theme/tar.gz/refs/tags/2026-09-10 |
 | elementary | 9.0.0 | 66 | GPL-3.0-only | https://codeload.github.com/elementary/icons/tar.gz/refs/tags/9.0.0 |
 | Papirus Orange | (from Papirus) | | as Papirus | Papirus, recoloured by `update-icon-themes.py` |
+| WhiteSur Dark Orange | (from WhiteSur-Dark) | | as WhiteSur-Dark | WhiteSur-Dark, recoloured by `update-icon-themes.py` |
+| WhiteSur Orange | (from WhiteSur) | | as WhiteSur | WhiteSur, recoloured by `update-icon-themes.py` |
+| WhiteSur Dark | (from WhiteSur) | | as WhiteSur | WhiteSur's dark variant, made as its installer makes it, by `update-icon-themes.py` |
 
 Each theme's folder contains its upstream license files. Icons a theme does not provide fall back to the application's built-in icons. Recoloured themes are modified copies: their coloured parts take a pale, matte tint (see `TINTED` in the script).

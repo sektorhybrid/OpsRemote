@@ -1,0 +1,2 @@
+From WhiteSur-kde (https://github.com/vinceliuice/WhiteSur-kde), commit cf4df59 (2026-08-07),
+Kvantum/WhiteSur-opaque/WhiteSur-opaque.*, unmodified. GPL-3.0 (LICENSE); authors: AUTHORS.

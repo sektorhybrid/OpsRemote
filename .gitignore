@@ -66,3 +66,6 @@ CMakeFiles/
 *.exe
 *.out
 *.app
+
+# Qt DLLs rebuilt with packaging/qt/patches (build-and-run.sh build-qt-windows)
+/third_party/qt-windows/

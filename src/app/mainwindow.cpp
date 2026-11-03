@@ -40,6 +40,7 @@
 #include <QAction>
 #include <QActionGroup>
 #include <QApplication>
+#include <QAbstractSpinBox>
 #include <QComboBox>
 #include <QCompleter>
 #include <QColorDialog>
@@ -1071,30 +1072,55 @@ public:
 
 protected:
     // On a selected folder some styles (Kvantum's light ones) draw the
-    // open/close arrow in the normal text colour on the dark selection,
-    // where it cannot be seen. Only then, the arrow is drawn again in the
-    // selection's text colour; every style that shows it well stays as it is.
+    // open/close arrow in about the colour of the selection, where it cannot
+    // be seen. The style's drawing is checked pixel by pixel (themes paint
+    // from their own images, so their palette does not tell): only when
+    // nothing in the arrow's cell stands out is the arrow drawn again, in
+    // whichever of the palette's text colours stands out from what is there.
     void drawBranches(QPainter *painter, const QRect &rect, const QModelIndex &index) const override
     {
-        QTreeWidget::drawBranches(painter, rect, index);
         const auto *item = itemFromIndex(index);
-        if (!item || item->childCount() == 0 || !selectionModel()->isSelected(index)
-            || !style()->styleHint(QStyle::SH_ItemView_ShowDecorationSelected, nullptr, this))
+        if (!item || item->childCount() == 0 || !selectionModel()->isSelected(index) || rect.isEmpty()) {
+            QTreeWidget::drawBranches(painter, rect, index);
             return;
-        const QPalette colors = palette();
-        const auto brightness = [](const QColor &color) {
+        }
+        const qreal ratio = painter->device() ? painter->device()->devicePixelRatioF() : 1.0;
+        QImage drawn((rect.size() * ratio), QImage::Format_ARGB32_Premultiplied);
+        drawn.setDevicePixelRatio(ratio);
+        drawn.fill(palette().color(QPalette::Base));
+        {
+            QPainter offscreen(&drawn);
+            offscreen.translate(-rect.topLeft());
+            QTreeWidget::drawBranches(&offscreen, rect, index);
+        }
+        painter->drawImage(rect.topLeft(), drawn);
+
+        const auto brightness = [](QRgb pixel) {
+            return (0.299 * qRed(pixel) + 0.587 * qGreen(pixel) + 0.114 * qBlue(pixel)) / 255.0;
+        };
+        // The arrow's cell: the last indentation-wide part of the branches.
+        const int width = indentation();
+        const QRect cell(int((rect.width() - width) * ratio), 0, int(width * ratio), drawn.height());
+        const QRect inside = cell.intersected(drawn.rect());
+        if (inside.width() < 3 || inside.height() < 3)
+            return;
+        const double background = brightness(drawn.pixel(inside.left() + 1, inside.center().y()));
+        double strongest = 0;
+        for (int y = inside.top(); y <= inside.bottom(); ++y)
+            for (int x = inside.left(); x <= inside.right(); ++x)
+                strongest = std::max(strongest, std::abs(brightness(drawn.pixel(x, y)) - background));
+        if (strongest > 0.3)
+            return; // the style's arrow shows
+        const QColor light = palette().color(QPalette::HighlightedText);
+        const QColor dark = palette().color(QPalette::Text);
+        const auto lightness = [](const QColor &color) {
             return 0.299 * color.redF() + 0.587 * color.greenF() + 0.114 * color.blueF();
         };
-        const QColor selection = colors.color(QPalette::Highlight);
-        if (std::abs(brightness(colors.color(QPalette::Text)) - brightness(selection)) > 0.35)
-            return; // the style's own arrow shows
-        const QColor arrowColor = colors.color(QPalette::HighlightedText);
-        if (std::abs(brightness(arrowColor) - brightness(selection)) <= 0.35)
-            return; // no colour would show better
-        const int width = indentation();
-        const QRectF cell(rect.right() - width + 1, rect.top(), width, rect.height());
-        const double half = std::min<double>(width, cell.height()) / 4.0;
-        const QPointF center = cell.center();
+        const QColor arrowColor = std::abs(lightness(light) - background) >= std::abs(lightness(dark) - background)
+                                      ? light : dark;
+        const QRectF arrowCell(rect.right() - width + 1, rect.top(), width, rect.height());
+        const double half = std::min<double>(width, arrowCell.height()) / 4.0;
+        const QPointF center = arrowCell.center();
         QPolygonF arrow;
         if (item->isExpanded())
             arrow << center + QPointF(-half, -half / 2) << center + QPointF(half, -half / 2)
@@ -4693,6 +4719,7 @@ void MainWindow::applyLook(const Look &look)
         setDefaultTerminalAppearance(terminal);
         setDarkTerminalColorScheme(look.darkTerminalScheme);
     }
+    m_baseLookId = look.id;
     statusBar()->showMessage(QStringLiteral("Look: %1").arg(look.name), 3000);
     emit appearanceChanged();
     emit looksChanged();
@@ -4708,9 +4735,48 @@ bool MainWindow::saveCurrentLookAs(const QString &name)
     look.name = name;
     m_userLooks.append(look);
     saveUserLooks(m_userLooks);
+    m_baseLookId = look.id;
     emit appearanceChanged();
     emit looksChanged();
     return true;
+}
+
+bool MainWindow::addLook(Look look)
+{
+    if (m_userLooks.size() >= MaximumUserLooks)
+        return false;
+    look.id = QStringLiteral("user:") + QUuid::createUuid().toString(QUuid::WithoutBraces);
+    m_userLooks.append(look);
+    saveUserLooks(m_userLooks);
+    emit looksChanged();
+    emit appearanceChanged();
+    return true;
+}
+
+void MainWindow::overwriteLook(const QString &id)
+{
+    const Look current = currentLook();
+    for (auto &look : m_userLooks) {
+        if (look.id != id)
+            continue;
+        Look updated = current;
+        updated.id = look.id;
+        updated.name = look.name;
+        look = updated;
+    }
+    saveUserLooks(m_userLooks);
+    m_baseLookId = id;
+    emit appearanceChanged();
+    emit looksChanged();
+}
+
+QString MainWindow::baseLookId() const
+{
+    for (const auto &look : looks()) {
+        if (look.id == m_baseLookId)
+            return m_baseLookId;
+    }
+    return matchingLookId();
 }
 
 void MainWindow::renameLook(const QString &id, const QString &name)
@@ -4728,6 +4794,8 @@ void MainWindow::deleteLook(const QString &id)
 {
     m_userLooks.removeIf([&id](const Look &look) { return look.id == id; });
     saveUserLooks(m_userLooks);
+    if (m_baseLookId == id)
+        m_baseLookId.clear();
     emit appearanceChanged();
     emit looksChanged();
 }
@@ -5178,6 +5246,35 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
         break;
     default:
         break;
+    }
+    // Drop-down lists and number fields, in every window: the wheel changes
+    // them only as Preferences → Workspace → Mouse says; otherwise it goes
+    // on to what holds them, so the page scrolls instead.
+    if (event->type() == QEvent::Polish || event->type() == QEvent::Wheel) {
+        // The field itself, or a part of it (a spin box's text, a marked
+        // widget's children such as the terminal preview's display).
+        const auto isField = [](const QWidget *widget) {
+            return qobject_cast<const QComboBox *>(widget) || qobject_cast<const QAbstractSpinBox *>(widget)
+                   || widget->property("opsremoteWheelField").toBool();
+        };
+        QWidget *field = qobject_cast<QWidget *>(watched);
+        // Not across windows: an open drop-down list is a popup of its combo
+        // box and scrolls as usual.
+        for (int depth = 0; field && !isField(field) && !field->isWindow() && depth < 3; ++depth)
+            field = field->parentWidget();
+        if (field && !isField(field))
+            field = nullptr;
+        if (field && m_startup.wheelOnFields != QStringLiteral("always")) {
+            // Not focused by the wheel itself, or "after clicking" would never hold.
+            if (field->focusPolicy() == Qt::WheelFocus)
+                field->setFocusPolicy(Qt::StrongFocus);
+            if (event->type() == QEvent::Wheel
+                && (m_startup.wheelOnFields == QStringLiteral("never") || !field->hasFocus())) {
+                if (auto *holder = field->parentWidget())
+                    QCoreApplication::sendEvent(holder, event);
+                return true;
+            }
+        }
     }
     if (watched == m_sessionSearch && event->type() == QEvent::KeyPress) {
         const int key = static_cast<QKeyEvent *>(event)->key();

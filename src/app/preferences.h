@@ -54,6 +54,10 @@ struct StartupPreferences
     // (xdg-activation). Off: GNOME shows its busy pointer for several
     // seconds after each request, that is after most menus and dialogs.
     bool waylandActivation = false;
+    // The mouse wheel over drop-down lists and number fields: "focused"
+    // (only after clicking the field; otherwise it scrolls the page),
+    // "always" (Qt's default), or "never".
+    QString wheelOnFields = QStringLiteral("focused");
 
     bool operator==(const StartupPreferences &) const = default;
 };

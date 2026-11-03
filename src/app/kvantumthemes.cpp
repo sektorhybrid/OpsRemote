@@ -8,6 +8,7 @@
 
 #include <QDir>
 #include <QSaveFile>
+#include <QSettings>
 
 // Where the Kvantum sources look (see third_party/kvantum/opsremote-paths.h):
 // <config home>/Kvantum/kvantum.kvconfig and user themes, <data>/Kvantum/.
@@ -49,6 +50,31 @@ QStringList KvantumThemes::available()
     themes.removeDuplicates();
     themes.sort(Qt::CaseInsensitive);
     return themes;
+}
+
+QList<QColor> KvantumThemes::colours(const QString &styleKey)
+{
+    const QString theme = styleKey.mid(Prefix.size());
+    // The user's copy first, as Kvantum itself prefers it.
+    for (const auto &folder : {opsremoteKvantumConfigHome(), opsremoteKvantumDataDir()}) {
+        const QString file = QDir(folder).filePath(QStringLiteral("Kvantum/%1/%1.kvconfig").arg(theme));
+        if (!QFile::exists(file))
+            continue;
+        QSettings config(file, QSettings::IniFormat);
+        QList<QColor> result;
+        for (const char *key : {"window.color", "base.color", "text.color", "highlight.color"}) {
+            QString value = config.value(QStringLiteral("GeneralColors/") + QLatin1String(key)).toString().trimmed();
+            // Kvantum writes #rrggbbaa; the preview shows the colour without its alpha.
+            if (value.startsWith(QLatin1Char('#')) && value.size() == 9)
+                value.chop(2);
+            const QColor colour(value);
+            if (!colour.isValid())
+                return {};
+            result.append(colour);
+        }
+        return result;
+    }
+    return {};
 }
 
 bool KvantumThemes::isKvantumKey(const QString &styleKey)

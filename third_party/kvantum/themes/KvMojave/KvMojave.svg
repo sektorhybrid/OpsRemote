@@ -1274,4 +1274,14 @@
 <use width="100%" height="100%" style="opacity:.86" xlink:href="#carrow-normal" id="larrow-normal" transform="translate(104)"/>
 <use width="100%" height="100%" xlink:href="#carrow-focused" id="larrow-focused" transform="translate(104)"/>
 <use width="100%" height="100%" style="opacity:.9" xlink:href="#carrow-disabled" id="larrow-disabled" transform="translate(104)"/>
+<!-- Tree expanders (the [TreeExpander] section asks for arrow-plus/minus; without them
+     Kvantum drew + and -): this theme's own right and down arrows, as in KvMojaveLight. -->
+<use xlink:href="#tarrow-right-normal" id="arrow-plus-normal"/>
+<use xlink:href="#tarrow-down-normal" id="arrow-minus-normal"/>
+<use xlink:href="#tarrow-right-focused" id="arrow-plus-focused"/>
+<use xlink:href="#tarrow-down-focused" id="arrow-minus-focused"/>
+<use xlink:href="#tarrow-right-pressed" id="arrow-plus-pressed"/>
+<use xlink:href="#tarrow-down-pressed" id="arrow-minus-pressed"/>
+<use xlink:href="#tarrow-right-disabled" id="arrow-plus-disabled"/>
+<use xlink:href="#tarrow-down-disabled" id="arrow-minus-disabled"/>
 </svg>
