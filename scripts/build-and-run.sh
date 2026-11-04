@@ -19,7 +19,8 @@ in one folder with a shared settings/ folder; built in Docker containers):
   package-windows            Build the Windows program and update the package.
                              The package keeps the last Linux build, if any.
   package-all                Build both programs and update the package.
-  package-zip                Zip the current package as dist/OpsRemote.zip,
+  package-zip                Pack the current package as dist/OpsRemote-<arch>-<systems>-<version>.tar.gz
+                             and .zip (version from CMakeLists.txt),
                              for handing out (without your settings and backups).
   run-package                Start the package's Linux version
                              (dist/OpsRemote/OpsRemote, or legacy/OpsRemote.sh).

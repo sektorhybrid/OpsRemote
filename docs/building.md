@@ -19,7 +19,7 @@ The commands say what is built and what is run:
 | `package-linux` | Builds the Linux program and updates the package (keeps the last Windows build) |
 | `package-windows` | Builds the Windows program and updates the package (keeps the last Linux build) |
 | `package-all` | Builds both programs and updates the package |
-| `package-zip` | Zips the current package as `dist/OpsRemote.zip` for handing out, without your settings and backups |
+| `package-zip` | Packs the current package as `dist/OpsRemote-<arch>-<systems>-<version>.tar.gz` (for example `OpsRemote-x86_64-linux-windows-0.5.0.tar.gz`) and `.zip` for handing out (the version is in `CMakeLists.txt`), without your settings and backups |
 | `run-package` | Starts the package's Linux version |
 | `package-linux-and-run` | `package-linux`, then `run-package` (the default) |
 | `package-all-and-run` | `package-all`, then `run-package` |
@@ -55,4 +55,4 @@ Use `./scripts/build-and-run.sh --help` to see options. For example, set `BUILD_
 | `packaging/` | Docker images and launchers |
 | `scripts/` | `build-and-run.sh`; helpers in `scripts/internal/` |
 | `build/` | Build trees, all disposable: `dev/` (developer build), `linux/` and `windows/` (package builds), `linux-host/`, `asan/`, and `stage/` (the per-platform bundles and tools the package is assembled from) |
-| `dist/` | Only the release: `dist/OpsRemote/`, plus `OpsRemote.zip` after `package-zip` |
+| `dist/` | Only the release: `dist/OpsRemote/`, plus `OpsRemote-<arch>-<systems>-<version>.tar.gz` and `.zip` after `package-zip` |

@@ -208,9 +208,29 @@ SOURCES
 size="$(du -sh --exclude=runtime "${PACKAGE}" | cut -f1)"
 echo "==> Package ready: ${PACKAGE} (${size})"
 if (( make_archive )); then
-    rm -f "${DIST_DIR}/${PACKAGE_NAME}.zip"
+    # Named after what is inside and the version (CMakeLists.txt), for the
+    # GitHub release: OpsRemote-<arch>-<systems>-<version>, for example
+    # OpsRemote-x86_64-linux-windows-0.5.0. The folder inside stays
+    # OpsRemote. A .tar.gz, and a .zip for Windows.
+    arches=() systems=()
+    for program in "${PACKAGE}"/compressed/*.tar.zst; do
+        platform="$(basename "${program}" .tar.zst)"
+        systems+=("${platform%%-*}") arches+=("${platform#*-}")
+    done
+    arches="$(printf '%s\n' "${arches[@]}" | sort -u | paste -sd- -)"
+    systems="$(printf '%s\n' "${systems[@]}" | sort -u | paste -sd- -)"
+    release="${PACKAGE_NAME}-${arches}-${systems}-${version}"
+    rm -f "${DIST_DIR}/${PACKAGE_NAME}.zip" "${DIST_DIR}/${PACKAGE_NAME}"-*.tar.gz "${DIST_DIR}/${PACKAGE_NAME}"-*[0-9].zip \
+        "${DIST_DIR}/${PACKAGE_NAME}"-*[0-9].sha256
     # Never ship this machine's settings, backups, or unpacked runtimes.
-    (cd "${DIST_DIR}" && zip -qr -9 -y "${PACKAGE_NAME}.zip" "${PACKAGE_NAME}" \
+    (cd "${DIST_DIR}" && tar --sort=name --owner=0 --group=0 --numeric-owner \
+        --exclude="${PACKAGE_NAME}/settings" --exclude="${PACKAGE_NAME}/backups" \
+        --exclude="${PACKAGE_NAME}/runtime" -czf "${release}.tar.gz" "${PACKAGE_NAME}")
+    (cd "${DIST_DIR}" && zip -qr -9 -y "${release}.zip" "${PACKAGE_NAME}" \
         -x "${PACKAGE_NAME}/settings/*" "${PACKAGE_NAME}/backups/*" "${PACKAGE_NAME}/runtime/*")
-    echo "==> Archive: ${DIST_DIR}/${PACKAGE_NAME}.zip ($(du -sh "${DIST_DIR}/${PACKAGE_NAME}.zip" | cut -f1))"
+    # Checksums to publish beside them: sha256sum -c <file> checks a download.
+    (cd "${DIST_DIR}" && sha256sum "${release}.tar.gz" "${release}.zip" > "${release}.sha256")
+    for archive in "${release}.tar.gz" "${release}.zip" "${release}.sha256"; do
+        echo "==> Archive: ${DIST_DIR}/${archive} ($(du -sh "${DIST_DIR}/${archive}" | cut -f1))"
+    done
 fi
