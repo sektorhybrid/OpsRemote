@@ -7,6 +7,7 @@
 
 #include "appdirs.h"
 #include "pageant.h"
+#include "sshauth.h"
 
 #include <atomic>
 #include <QDir>
@@ -312,9 +313,10 @@ signals:
     void shellFolder(const QString &path);
 
 private:
-    enum class AuthStage { PublicKey, AgentKeys, StoredPassword, KeyboardInteractive,
+    enum class AuthStage { Kerberos, PublicKey, AgentKeys, StoredPassword, KeyboardInteractive,
                            PasswordPrompt, Failed };
-    enum class PendingInput { None, KeyboardInteractive, Password, KeyPassphrase };
+    enum class PendingInput { None, KeyboardInteractive, Password, KeyPassphrase,
+                              SecurityKeyPin };
     void initializeFiles();
     // Files over SFTP; false if the server does not offer it (reason in error).
     bool startSftp(QString *error);
@@ -327,6 +329,9 @@ private:
     // Logs on with identityFile; false when that did not succeed (or a
     // passphrase prompt is pending, see m_pendingInput).
     bool tryIdentityFile(const QByteArray &passphrase);
+    // Logs on with m_identityKey (a key with its certificate, if any).
+    bool logOnWithIdentityKey();
+    void attachCertificate(ssh_key key);
     void openShell();
     void startKeepalive();
     void openForward();
@@ -440,6 +445,9 @@ private:
     int m_authMethods = 0;
     int m_failedAttempts = 0;
     int m_passphraseAttempts = 0;
+    // identityFile's key while its security key PIN is asked for.
+    ssh_key m_identityKey = nullptr;
+    QByteArray m_securityKeyPin;
     bool m_storedPasswordTried = false;
     bool m_finished = false;
     std::atomic<bool> m_cancelCommands{false};
@@ -674,6 +682,24 @@ void SshWorker::start(const SshConnectionSettings &settings)
     if (m_settings.compression) {
         ssh_options_set(m_session, SSH_OPTIONS_COMPRESSION, "yes");
     }
+    const int kerberos = m_settings.kerberos ? 1 : 0;
+    ssh_options_set(m_session, SSH_OPTIONS_GSSAPI_AUTH, &kerberos);
+    if (m_settings.kerberos) {
+        const int delegate = m_settings.kerberosDelegate ? 1 : 0;
+        ssh_options_set(m_session, SSH_OPTIONS_GSSAPI_DELEGATE_CREDENTIALS, &delegate);
+        const auto server = m_settings.kerberosServer.toUtf8();
+        if (!server.isEmpty())
+            ssh_options_set(m_session, SSH_OPTIONS_GSSAPI_SERVER_IDENTITY, server.constData());
+    }
+    if (!m_settings.securityKeys) {
+        // Every key type but the security keys' (sk-…), certificates included.
+        ssh_options_set(m_session, SSH_OPTIONS_PUBLICKEY_ACCEPTED_TYPES,
+                        "ssh-ed25519-cert-v01@openssh.com,ecdsa-sha2-nistp521-cert-v01@openssh.com,"
+                        "ecdsa-sha2-nistp384-cert-v01@openssh.com,ecdsa-sha2-nistp256-cert-v01@openssh.com,"
+                        "rsa-sha2-512-cert-v01@openssh.com,rsa-sha2-256-cert-v01@openssh.com,"
+                        "ssh-ed25519,ecdsa-sha2-nistp521,ecdsa-sha2-nistp384,ecdsa-sha2-nistp256,"
+                        "rsa-sha2-512,rsa-sha2-256");
+    }
     if (m_settings.viaLocalPort == 0 && m_settings.proxy.isSet()) {
         emit statusMessage(QStringLiteral("Connecting through the proxy %1:%2…")
                                .arg(m_settings.proxy.host).arg(m_settings.proxy.port));
@@ -791,7 +817,7 @@ void SshWorker::beginAuthentication()
         ssh_string_free_char(banner);
     }
     m_authMethods = ssh_userauth_list(m_session, nullptr);
-    m_stage = AuthStage::PublicKey;
+    m_stage = AuthStage::Kerberos;
     continueAuthentication();
 }
 
@@ -805,9 +831,28 @@ bool SshWorker::tryIdentityFile(const QByteArray &passphrase)
         path.constData(), passphrase.isEmpty() ? nullptr : passphrase.constData(), nullptr,
         nullptr, &key);
     if (imported == SSH_OK) {
-        const int result = ssh_userauth_publickey(m_session, nullptr, key);
-        ssh_key_free(key);
-        return handleAuthResult(result);
+        const auto type = ssh_key_type(key);
+        const bool securityKey = type == SSH_KEYTYPE_SK_ED25519 || type == SSH_KEYTYPE_SK_ECDSA;
+        if (securityKey && !m_settings.securityKeys) {
+            ssh_key_free(key);
+            emit statusMessage(QStringLiteral("%1 is a security key; security keys are turned off "
+                                              "(Preferences → Security and vault → Keys and certificates).")
+                                   .arg(QFileInfo(m_settings.identityFile).fileName()));
+            return false;
+        }
+        attachCertificate(key);
+        ssh_key_free(std::exchange(m_identityKey, key));
+        // A key that needs its PIN (ssh-keygen -O verify-required): ask first,
+        // as libssh asks for it while signing.
+        if (securityKey && (ssh_key_get_sk_flags(key) & SSH_SK_USER_VERIFICATION_REQD)
+            && m_securityKeyPin.isEmpty()) {
+            m_pendingInput = PendingInput::SecurityKeyPin;
+            emit inputRequired(QString(), {QStringLiteral("PIN for security key %1: ")
+                                               .arg(QFileInfo(m_settings.identityFile).fileName())},
+                               {false});
+            return false;
+        }
+        return logOnWithIdentityKey();
     }
     if (imported == SSH_EOF) {
         emit statusMessage(QStringLiteral("Could not read the private key %1.")
@@ -829,10 +874,99 @@ bool SshWorker::tryIdentityFile(const QByteArray &passphrase)
     return false;
 }
 
+// Sends the certificate with the key: the session's own file, or
+// key-cert.pub next to the key.
+void SshWorker::attachCertificate(ssh_key key)
+{
+    if (m_settings.certificateFile == QStringLiteral("none")
+        || (m_settings.certificateFile.isEmpty() && !m_settings.useCertificates))
+        return;
+    const auto path = m_settings.certificateFile.isEmpty()
+                          ? defaultCertificateFor(m_settings.identityFile)
+                          : m_settings.certificateFile;
+    if (!QFileInfo::exists(path)) {
+        if (!m_settings.certificateFile.isEmpty())
+            emit statusMessage(QStringLiteral("The certificate %1 does not exist.").arg(path));
+        return;
+    }
+    const auto info = readSshCertificate(path);
+    if (info.valid && (info.expired() || info.notYetValid()))
+        emit statusMessage(QStringLiteral("The certificate %1 is not valid now (%2).")
+                               .arg(QFileInfo(path).fileName(), info.summary()));
+    else if (info.valid && !info.principals.isEmpty() && !info.principals.contains(m_settings.username))
+        emit statusMessage(QStringLiteral("The certificate %1 is for %2, not for %3.")
+                               .arg(QFileInfo(path).fileName(),
+                                    info.principals.join(QStringLiteral(", ")), m_settings.username));
+    ssh_key certificate = nullptr;
+    const auto native = QDir::toNativeSeparators(path).toUtf8();
+    if (ssh_pki_import_cert_file(native.constData(), &certificate) != SSH_OK
+        || ssh_pki_copy_cert_to_privkey(certificate, key) != SSH_OK)
+        emit statusMessage(QStringLiteral("The certificate %1 does not belong to the key, or "
+                                          "could not be read.").arg(QFileInfo(path).fileName()));
+    ssh_key_free(certificate);
+}
+
+bool SshWorker::logOnWithIdentityKey()
+{
+    const auto type = ssh_key_type(m_identityKey);
+    const bool securityKey = type == SSH_KEYTYPE_SK_ED25519 || type == SSH_KEYTYPE_SK_ECDSA;
+    ssh_pki_ctx context = nullptr;
+    if (securityKey) {
+        // libssh asks for the PIN through this callback while signing.
+        context = ssh_pki_ctx_new();
+        if (!m_securityKeyPin.isEmpty()) {
+            ssh_pki_ctx_set_sk_pin_callback(context, [](const char *, char *buffer, size_t length,
+                                                        int, int, void *userdata) -> int {
+                const auto &pin = static_cast<SshWorker *>(userdata)->m_securityKeyPin;
+                if (static_cast<size_t>(pin.size()) >= length)
+                    return SSH_ERROR;
+                memcpy(buffer, pin.constData(), static_cast<size_t>(pin.size()));
+                buffer[pin.size()] = '\0';
+                return SSH_OK;
+            }, this);
+        }
+        ssh_options_set(m_session, SSH_OPTIONS_PKI_CONTEXT, context);
+        if (ssh_key_get_sk_flags(m_identityKey) & SSH_SK_USER_PRESENCE_REQD)
+            emit statusMessage(QStringLiteral("Touch your security key…"));
+    }
+    const int result = ssh_userauth_publickey(m_session, nullptr, m_identityKey);
+    ssh_pki_ctx_free(context);
+    wipe(m_securityKeyPin);
+    m_securityKeyPin.clear();
+    ssh_key_free(std::exchange(m_identityKey, nullptr));
+    if (securityKey && result == SSH_AUTH_ERROR) {
+        // A missing key, a wrong PIN, or no touch: the other ways remain.
+        emit statusMessage(QStringLiteral("The security key did not sign: %1").arg(lastError()));
+        return false;
+    }
+    return handleAuthResult(result);
+}
+
 void SshWorker::continueAuthentication()
 {
     for (;;) {
         switch (m_stage) {
+        case AuthStage::Kerberos: {
+            m_stage = AuthStage::PublicKey;
+            if (!m_settings.kerberos || !(m_authMethods & SSH_AUTH_METHOD_GSSAPI_MIC))
+                break;
+            emit statusMessage(QStringLiteral("Logging on with Kerberos…"));
+            const auto earlierError = lastError();
+            const int result = ssh_userauth_gssapi(m_session);
+            if (result == SSH_AUTH_SUCCESS || result == SSH_AUTH_PARTIAL) {
+                if (handleAuthResult(result))
+                    return;
+                break;
+            }
+            // No ticket, or the server did not accept it: the other ways remain.
+            // Without a ticket libssh sets no error of its own.
+            const auto reason = lastError() == earlierError ? QString() : lastError();
+            emit statusMessage(reason.isEmpty()
+                                   ? QStringLiteral("Kerberos did not log on (no valid ticket for "
+                                                    "this server?).")
+                                   : QStringLiteral("Kerberos did not log on: %1").arg(reason));
+            break;
+        }
         case AuthStage::PublicKey: {
             m_stage = AuthStage::AgentKeys;
             if (!(m_authMethods & SSH_AUTH_METHOD_PUBLICKEY) || m_settings.identityFile.isEmpty())
@@ -980,6 +1114,12 @@ void SshWorker::answerPrompts(QStringList answers)
             return;
         m_stage = AuthStage::PasswordPrompt;
         continueAuthentication();
+    } else if (pending == PendingInput::SecurityKeyPin) {
+        m_securityKeyPin = answers.value(0).toUtf8();
+        for (auto &answer : answers)
+            wipe(answer);
+        if (!logOnWithIdentityKey() && m_pendingInput == PendingInput::None)
+            continueAuthentication();
     } else if (pending == PendingInput::KeyPassphrase) {
         auto passphrase = answers.value(0).toUtf8();
         for (auto &answer : answers)
@@ -1007,9 +1147,12 @@ void SshWorker::answerPrompts(QStringList answers)
 void SshWorker::cancelPrompts()
 {
     const auto pending = std::exchange(m_pendingInput, PendingInput::None);
-    // Without the key's passphrase, the other ways to log on are still tried.
-    if (pending == PendingInput::KeyPassphrase)
+    // Without the key's passphrase or PIN, the other ways to log on are still
+    // tried.
+    if (pending == PendingInput::KeyPassphrase || pending == PendingInput::SecurityKeyPin) {
+        ssh_key_free(std::exchange(m_identityKey, nullptr));
         continueAuthentication();
+    }
     else if (pending != PendingInput::None)
         finish(QStringLiteral("Authentication cancelled."), false);
 }
@@ -1059,7 +1202,13 @@ void SshWorker::openShell()
         if (ssh_channel_request_env(m_channel, "LC_OPSREMOTE_TAG", tag.constData()) == SSH_OK)
             m_shellTag = tag;
     }
-    if (ssh_channel_request_shell(m_channel) != SSH_OK) {
+    if (!m_settings.remoteCommand.isEmpty()) {
+        const auto command = m_settings.remoteCommand.toUtf8();
+        if (ssh_channel_request_exec(m_channel, command.constData()) != SSH_OK) {
+            finish(QStringLiteral("The server refused to run %1: %2").arg(m_settings.remoteCommand, lastError()), true);
+            return;
+        }
+    } else if (ssh_channel_request_shell(m_channel) != SSH_OK) {
         finish(QStringLiteral("The server refused a shell: %1").arg(lastError()), true);
         return;
     }
@@ -2159,6 +2308,8 @@ void SshWorker::closeSession()
         ssh_channel_free(m_channel);
         m_channel = nullptr;
     }
+    ssh_key_free(std::exchange(m_identityKey, nullptr));
+    wipe(m_securityKeyPin);
     if (m_session) {
         ssh_disconnect(m_session);
         ssh_free(m_session);

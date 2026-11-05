@@ -35,7 +35,10 @@ package carries the full licence texts in `licenses/<platform>/`.
 | [Qt 6](https://www.qt.io) (Base, SVG, Serial Port, Wayland, image formats) | LGPL-3.0 | User interface. On Windows, `Qt6Core.dll` is **modified** by Thanos Athanasopoulos (2026): Fedora's MinGW Qt base package rebuilt with the patches in [packaging/qt/patches](packaging/qt/patches) (a fix for a fault each time a thread ends; see the patch). |
 | [FreeRDP](https://www.freerdp.com) 3.32.2 | Apache-2.0 | Remote desktop (RDP) |
 | [LibVNCServer](https://libvnc.github.io)'s libvncclient 0.9.15 | GPL-2.0-or-later | VNC |
-| [libssh](https://www.libssh.org) | LGPL-2.1-or-later | SSH and SFTP |
+| [libssh](https://www.libssh.org) 0.12.2 | LGPL-2.1-or-later | SSH and SFTP |
+| [libfido2](https://developers.yubico.com/libfido2/) (1.17.0 on Windows) | BSD-2-Clause | FIDO2 security keys for SSH |
+| [libcbor](https://github.com/PJK/libcbor) (0.13.0 on Windows) | MIT | Used by libfido2 |
+| [MIT Kerberos](https://web.mit.edu/kerberos/) (Linux) | MIT-style (see `licenses/`) | Kerberos (GSSAPI) logons for SSH |
 | [OpenSSL](https://www.openssl.org) 3 | Apache-2.0 | TLS and cryptography |
 | [libsodium](https://libsodium.org) | ISC | Credential vault encryption |
 | [yaml-cpp](https://github.com/jbeder/yaml-cpp) | MIT | Settings files |
@@ -51,8 +54,8 @@ package carries the full licence texts in `licenses/<platform>/`.
 
 - **OpsRemote:** the complete source, including the modified QTermWidget, is
   in this repository. Each release is built from a tagged commit.
-- **Libraries built from source** (FreeRDP, LibVNCServer, zstd; on Windows
-  also libssh and utf8proc): the Dockerfiles in `packaging/` list the exact
+- **Libraries built from source** (FreeRDP, LibVNCServer, zstd, libssh; on
+  Windows also libcbor, libfido2 and utf8proc): the Dockerfiles in `packaging/` list the exact
   upstream archives with their SHA-256 checksums, and each release's source
   archive (`OpsRemote-<version>-source.tar.xz`, made by
   `scripts/internal/make-source-archive.sh`) contains them.

@@ -3,6 +3,8 @@
 
 #pragma once
 
+namespace YAML { class Node; }
+
 #include <QByteArray>
 #include <QColor>
 #include <QHash>
@@ -73,6 +75,14 @@ struct SshPreferences
     QString agent = QStringLiteral("auto"); // Windows: auto, openssh, pageant
     QString proxy = QStringLiteral("none"); // see ProxySettings
     QString identityFile; // an extra private key tried first
+    // A key's certificate (key-cert.pub next to it) is sent with the key.
+    bool useCertificates = true;
+    // FIDO2 security keys (sk-ed25519, sk-ecdsa: YubiKey, Windows Hello).
+    bool securityKeys = true;
+    // Kerberos (GSSAPI) logons with the user's ticket; delegation passes the
+    // ticket on to the server (ssh -K).
+    bool kerberos = false;
+    bool kerberosDelegate = false;
     bool autoReconnect = false;
     int reconnectDelay = 5; // seconds
     int reconnectAttempts = 5;
@@ -135,11 +145,10 @@ struct LoggingPreferences
 // operating system, as both share the settings.
 struct LocalShellPreferences
 {
-    QString windowsShell = QStringLiteral("powershell"); // powershell, pwsh, cmd, wsl, custom
-    QString windowsCustom;
+    // Which shell a terminal runs is the Local session's choice (File → New
+    // Local Terminal: the system's default).
     bool useSudo = true; // run as administrator through Windows sudo when it is on (inline)
-    QString linuxShell = QStringLiteral("default"); // default ($SHELL), custom
-    QString linuxCustom;
+    QString linuxElevation = QStringLiteral("sudo"); // sudo or pkexec
 
     bool operator==(const LocalShellPreferences &) const = default;
 };
@@ -251,8 +260,10 @@ void saveRunCommandPreferences(const RunCommandPreferences &preferences);
 struct Snippet
 {
     QString name;
-    QString text;
+    QString text; // "#!script NAME": runs that saved script instead
     bool pressEnter = true;
+    // Its folder in the Commands tab (empty: "General").
+    QString group;
 
     bool operator==(const Snippet &) const = default;
 };
@@ -268,6 +279,22 @@ struct HighlightRule
 
     bool operator==(const HighlightRule &) const = default;
 };
+
+// The side panel's Commands tab, and which of its tabs show (settings.yaml
+// "commands:").
+struct CommandsPreferences
+{
+    // Ask before sending a command of several lines.
+    bool confirmMultiline = true;
+    bool showFiles = true;
+    bool showCommands = true;
+    bool showScripts = true;
+
+    bool operator==(const CommandsPreferences &) const = default;
+};
+
+CommandsPreferences loadCommandsPreferences();
+void saveCommandsPreferences(const CommandsPreferences &preferences);
 
 TerminalBehaviour loadTerminalBehaviour();
 void saveTerminalBehaviour(const TerminalBehaviour &behaviour);
@@ -296,6 +323,10 @@ PresentationPreferences loadPresentationPreferences();
 void savePresentationPreferences(const PresentationPreferences &preferences);
 BackupPreferences loadBackupPreferences();
 void saveBackupPreferences(const BackupPreferences &preferences);
+// A top-level section of settings.yaml (an empty map when missing), for
+// modules that keep their own settings.
+YAML::Node loadPreferencesSection(const char *section);
+void savePreferencesSection(const char *section, const YAML::Node &node);
 QList<Snippet> loadSnippets();
 void saveSnippets(const QList<Snippet> &snippets);
 QList<HighlightRule> loadHighlightRules();

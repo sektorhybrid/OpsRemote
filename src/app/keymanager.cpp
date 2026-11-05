@@ -4,6 +4,7 @@
 #include "keymanager.h"
 #include "appdirs.h"
 #include "jumphost.h"
+#include "sshauth.h"
 
 #include <QApplication>
 #include <QCheckBox>
@@ -14,6 +15,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -25,6 +27,8 @@
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QStandardItemModel>
+#include <QThread>
 #include <QTreeWidget>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -97,6 +101,54 @@ bool writePublicKey(const QString &privatePath, const QString &line)
     return file.open(QIODevice::WriteOnly) && file.write(line.toUtf8() + '\n') > 0;
 }
 
+bool isSecurityKeyType(enum ssh_keytypes_e type)
+{
+    return type == SSH_KEYTYPE_SK_ED25519 || type == SSH_KEYTYPE_SK_ECDSA;
+}
+
+// The list's Type column: "ed25519", "rsa", "security key (ed25519)".
+QString keyTypeLabel(const QString &publicKeyType)
+{
+    if (publicKeyType.startsWith(QStringLiteral("sk-")))
+        return publicKeyType.contains(QStringLiteral("ed25519"))
+                   ? QStringLiteral("security key (ed25519)")
+                   : QStringLiteral("security key (ecdsa)");
+    return QString(publicKeyType).remove(QStringLiteral("ssh-"));
+}
+
+// libssh asks for a security key's PIN through this; userdata is the PIN.
+int securityKeyPin(const char *, char *buffer, size_t length, int, int, void *userdata)
+{
+    const auto &pin = *static_cast<const QByteArray *>(userdata);
+    if (static_cast<size_t>(pin.size()) >= length)
+        return SSH_ERROR;
+    memcpy(buffer, pin.constData(), static_cast<size_t>(pin.size()));
+    buffer[pin.size()] = '\0';
+    return SSH_OK;
+}
+
+// Runs work (which waits for the security key) on its own thread, with a
+// "Touch your security key" window meanwhile, so this window keeps painting.
+int whileTouchingKey(QWidget *parent, const QString &text, const std::function<int()> &work)
+{
+    int result = SSH_ERROR;
+    QDialog dialog(parent);
+    dialog.setWindowTitle(QStringLiteral("Security Key"));
+    auto *layout = new QVBoxLayout(&dialog);
+    auto *label = new QLabel(text, &dialog);
+    label->setWordWrap(true);
+    layout->addWidget(label);
+    auto *thread = QThread::create([&result, &work] { result = work(); });
+    QObject::connect(thread, &QThread::finished, &dialog, &QDialog::accept);
+    thread->start();
+    // Closing the window does not stop the key; wait for it to give up.
+    while (thread->isRunning())
+        dialog.exec();
+    thread->wait();
+    delete thread;
+    return result;
+}
+
 QString defaultComment()
 {
     const auto user = QString::fromLocal8Bit(qgetenv(
@@ -127,15 +179,24 @@ KeyManagerDialog::KeyManagerDialog(SessionChoices sessions, SessionResolver reso
     m_list = new QTreeWidget(this);
     m_list->setRootIsDecorated(false);
     m_list->setHeaderLabels({QStringLiteral("Name"), QStringLiteral("Type"),
-                             QStringLiteral("Passphrase"), QStringLiteral("Comment")});
+                             QStringLiteral("Passphrase"), QStringLiteral("Certificate"),
+                             QStringLiteral("Comment")});
     m_list->header()->setStretchLastSection(true);
     layout->addWidget(m_list, 1);
     auto *keyButtons = new QHBoxLayout;
     auto *create = new QPushButton(QStringLiteral("New Key…"), this);
     auto *import = new QPushButton(QStringLiteral("Import…"), this);
+    auto *fromSecurityKey = new QPushButton(QStringLiteral("From Security Key…"), this);
+    fromSecurityKey->setToolTip(QStringLiteral("Copies the keys kept on a FIDO2 security key "
+                                               "(resident keys) into settings/keys/."));
+    const auto securityKeyIssue = securityKeyProblem();
+    if (!securityKeyIssue.isEmpty()) {
+        fromSecurityKey->setEnabled(false);
+        fromSecurityKey->setToolTip(securityKeyIssue);
+    }
     m_delete = new QPushButton(QStringLiteral("Delete…"), this);
     auto *folder = new QPushButton(QStringLiteral("Open Folder"), this);
-    for (auto *button : {create, import, m_delete})
+    for (auto *button : {create, import, fromSecurityKey, m_delete})
         keyButtons->addWidget(button);
     keyButtons->addStretch();
     keyButtons->addWidget(folder);
@@ -146,6 +207,11 @@ KeyManagerDialog::KeyManagerDialog(SessionChoices sessions, SessionResolver reso
     m_publicKey->setMaximumHeight(80);
     m_publicKey->setPlaceholderText(QStringLiteral("Select a key to see its public key."));
     layout->addWidget(m_publicKey);
+    m_certificate = new QLabel(this);
+    m_certificate->setWordWrap(true);
+    m_certificate->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_certificate->hide();
+    layout->addWidget(m_certificate);
     m_copy = new QPushButton(QStringLiteral("Copy Public Key"), this);
     auto *copyRow = new QHBoxLayout;
     copyRow->addStretch();
@@ -183,6 +249,7 @@ KeyManagerDialog::KeyManagerDialog(SessionChoices sessions, SessionResolver reso
     connect(m_server, &QComboBox::currentIndexChanged, this, &KeyManagerDialog::showSelected);
     connect(create, &QPushButton::clicked, this, &KeyManagerDialog::createKey);
     connect(import, &QPushButton::clicked, this, &KeyManagerDialog::importKey);
+    connect(fromSecurityKey, &QPushButton::clicked, this, &KeyManagerDialog::importFromSecurityKey);
     connect(m_delete, &QPushButton::clicked, this, &KeyManagerDialog::deleteKey);
     connect(folder, &QPushButton::clicked, this, [] {
         QDir().mkpath(keysFolder());
@@ -206,14 +273,23 @@ void KeyManagerDialog::refresh(const QString &select)
         if (!QFile::exists(path))
             continue;
         const auto parts = readPublicKey(path).split(QLatin1Char(' '));
+        const auto certificatePath = defaultCertificateFor(path);
+        QString certificate;
+        if (QFile::exists(certificatePath)) {
+            const auto info = readSshCertificate(certificatePath);
+            certificate = !info.valid ? QStringLiteral("Damaged")
+                          : info.expired() ? QStringLiteral("Expired")
+                          : info.notYetValid() ? QStringLiteral("Not yet valid")
+                                               : QStringLiteral("Yes");
+        }
         auto *item = new QTreeWidgetItem(
-            m_list, {name, QString(parts.value(0)).remove(QStringLiteral("ssh-")),
+            m_list, {name, keyTypeLabel(parts.value(0)),
                      hasPassphrase(path) ? QStringLiteral("Yes") : QStringLiteral("No"),
-                     parts.mid(2).join(QLatin1Char(' '))});
+                     certificate, parts.mid(2).join(QLatin1Char(' '))});
         if (name == current)
             m_list->setCurrentItem(item);
     }
-    for (int column = 0; column < 3; ++column)
+    for (int column = 0; column < 4; ++column)
         m_list->resizeColumnToContents(column);
     if (!m_list->currentItem() && m_list->topLevelItemCount() > 0)
         m_list->setCurrentItem(m_list->topLevelItem(0));
@@ -231,6 +307,18 @@ void KeyManagerDialog::showSelected()
     const QString name = selectedName();
     const bool selected = !name.isEmpty();
     m_publicKey->setPlainText(selected ? readPublicKey(QDir(keysFolder()).filePath(name)) : QString());
+    const auto certificatePath = selected ? defaultCertificateFor(QDir(keysFolder()).filePath(name))
+                                          : QString();
+    if (!certificatePath.isEmpty() && QFile::exists(certificatePath)) {
+        const auto info = readSshCertificate(certificatePath);
+        const bool bad = !info.valid || info.expired() || info.notYetValid();
+        m_certificate->setText(QStringLiteral("Certificate %1: %2")
+                                   .arg(QFileInfo(certificatePath).fileName(), info.summary()));
+        m_certificate->setStyleSheet(bad ? QStringLiteral("color: #c0392b;") : QString());
+        m_certificate->show();
+    } else {
+        m_certificate->hide();
+    }
     m_copy->setEnabled(selected);
     m_delete->setEnabled(selected);
     m_installButton->setEnabled(selected && serverChosen() && !m_ssh && !m_chain);
@@ -255,6 +343,25 @@ void KeyManagerDialog::createKey()
     auto *type = new QComboBox(&dialog);
     type->addItem(QStringLiteral("Ed25519 (recommended)"), QStringLiteral("ed25519"));
     type->addItem(QStringLiteral("RSA 4096 (for old servers)"), QStringLiteral("rsa"));
+    type->addItem(QStringLiteral("Security key, Ed25519 (FIDO2)"), QStringLiteral("sk-ed25519"));
+    type->addItem(QStringLiteral("Security key, ECDSA (older FIDO keys)"), QStringLiteral("sk-ecdsa"));
+    const auto securityKeyIssue = securityKeyProblem();
+    if (!securityKeyIssue.isEmpty()) {
+        // Shown, but not selectable, with the reason.
+        auto *model = qobject_cast<QStandardItemModel *>(type->model());
+        for (int index : {2, 3}) {
+            if (auto *entry = model ? model->item(index) : nullptr) {
+                entry->setEnabled(false);
+                entry->setToolTip(securityKeyIssue);
+            }
+        }
+    }
+    auto *resident = new QCheckBox(QStringLiteral("Keep the key on the security key (resident)"), &dialog);
+    resident->setToolTip(QStringLiteral("You can copy it to another computer later with From "
+                                        "Security Key…. Needs a FIDO2 key with a PIN."));
+    auto *verify = new QCheckBox(QStringLiteral("Ask for the security key's PIN at every logon"), &dialog);
+    verify->setToolTip(QStringLiteral("ssh-keygen -O verify-required: touching the key is not "
+                                      "enough; the server must allow it (verify-required)."));
     auto *name = new QLineEdit(QStringLiteral("id_ed25519"), &dialog);
     auto *comment = new QLineEdit(defaultComment(), &dialog);
     auto *passphrase = new QLineEdit(&dialog);
@@ -271,6 +378,12 @@ void KeyManagerDialog::createKey()
     form->addRow(QStringLiteral("Passphrase:"), passphrase);
     form->addRow(QStringLiteral("Repeat passphrase:"), confirm);
     form->addRow(QString(), remember);
+    form->addRow(QString(), resident);
+    form->addRow(QString(), verify);
+    auto *securityKeyHelp = helpLabel(QStringLiteral(
+        "The private key stays on the security key; the file only says which key to use. "
+        "Touch the key when it blinks."), &dialog);
+    form->addRow(securityKeyHelp);
     form->addRow(helpLabel(QStringLiteral(
         "A passphrase protects the key if someone copies the folder. OpsRemote asks for it when "
         "logging on, unless it is remembered in the (encrypted) vault."), &dialog));
@@ -284,11 +397,22 @@ void KeyManagerDialog::createKey()
     };
     connect(passphrase, &QLineEdit::textChanged, &dialog, updateRemember);
     updateRemember();
-    connect(type, &QComboBox::currentIndexChanged, &dialog, [type, name] {
-        const bool rsa = type->currentData().toString() == QStringLiteral("rsa");
-        if (name->text() == QStringLiteral("id_ed25519") || name->text() == QStringLiteral("id_rsa"))
-            name->setText(rsa ? QStringLiteral("id_rsa") : QStringLiteral("id_ed25519"));
-    });
+    const auto updateType = [type, name, resident, verify, securityKeyHelp] {
+        const auto chosen = type->currentData().toString();
+        const bool securityKey = chosen.startsWith(QStringLiteral("sk-"));
+        resident->setVisible(securityKey);
+        verify->setVisible(securityKey);
+        securityKeyHelp->setVisible(securityKey);
+        static const QStringList defaults{QStringLiteral("id_ed25519"), QStringLiteral("id_rsa"),
+                                          QStringLiteral("id_ed25519_sk"), QStringLiteral("id_ecdsa_sk")};
+        if (defaults.contains(name->text()))
+            name->setText(chosen == QStringLiteral("rsa")          ? QStringLiteral("id_rsa")
+                          : chosen == QStringLiteral("sk-ed25519") ? QStringLiteral("id_ed25519_sk")
+                          : chosen == QStringLiteral("sk-ecdsa")   ? QStringLiteral("id_ecdsa_sk")
+                                                                   : QStringLiteral("id_ed25519"));
+    };
+    connect(type, &QComboBox::currentIndexChanged, &dialog, updateType);
+    updateType();
     connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
         const QString file = name->text().trimmed();
         QString problem;
@@ -312,24 +436,54 @@ void KeyManagerDialog::createKey()
     QDir().mkpath(keysFolder());
     QFile::setPermissions(keysFolder(),
                           QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
-    const bool rsa = type->currentData().toString() == QStringLiteral("rsa");
-    QApplication::setOverrideCursor(Qt::WaitCursor);
+    const auto chosen = type->currentData().toString();
+    const bool rsa = chosen == QStringLiteral("rsa");
+    const auto keyType = rsa ? SSH_KEYTYPE_RSA
+                         : chosen == QStringLiteral("sk-ed25519") ? SSH_KEYTYPE_SK_ED25519
+                         : chosen == QStringLiteral("sk-ecdsa")   ? SSH_KEYTYPE_SK_ECDSA
+                                                                  : SSH_KEYTYPE_ED25519;
     ssh_key key = nullptr;
-#if LIBSSH_VERSION_INT >= SSH_VERSION_INT(0, 12, 0)
     ssh_pki_ctx context = ssh_pki_ctx_new();
     int bits = 4096;
     if (rsa)
         ssh_pki_ctx_options_set(context, SSH_PKI_OPTION_RSA_KEY_SIZE, &bits);
-    const int generated = ssh_pki_generate_key(rsa ? SSH_KEYTYPE_RSA : SSH_KEYTYPE_ED25519,
-                                               context, &key);
+    QByteArray pin;
+    int generated = SSH_ERROR;
+    if (isSecurityKeyType(keyType)) {
+        uint8_t flags = SSH_SK_USER_PRESENCE_REQD;
+        if (resident->isChecked())
+            flags |= SSH_SK_RESIDENT_KEY;
+        if (verify->isChecked())
+            flags |= SSH_SK_USER_VERIFICATION_REQD;
+        ssh_pki_ctx_options_set(context, SSH_PKI_OPTION_SK_FLAGS, &flags);
+        if (resident->isChecked() || verify->isChecked()) {
+            bool ok = false;
+            pin = QInputDialog::getText(this, QStringLiteral("New SSH Key"),
+                                        QStringLiteral("The security key's PIN:"), QLineEdit::Password,
+                                        QString(), &ok).toUtf8();
+            if (!ok) {
+                ssh_pki_ctx_free(context);
+                return;
+            }
+            ssh_pki_ctx_set_sk_pin_callback(context, &securityKeyPin, &pin);
+        }
+        generated = whileTouchingKey(this, QStringLiteral("Touch your security key to create the key…"),
+                                     [&] { return ssh_pki_generate_key(keyType, context, &key); });
+        pin.fill('\0');
+    } else {
+        QApplication::setOverrideCursor(Qt::WaitCursor);
+        generated = ssh_pki_generate_key(keyType, context, &key);
+        QApplication::restoreOverrideCursor();
+    }
     ssh_pki_ctx_free(context);
-#else
-    const int generated = ssh_pki_generate(rsa ? SSH_KEYTYPE_RSA : SSH_KEYTYPE_ED25519,
-                                           rsa ? 4096 : 0, &key);
-#endif
-    QApplication::restoreOverrideCursor();
     if (generated != SSH_OK || !key) {
-        QMessageBox::warning(this, QStringLiteral("New SSH Key"), QStringLiteral("Could not create the key."));
+        ssh_key_free(key);
+        QMessageBox::warning(this, QStringLiteral("New SSH Key"),
+                             isSecurityKeyType(keyType)
+                                 ? QStringLiteral("Could not create the key on the security key. "
+                                                  "Is it plugged in, was it touched in time, and "
+                                                  "is the PIN right?")
+                                 : QStringLiteral("Could not create the key."));
         return;
     }
     const auto native = QDir::toNativeSeparators(path).toUtf8();
@@ -404,6 +558,71 @@ void KeyManagerDialog::importKey()
     }
     restrictToOwner(target);
     refresh(name);
+}
+
+void KeyManagerDialog::importFromSecurityKey()
+{
+    if (!residentKeysLoader())
+        return;
+    bool ok = false;
+    auto pin = QInputDialog::getText(this, QStringLiteral("From Security Key"),
+                                     QStringLiteral("The security key's PIN (keys kept on it are "
+                                                    "protected by it):"),
+                                     QLineEdit::Password, QString(), &ok).toUtf8();
+    if (!ok)
+        return;
+    ssh_pki_ctx context = ssh_pki_ctx_new();
+    ssh_pki_ctx_set_sk_pin_callback(context, &securityKeyPin, &pin);
+    ssh_key *keys = nullptr;
+    size_t count = 0;
+    const int loaded = whileTouchingKey(this, QStringLiteral("Reading the keys on your security "
+                                                             "key; touch it if it blinks…"),
+                                        [&] { return residentKeysLoader()(context, &keys, &count); });
+    pin.fill('\0');
+    ssh_pki_ctx_free(context);
+    if (loaded != SSH_OK) {
+        QMessageBox::warning(this, QStringLiteral("From Security Key"),
+                             QStringLiteral("Could not read the security key. Is it plugged in, and "
+                                            "is the PIN right?"));
+        return;
+    }
+    QDir().mkpath(keysFolder());
+    QStringList saved;
+    for (size_t index = 0; index < count; ++index) {
+        ssh_key key = keys[index];
+        // Named like ssh-keygen -K: id_ed25519_sk_rk, id_ed25519_sk_rk_2, …
+        const auto base = ssh_key_type(key) == SSH_KEYTYPE_SK_ECDSA ? QStringLiteral("id_ecdsa_sk_rk")
+                                                                    : QStringLiteral("id_ed25519_sk_rk");
+        QString file = base;
+        for (int number = 2; QFile::exists(QDir(keysFolder()).filePath(file)); ++number)
+            file = QStringLiteral("%1_%2").arg(base).arg(number);
+        const QString path = QDir(keysFolder()).filePath(file);
+        const auto native = QDir::toNativeSeparators(path).toUtf8();
+        char *base64 = nullptr;
+        if (ssh_pki_export_privkey_file(key, nullptr, nullptr, nullptr, native.constData()) == SSH_OK
+            && ssh_pki_export_pubkey_base64(key, &base64) == SSH_OK
+            && writePublicKey(path, QStringLiteral("%1 %2 %3")
+                                        .arg(QString::fromUtf8(ssh_key_type_to_char(ssh_key_type(key))),
+                                             QString::fromLatin1(base64), defaultComment()))) {
+            restrictToOwner(path);
+            saved.append(file);
+        } else {
+            QFile::remove(path);
+        }
+        ssh_string_free_char(base64);
+        ssh_key_free(key);
+    }
+    free(keys);
+    if (saved.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("From Security Key"),
+                                 count == 0 ? QStringLiteral("There are no SSH keys kept on this "
+                                                             "security key.")
+                                            : QStringLiteral("Could not save the keys in settings/keys/."));
+        return;
+    }
+    refresh(saved.first());
+    QMessageBox::information(this, QStringLiteral("From Security Key"),
+                             QStringLiteral("Copied to settings/keys/: %1.").arg(saved.join(QStringLiteral(", "))));
 }
 
 void KeyManagerDialog::deleteKey()

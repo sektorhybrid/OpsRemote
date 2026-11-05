@@ -13,6 +13,10 @@
 #include "preferences.h"
 #include "rdpoptions.h"
 #include "proxy.h"
+#include "sshauth.h"
+#include "automation.h"
+#include "scripts.h"
+#include "localsessions.h"
 #include "vncoptions.h"
 #include "ftpoptions.h"
 #include "rshoptions.h"
@@ -28,6 +32,7 @@
 #include <QMessageBox>
 #include <QPainter>
 #include <QPlainTextEdit>
+#include <QProcess>
 #include <QSaveFile>
 #include <QTableWidget>
 #include <QCheckBox>
@@ -480,24 +485,41 @@ void PreferencesWindow::buildPages()
     buildLocalShellPage();
     buildHighlightsPage();
     buildSnippetsPage();
+    buildAutomationPage();
     buildLoggingPage();
     endCategory();
+    // One tab per session type.
     beginCategory(QStringLiteral("connections"), QStringLiteral("Connections"),
                   QStringLiteral("network-workgroup"), QStyle::SP_DriveNetIcon);
     buildSshPage();
-    buildProxyPage();
     buildRdpPage();
     buildVncPage();
-    buildSftpPage();
     buildFtpPage();
     buildRshPage();
     buildXdmcpPage();
-    buildRunCommandPage();
-    buildHttpRequestPage();
+    buildDockerPage();
+    buildKubernetesPage();
+#ifdef Q_OS_WIN
+    buildWslPage();
+#endif
+    endCategory();
+    // Shared by several protocols.
+    beginCategory(QStringLiteral("network"), QStringLiteral("Network"),
+                  QStringLiteral("network-wired"), QStyle::SP_DriveNetIcon);
+    buildProxyPage();
+    buildSftpPage();
     endCategory();
     beginCategory(QStringLiteral("security"), QStringLiteral("Security and vault"),
                   QStringLiteral("security-high"), QStyle::SP_MessageBoxWarning);
     buildSecurityPage();
+    buildKeysPage();
+    buildKerberosPage();
+    endCategory();
+    beginCategory(QStringLiteral("tools"), QStringLiteral("Tools"),
+                  QStringLiteral("applications-utilities"), QStyle::SP_FileDialogDetailedView);
+    buildRunCommandPage();
+    buildHttpRequestPage();
+    buildScriptsPage();
     endCategory();
     beginCategory(QStringLiteral("data"), QStringLiteral("Data and backup"),
                   QStringLiteral("drive-removable-media"), QStyle::SP_DriveFDIcon);
@@ -1662,6 +1684,366 @@ void PreferencesWindow::buildSshPage()
     });
 }
 
+// Login scripts and triggers: on or off, and triggers for every tab.
+void PreferencesWindow::buildAutomationPage()
+{
+    auto *page = addPage(QStringLiteral("automation"), QStringLiteral("Automation"),
+                         QStringLiteral("system-run"), QStyle::SP_MediaPlay);
+    const auto current = loadAutomationPreferences();
+    // Saved at once, like the other pages; tabs opened later use it.
+    const auto update = [](const std::function<void(AutomationPreferences &)> &change) {
+        auto value = loadAutomationPreferences();
+        change(value);
+        saveAutomationPreferences(value);
+    };
+    auto *scripts = page->addCard(QStringLiteral("Login scripts"));
+    auto *scriptsOn = toggle(current.loginScripts);
+    scripts->addRow(QStringLiteral("Run login scripts"),
+                    QStringLiteral("After connecting, a session's login script waits for each text "
+                                   "(a prompt, a menu) and types the answer. Set them on the "
+                                   "Automation tab of a session or folder."),
+                    scriptsOn, QStringLiteral("login script expect enable password menu"));
+    connect(scriptsOn, &QCheckBox::toggled, this,
+            [update](bool on) { update([on](AutomationPreferences &v) { v.loginScripts = on; }); });
+    auto *timeout = spinBox(1, 3600, current.stepTimeout, QStringLiteral(" s"));
+    scripts->addRow(QStringLiteral("Wait for each text up to"),
+                    QStringLiteral("Steps can set their own time."), timeout,
+                    QStringLiteral("timeout"));
+    connect(timeout, &QSpinBox::valueChanged, this,
+            [update](int seconds) { update([seconds](AutomationPreferences &v) { v.stepTimeout = seconds; }); });
+    auto *stop = toggle(current.stopOnTimeout);
+    scripts->addRow(QStringLiteral("Stop when a text does not appear"),
+                    QStringLiteral("Off: the answer is typed anyway and the script goes on."),
+                    stop, QStringLiteral("timeout stop continue"));
+    connect(stop, &QCheckBox::toggled, this,
+            [update](bool on) { update([on](AutomationPreferences &v) { v.stopOnTimeout = on; }); });
+
+    auto *triggers = page->addCard(QStringLiteral("Triggers"));
+    auto *triggersOn = toggle(current.triggers);
+    triggers->addRow(QStringLiteral("Use triggers"),
+                     QStringLiteral("While a tab is open, text in its output can type an answer, "
+                                    "notify you (status bar and taskbar), beep, or mark the tab."),
+                     triggersOn, QStringLiteral("trigger watch output notify"));
+    connect(triggersOn, &QCheckBox::toggled, this,
+            [update](bool on) { update([on](AutomationPreferences &v) { v.triggers = on; }); });
+    auto *password = toggle(current.triggersMaySendPassword);
+    triggers->addRow(QStringLiteral("Triggers may type the password"),
+                     QStringLiteral("Lets a trigger's text use {password}. Off: only login scripts "
+                                    "can, which wait for the right moment."),
+                     password, QStringLiteral("password secret trigger"));
+    connect(password, &QCheckBox::toggled, this, [update](bool on) {
+        update([on](AutomationPreferences &v) { v.triggersMaySendPassword = on; });
+    });
+    auto *global = new TriggerTable(current.globalTriggers);
+    triggers->addRow(QStringLiteral("Triggers for every tab"),
+                     QStringLiteral("Used in all terminal tabs, before a session's own."),
+                     new QWidget, QStringLiteral("global triggers"));
+    triggers->addWideRow(global, QStringLiteral("global triggers"));
+    connect(global, &TriggerTable::changed, this, [update, global] {
+        const auto rules = global->value();
+        update([rules](AutomationPreferences &v) { v.globalTriggers = rules; });
+    });
+}
+
+// Saved scripts (Tools → Scripts).
+void PreferencesWindow::buildScriptsPage()
+{
+    auto *page = addPage(QStringLiteral("scripts"), QStringLiteral("Scripts"),
+                         QStringLiteral("text-x-script"), QStyle::SP_FileIcon);
+    const auto current = loadScriptPreferences();
+    const auto update = [](const std::function<void(ScriptPreferences &)> &change) {
+        auto value = loadScriptPreferences();
+        change(value);
+        saveScriptPreferences(value);
+    };
+    auto *scripts = page->addCard(QStringLiteral("Saved scripts"));
+    auto *enabled = toggle(current.enabled);
+    scripts->addRow(QStringLiteral("Use saved scripts"),
+                    QStringLiteral("Scripts kept in settings/scripts/, run whole on a server: in a "
+                                   "tab (Run Script in the terminal's menu), on many hosts (Run on "
+                                   "Hosts), after logging on, or from a command. Edit them in "
+                                   "Tools → Scripts."),
+                    enabled, QStringLiteral("script scripts bash shell run remote library"));
+    connect(enabled, &QCheckBox::toggled, this,
+            [update](bool on) { update([on](ScriptPreferences &v) { v.enabled = on; }); });
+    auto *interpreter = new QComboBox;
+    interpreter->setEditable(true);
+    interpreter->addItems({QStringLiteral("sh"), QStringLiteral("bash"), QStringLiteral("python3"),
+                           QStringLiteral("pwsh"), QStringLiteral("perl")});
+    interpreter->setEditText(current.interpreter);
+    scripts->addRow(QStringLiteral("Interpreter for new scripts"),
+                    QStringLiteral("The program on the server that runs a script; each script can "
+                                   "choose its own."),
+                    interpreter, QStringLiteral("interpreter bash python powershell"));
+    connect(interpreter, &QComboBox::currentTextChanged, this, [update](const QString &text) {
+        update([text](ScriptPreferences &v) { v.interpreter = text.trimmed(); });
+    });
+    auto *confirm = spinBox(0, 10000, current.confirmAbove, QStringLiteral(" hosts"), QStringLiteral("Never"));
+    scripts->addRow(QStringLiteral("Ask before running on more than"),
+                    QStringLiteral("Run on Hosts asks first when a script goes to more hosts than this."),
+                    confirm, QStringLiteral("confirm hosts many"));
+    connect(confirm, &QSpinBox::valueChanged, this,
+            [update](int hosts) { update([hosts](ScriptPreferences &v) { v.confirmAbove = hosts; }); });
+    auto *open = new QPushButton(QStringLiteral("Scripts…"));
+    connect(open, &QPushButton::clicked, m_mainWindow, [this] { m_mainWindow->showScripts(); });
+    scripts->addRow(QStringLiteral("Your scripts"), QStringLiteral("Create, edit, and run them."),
+                    open, QStringLiteral("edit scripts"));
+}
+
+namespace {
+// A container program's path row, with a note when it is missing.
+void addProgramRow(SettingsCard *card, const QString &name, const QString &value,
+                   std::function<void(const QString &)> save)
+{
+    auto *picker = pathPicker(value, programPathHint(name), false, std::move(save));
+    if (auto *field = picker->findChild<QLineEdit *>()) {
+        field->setMinimumWidth(330);
+        field->setToolTip(programPathHint(name));
+    }
+    card->addRow(name, QStringLiteral("Not needed for sessions that run on an SSH server."), picker,
+                 QStringLiteral("path program ") + name);
+    card->addWideRow(new AvailabilityNote([name] {
+        return containerProgram(name).isEmpty()
+                   ? QStringLiteral("%1 is not installed here (or not on the PATH).").arg(name)
+                   : QString();
+    }, {}), name);
+}
+
+void updateContainers(const std::function<void(ContainerPreferences &)> &change)
+{
+    auto value = loadContainerPreferences();
+    change(value);
+    saveContainerPreferences(value);
+}
+}
+
+// Docker (and Podman) sessions.
+void PreferencesWindow::buildDockerPage()
+{
+    auto *page = addPage(QStringLiteral("docker"), QStringLiteral("Container (Docker)"),
+                         QStringLiteral("package-x-generic"), QStyle::SP_DirIcon);
+    const auto current = loadContainerPreferences();
+    auto *sessions = page->addCard(QStringLiteral("Docker sessions"));
+    auto *enabled = toggle(current.docker.enabled);
+    sessions->addRow(QStringLiteral("Docker sessions"),
+                     QStringLiteral("A session type that opens a shell in a container (docker exec, "
+                                    "or Podman), on this computer or on an SSH server; and Open a "
+                                    "Container… on SSH sessions."),
+                     enabled, QStringLiteral("docker podman container"));
+    connect(enabled, &QCheckBox::toggled, this,
+            [](bool on) { updateContainers([on](ContainerPreferences &v) { v.docker.enabled = on; }); });
+    auto *shell = new QLineEdit(current.docker.shell);
+    shell->setPlaceholderText(QStringLiteral("bash if there is one, else sh"));
+    shell->setMinimumWidth(280);
+    sessions->addRow(QStringLiteral("Shell in containers"), QStringLiteral("Sessions can choose their own."),
+                     shell, QStringLiteral("shell bash sh"));
+    connect(shell, &QLineEdit::editingFinished, this, [shell] {
+        const auto text = shell->text().trimmed();
+        updateContainers([text](ContainerPreferences &v) { v.docker.shell = text; });
+    });
+    auto *timeout = spinBox(3, 600, current.docker.listTimeout, QStringLiteral(" s"));
+    sessions->addRow(QStringLiteral("List timeout"),
+                     QStringLiteral("How long listing containers and contexts may take in the session "
+                                    "window, before it says it could not."),
+                     timeout, QStringLiteral("timeout list containers"));
+    connect(timeout, &QSpinBox::valueChanged, this,
+            [](int seconds) { updateContainers([seconds](ContainerPreferences &v) { v.docker.listTimeout = seconds; }); });
+    auto *programs = page->addCard(QStringLiteral("Programs on this computer"));
+    addProgramRow(programs, QStringLiteral("docker"), current.docker.program, [](const QString &path) {
+        updateContainers([&](ContainerPreferences &v) { v.docker.program = path; });
+    });
+    addProgramRow(programs, QStringLiteral("podman"), current.podman, [](const QString &path) {
+        updateContainers([&](ContainerPreferences &v) { v.podman = path; });
+    });
+}
+
+// Kubernetes sessions.
+void PreferencesWindow::buildKubernetesPage()
+{
+    auto *page = addPage(QStringLiteral("kubernetes"), QStringLiteral("Container (Kubernetes)"),
+                         QStringLiteral("network-server"), QStyle::SP_DriveNetIcon);
+    const auto current = loadContainerPreferences();
+    auto *sessions = page->addCard(QStringLiteral("Kubernetes sessions"));
+    auto *enabled = toggle(current.kubernetes.enabled);
+    sessions->addRow(QStringLiteral("Kubernetes sessions"),
+                     QStringLiteral("A session type that opens a shell in a pod (kubectl exec): "
+                                    "context, namespace, pod and container, on this computer or on an "
+                                    "SSH server."),
+                     enabled, QStringLiteral("kubernetes kubectl pod k8s"));
+    connect(enabled, &QCheckBox::toggled, this,
+            [](bool on) { updateContainers([on](ContainerPreferences &v) { v.kubernetes.enabled = on; }); });
+    auto *shell = new QLineEdit(current.kubernetes.shell);
+    shell->setPlaceholderText(QStringLiteral("bash if there is one, else sh"));
+    shell->setMinimumWidth(280);
+    sessions->addRow(QStringLiteral("Shell in pods"), QStringLiteral("Sessions can choose their own."),
+                     shell, QStringLiteral("shell bash sh"));
+    connect(shell, &QLineEdit::editingFinished, this, [shell] {
+        const auto text = shell->text().trimmed();
+        updateContainers([text](ContainerPreferences &v) { v.kubernetes.shell = text; });
+    });
+    auto *timeout = spinBox(3, 600, current.kubernetes.listTimeout, QStringLiteral(" s"));
+    sessions->addRow(QStringLiteral("List timeout"),
+                     QStringLiteral("How long listing contexts, namespaces, pods and containers may take "
+                                    "in the session window (an unreachable cluster), before it says it could not."),
+                     timeout, QStringLiteral("timeout list pods"));
+    connect(timeout, &QSpinBox::valueChanged, this,
+            [](int seconds) { updateContainers([seconds](ContainerPreferences &v) { v.kubernetes.listTimeout = seconds; }); });
+    auto *programs = page->addCard(QStringLiteral("Programs on this computer"));
+    addProgramRow(programs, QStringLiteral("kubectl"), current.kubernetes.program, [](const QString &path) {
+        updateContainers([&](ContainerPreferences &v) { v.kubernetes.program = path; });
+    });
+}
+
+// WSL sessions (Windows).
+void PreferencesWindow::buildWslPage()
+{
+    auto *page = addPage(QStringLiteral("wsl"), QStringLiteral("WSL"),
+                         QStringLiteral("utilities-terminal"), QStyle::SP_ComputerIcon);
+    const auto current = loadContainerPreferences();
+    auto *sessions = page->addCard(QStringLiteral("WSL sessions"));
+    auto *enabled = toggle(current.wsl.enabled);
+    sessions->addRow(QStringLiteral("WSL sessions"),
+                     QStringLiteral("A session type that opens a Linux distribution of the Windows "
+                                    "Subsystem for Linux, with its user and start folder."),
+                     enabled, QStringLiteral("wsl linux ubuntu distribution"));
+    connect(enabled, &QCheckBox::toggled, this,
+            [](bool on) { updateContainers([on](ContainerPreferences &v) { v.wsl.enabled = on; }); });
+    sessions->addWideRow(new AvailabilityNote([] { return localSessionProblem(QStringLiteral("WSL")); }, {}),
+                         QStringLiteral("wsl install"));
+    auto *distribution = new QLineEdit(current.wsl.distribution);
+    distribution->setPlaceholderText(QStringLiteral("WSL's default"));
+    sessions->addRow(QStringLiteral("Distribution"),
+                     QStringLiteral("For sessions that do not choose one (wsl -l lists them)."),
+                     distribution, QStringLiteral("distribution ubuntu debian"));
+    connect(distribution, &QLineEdit::editingFinished, this, [distribution] {
+        const auto text = distribution->text().trimmed();
+        updateContainers([text](ContainerPreferences &v) { v.wsl.distribution = text; });
+    });
+    auto *timeout = spinBox(3, 600, current.wsl.listTimeout, QStringLiteral(" s"));
+    sessions->addRow(QStringLiteral("List timeout"),
+                     QStringLiteral("How long listing the distributions may take in the session window."),
+                     timeout, QStringLiteral("timeout list"));
+    connect(timeout, &QSpinBox::valueChanged, this,
+            [](int seconds) { updateContainers([seconds](ContainerPreferences &v) { v.wsl.listTimeout = seconds; }); });
+}
+
+// Certificates and FIDO2 security keys for SSH logons.
+void PreferencesWindow::buildKeysPage()
+{
+    auto *page = addPage(QStringLiteral("ssh-keys"), QStringLiteral("Keys and certificates"),
+                         QStringLiteral("dialog-password"), QStyle::SP_DialogApplyButton);
+    auto update = PREFERENCE_UPDATER(SshPreferences, sshPreferences, setSshPreferences);
+    const auto current = m_mainWindow->sshPreferences();
+
+    auto *certificates = page->addCard(QStringLiteral("Certificates"));
+    auto *useCertificates = toggle(current.useCertificates);
+    certificates->addRow(QStringLiteral("Use certificates"),
+                         QStringLiteral("Sends a key's OpenSSH certificate (key-cert.pub next to "
+                                        "it, signed by your organisation) with the key. Sessions "
+                                        "can choose another certificate or none."),
+                         useCertificates, QStringLiteral("certificate ca cert-pub signed principals"));
+    bindToggle(this, useCertificates, update, &SshPreferences::useCertificates);
+
+    auto *securityKeys = page->addCard(QStringLiteral("Security keys (FIDO2)"));
+    auto *useSecurityKeys = toggle(current.securityKeys);
+    securityKeys->addRow(QStringLiteral("Use security keys"),
+                         QStringLiteral("Keys kept on a YubiKey or another FIDO2 key "
+                                        "(sk-ed25519, sk-ecdsa), or in Windows Hello. OpenSSH "
+                                        "asks you to touch the key, and for its PIN when it "
+                                        "needs one. Off: such keys are skipped."),
+                         useSecurityKeys, QStringLiteral("fido fido2 u2f yubikey sk webauthn hello"));
+    bindToggle(this, useSecurityKeys, update, &SshPreferences::securityKeys);
+    securityKeys->addWideRow(new AvailabilityNote(&securityKeyProblem, [useSecurityKeys](bool available) {
+        useSecurityKeys->setEnabled(available || useSecurityKeys->isChecked());
+    }), QStringLiteral("fido fido2 yubikey"));
+    auto *openKeys = new QPushButton(QStringLiteral("SSH Keys…"));
+    connect(openKeys, &QPushButton::clicked, m_mainWindow, &MainWindow::showKeyManager);
+    securityKeys->addRow(QStringLiteral("Create and import"),
+                         QStringLiteral("New security keys, and keys kept on the key itself "
+                                        "(resident), are made in Tools → SSH Keys."),
+                         openKeys, QStringLiteral("fido resident generate"));
+}
+
+// Kerberos (GSSAPI) logons: the default, and the current ticket.
+void PreferencesWindow::buildKerberosPage()
+{
+    auto *page = addPage(QStringLiteral("kerberos"), QStringLiteral("Kerberos"),
+                         QStringLiteral("security-high"), QStyle::SP_DialogYesButton);
+    auto update = PREFERENCE_UPDATER(SshPreferences, sshPreferences, setSshPreferences);
+    const auto current = m_mainWindow->sshPreferences();
+
+    auto *logon = page->addCard(QStringLiteral("Kerberos logons"));
+    auto *kerberos = toggle(current.kerberos);
+    logon->addRow(QStringLiteral("Log on with Kerberos"),
+                  QStringLiteral("SSH servers in your domain accept your Kerberos ticket instead "
+                                 "of a password (GSSAPI). Tried before keys and passwords. "
+                                 "Folders and sessions can turn it on or off."),
+                  kerberos, QStringLiteral("kerberos gssapi active directory domain ticket sso"));
+    bindToggle(this, kerberos, update, &SshPreferences::kerberos);
+    auto *delegate = toggle(current.kerberosDelegate);
+    logon->addRow(QStringLiteral("Pass the ticket on"),
+                  QStringLiteral("Servers can use your ticket to reach other servers and file "
+                                 "shares (ssh -K, delegation). Only for servers you trust."),
+                  delegate, QStringLiteral("delegate delegation forward ticket -K"));
+    bindToggle(this, delegate, update, &SshPreferences::kerberosDelegate);
+    delegate->setEnabled(current.kerberos);
+    connect(kerberos, &QAbstractButton::toggled, delegate, &QWidget::setEnabled);
+    logon->addWideRow(new AvailabilityNote(&kerberosProblem, [kerberos, delegate](bool available) {
+        kerberos->setEnabled(available || kerberos->isChecked());
+        delegate->setEnabled(available && kerberos->isChecked());
+    }), QStringLiteral("kerberos gssapi"));
+
+    auto *ticket = page->addCard(QStringLiteral("Your ticket"));
+    auto *status = new QLabel(QStringLiteral("Not checked yet."));
+    status->setWordWrap(true);
+    status->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    auto *buttons = new QWidget;
+    auto *buttonLayout = new QHBoxLayout(buttons);
+    buttonLayout->setContentsMargins(0, 0, 0, 0);
+    auto *check = new QPushButton(QStringLiteral("Check Again"), buttons);
+    auto *getTicket = new QPushButton(QStringLiteral("Get Ticket…"), buttons);
+    buttonLayout->addWidget(check);
+    buttonLayout->addWidget(getTicket);
+    ticket->addRow(QStringLiteral("Ticket"),
+                   QStringLiteral("Shown by klist. Get Ticket… runs kinit in a terminal tab, "
+                                  "which asks for your domain password."),
+                   buttons, QStringLiteral("klist kinit ticket principal realm"));
+    ticket->addWideRow(status, QStringLiteral("klist ticket"));
+    // klist runs in the background, so a slow KDC never stalls the window.
+    const auto refresh = [this, status, getTicket] {
+        getTicket->setEnabled(!kinitProgram().isEmpty() && kerberosProblem().isEmpty());
+        if (!kerberosProblem().isEmpty()) {
+            status->setText(kerberosProblem());
+            return;
+        }
+        const auto klist = klistProgram();
+        if (klist.isEmpty()) {
+            status->setText(QStringLiteral("klist is not installed, so the ticket cannot be shown "
+                                           "(Linux: the krb5-user, krb5-workstation, or krb5 "
+                                           "package). Logons still use a ticket you have."));
+            return;
+        }
+        status->setText(QStringLiteral("Checking…"));
+        auto *process = new QProcess(this);
+        process->setProcessChannelMode(QProcess::MergedChannels);
+        connect(process, &QProcess::finished, this, [process, status](int exitCode) {
+            status->setText(kerberosTicketSummary(process->readAll(), exitCode));
+            process->deleteLater();
+        });
+        connect(process, &QProcess::errorOccurred, this, [process, status] {
+            status->setText(QStringLiteral("Could not run klist: %1").arg(process->errorString()));
+            process->deleteLater();
+        });
+        QTimer::singleShot(5000, process, [process] { process->kill(); });
+        process->start(klist, {});
+    };
+    connect(check, &QPushButton::clicked, this, refresh);
+    connect(getTicket, &QPushButton::clicked, this, [this] {
+        m_mainWindow->openLocalProgram(kinitProgram(), {}, QStringLiteral("kinit"));
+    });
+    QTimer::singleShot(0, this, refresh);
+}
+
 // The proxy for every SSH connection, unless a folder or session sets one.
 void PreferencesWindow::buildProxyPage()
 {
@@ -1827,7 +2209,11 @@ void PreferencesWindow::buildXdmcpPage()
                                             [&](const auto &choice) { return choice.first == current.program; });
     auto *program = choiceBox(xdmcpProgramChoices(), customPath ? QStringLiteral("custom") : current.program);
     auto *path = new QLineEdit(customPath ? current.program : QString());
-    path->setPlaceholderText(QStringLiteral("Path of the X server program"));
+#ifdef Q_OS_WIN
+    path->setPlaceholderText(programPathHint(QStringLiteral("vcxsrv")));
+#else
+    path->setPlaceholderText(programPathHint(QStringLiteral("Xephyr")));
+#endif
     auto *programBox = new QWidget;
     auto *programLayout = new QVBoxLayout(programBox);
     programLayout->setContentsMargins(0, 0, 0, 0);
@@ -2500,68 +2886,26 @@ void PreferencesWindow::buildLoggingPage()
 void PreferencesWindow::buildSnippetsPage()
 {
     auto *mainWindow = m_mainWindow;
-    auto *page = addPage(QStringLiteral("snippets"), QStringLiteral("Snippets and broadcast"),
+    auto *page = addPage(QStringLiteral("snippets"), QStringLiteral("Commands and broadcast"),
                          QStringLiteral("insert-text"), QStyle::SP_FileDialogListView);
 
-    auto *snippets = page->addCard(QStringLiteral("Snippets"));
-    auto *table = editorTable({QStringLiteral("Name"), QStringLiteral("Press Enter"),
-                               QStringLiteral("Text")});
-    auto *buttons = new QWidget;
-    auto *buttonLayout = new QHBoxLayout(buttons);
-    buttonLayout->setContentsMargins(0, 0, 0, 0);
-    auto *add = new QPushButton(QStringLiteral("Add"), buttons);
-    auto *remove = new QPushButton(QStringLiteral("Remove"), buttons);
-    buttonLayout->addWidget(add);
-    buttonLayout->addWidget(remove);
-    snippets->addRow(QStringLiteral("Saved commands"),
-                     QStringLiteral("Send one to the current tab from Sessions → Send Snippet or "
-                                    "the terminal's right-click menu. Double-click a cell to edit; "
-                                    "use \\n for several lines."),
-                     buttons, QStringLiteral("commands macro text"));
-    snippets->addWideRow(table, QStringLiteral("snippets commands macro"));
-    auto addRow = [table](const Snippet &snippet) {
-        const int row = table->rowCount();
-        table->insertRow(row);
-        table->setItem(row, 0, new QTableWidgetItem(snippet.name));
-        auto *enter = new QTableWidgetItem;
-        enter->setFlags(Qt::ItemIsUserCheckable | Qt::ItemIsEnabled | Qt::ItemIsSelectable);
-        enter->setCheckState(snippet.pressEnter ? Qt::Checked : Qt::Unchecked);
-        table->setItem(row, 1, enter);
-        QString text = snippet.text;
-        table->setItem(row, 2, new QTableWidgetItem(text.replace(QLatin1Char('\n'), QStringLiteral("\\n"))));
-    };
-    for (const auto &snippet : mainWindow->snippets())
-        addRow(snippet);
-    table->resizeColumnToContents(1);
-    table->setColumnWidth(0, 160);
-    auto save = [mainWindow, table] {
-        QList<Snippet> list;
-        for (int row = 0; row < table->rowCount(); ++row) {
-            const auto name = table->item(row, 0) ? table->item(row, 0)->text().trimmed() : QString();
-            if (name.isEmpty())
-                continue;
-            QString text = table->item(row, 2) ? table->item(row, 2)->text() : QString();
-            list.append({name, text.replace(QStringLiteral("\\n"), QStringLiteral("\n")),
-                         table->item(row, 1) && table->item(row, 1)->checkState() == Qt::Checked});
-        }
-        mainWindow->setSnippets(list);
-    };
-    connect(table, &QTableWidget::itemChanged, this, save);
-    connect(add, &QPushButton::clicked, this, [table, addRow] {
-        addRow({QStringLiteral("New snippet"), QString(), true});
-        table->setCurrentCell(table->rowCount() - 1, 0);
-        table->editItem(table->item(table->rowCount() - 1, 0));
+    auto *commands = page->addCard(QStringLiteral("Commands"));
+    commands->addRow(QStringLiteral("Saved commands"),
+                     QStringLiteral("Kept in the main window's Commands tab (View → Commands Tab), in "
+                                    "groups: double-click one to send it to the current tab, or use "
+                                    "Sessions → Send Snippet and the terminal's right-click menu. A "
+                                    "command can also run a saved script."),
+                     nullptr, QStringLiteral("snippets commands macro text"));
+    auto *confirm = toggle(loadCommandsPreferences().confirmMultiline);
+    commands->addRow(QStringLiteral("Ask before sending several lines"),
+                     QStringLiteral("A command with more than one line shows them first."), confirm,
+                     QStringLiteral("confirm multiline paste"));
+    connect(confirm, &QCheckBox::toggled, this, [](bool on) {
+        auto value = loadCommandsPreferences();
+        value.confirmMultiline = on;
+        saveCommandsPreferences(value);
     });
-    connect(remove, &QPushButton::clicked, this, [table, save] {
-        QList<int> rows;
-        for (const auto *item : table->selectedItems())
-            rows.append(item->row());
-        std::sort(rows.begin(), rows.end(), std::greater<>());
-        rows.erase(std::unique(rows.begin(), rows.end()), rows.end());
-        for (int row : rows)
-            table->removeRow(row);
-        save();
-    });
+    Q_UNUSED(mainWindow);
 
     auto *broadcast = page->addCard(QStringLiteral("Broadcast"));
     broadcast->addRow(QStringLiteral("Type into every SSH tab at once"),
@@ -2670,41 +3014,23 @@ void PreferencesWindow::buildHighlightsPage()
     });
 }
 
+// How administrator terminals start, for sessions that do not choose. (Which
+// shell a terminal runs is the Local session's choice.)
 void PreferencesWindow::buildLocalShellPage()
 {
-    auto *page = addPage(QStringLiteral("local-shell"), QStringLiteral("Local shell"),
-                         QStringLiteral("utilities-terminal"), QStyle::SP_ComputerIcon);
+    auto *page = addPage(QStringLiteral("local-shell"), QStringLiteral("Administrator"),
+                         QStringLiteral("security-high"), QStyle::SP_VistaShield);
     auto update = PREFERENCE_UPDATER(LocalShellPreferences, localShellPreferences,
                                      setLocalShellPreferences);
     const auto current = m_mainWindow->localShellPreferences();
-    auto *card = page->addCard(QStringLiteral("Local terminals"));
-#ifdef Q_OS_WIN
-    auto *shell = choiceBox({{QStringLiteral("powershell"), QStringLiteral("Windows PowerShell")},
-                             {QStringLiteral("pwsh"), QStringLiteral("PowerShell 7 (pwsh)")},
-                             {QStringLiteral("cmd"), QStringLiteral("Command Prompt")},
-                             {QStringLiteral("wsl"), QStringLiteral("WSL (the default Linux distribution)")},
-                             {QStringLiteral("custom"), QStringLiteral("Another program")}},
-                            current.windowsShell);
-    card->addRow(QStringLiteral("Shell"),
-                 QStringLiteral("What File → New Local Terminal starts, in a Windows pseudo "
-                                "console. PowerShell 7 and WSL need to be installed."),
-                 shell, QStringLiteral("powershell pwsh cmd wsl bash command prompt conpty"));
-    bindChoice(this, shell, update, &LocalShellPreferences::windowsShell);
-    auto *custom = new QLineEdit(current.windowsCustom);
-    custom->setPlaceholderText(QStringLiteral("e.g. C:\\msys64\\usr\\bin\\bash.exe --login"));
-    card->addRow(QStringLiteral("Another program"),
-                 QStringLiteral("With its arguments; used when the shell is \"Another program\"."),
-                 custom, QStringLiteral("custom command"));
-    connect(custom, &QLineEdit::editingFinished, this, [update, custom] {
-        update([&](LocalShellPreferences &v) { v.windowsCustom = custom->text().trimmed(); });
-    });
-
     auto *admin = page->addCard(QStringLiteral("Run as administrator"));
+#ifdef Q_OS_WIN
     admin->addRow(QStringLiteral("Administrator terminals"),
-                  QStringLiteral("File → New Local Terminal (Administrator), or Administrator in "
-                                 "the split pane chooser. Windows asks first (UAC); a standard user "
-                                 "types an administrator's name and password, and the shell then "
-                                 "runs as that administrator. Not for WSL."),
+                  QStringLiteral("Local sessions with Run as administrator, File → New Local Terminal "
+                                 "(Administrator), or Administrator in the split pane chooser. "
+                                 "Windows asks first (UAC); a standard user types an "
+                                 "administrator's name and password. Sessions can choose their "
+                                 "own way."),
                   nullptr, QStringLiteral("admin elevated uac runas root"));
     auto *sudo = toggle(current.useSudo);
     admin->addRow(QStringLiteral("Use Windows sudo when it is turned on"),
@@ -2714,21 +3040,13 @@ void PreferencesWindow::buildLocalShellPage()
                   sudo, QStringLiteral("sudo inline"));
     bindToggle(this, sudo, update, &LocalShellPreferences::useSudo);
 #else
-    auto *shell = choiceBox({{QStringLiteral("default"), QStringLiteral("My login shell ($SHELL)")},
-                             {QStringLiteral("custom"), QStringLiteral("Another program")}},
-                            current.linuxShell);
-    card->addRow(QStringLiteral("Shell"),
-                 QStringLiteral("What File → New Local Terminal starts."), shell,
-                 QStringLiteral("bash zsh fish shell"));
-    bindChoice(this, shell, update, &LocalShellPreferences::linuxShell);
-    auto *custom = new QLineEdit(current.linuxCustom);
-    custom->setPlaceholderText(QStringLiteral("e.g. /usr/bin/fish -l"));
-    card->addRow(QStringLiteral("Another program"),
-                 QStringLiteral("With its arguments; used when the shell is \"Another program\"."),
-                 custom, QStringLiteral("custom command"));
-    connect(custom, &QLineEdit::editingFinished, this, [update, custom] {
-        update([&](LocalShellPreferences &v) { v.linuxCustom = custom->text().trimmed(); });
-    });
+    auto *method = choiceBox(elevationChoices(), current.linuxElevation);
+    admin->addRow(QStringLiteral("Run as root with"),
+                  QStringLiteral("For Local sessions with Run as administrator, File → New Local Terminal "
+                                 "(Administrator), and Administrator in the split pane chooser. "
+                                 "Sessions can choose their own way."),
+                  method, QStringLiteral("admin root sudo pkexec polkit"));
+    bindChoice(this, method, update, &LocalShellPreferences::linuxElevation);
 #endif
 }
 

@@ -56,6 +56,19 @@ struct SshConnectionSettings
     QString keyPassphrase;
     // An extra private key, tried before the others.
     QString identityFile;
+    // Shell sessions: run this on the terminal instead of the login shell
+    // (docker exec, kubectl exec on the server).
+    QString remoteCommand;
+    // identityFile's certificate: empty for key-cert.pub next to it (when
+    // useCertificates), "none", or a file.
+    QString certificateFile;
+    bool useCertificates = true;
+    // FIDO2 security keys; off leaves sk- keys out (agent keys too).
+    bool securityKeys = true;
+    // Kerberos (GSSAPI): tried first when on; delegation passes the ticket on.
+    bool kerberos = false;
+    bool kerberosDelegate = false;
+    QString kerberosServer;
     int columns = 80;
     int rows = 24;
     // What the terminal tab does after a dropped connection.

@@ -3,6 +3,13 @@
 
 #include "appdirs.h"
 #include "mainwindow.h"
+#include "kubecredentials.h"
+#include "sidepanels.h"
+#include <QPlainTextEdit>
+#include <QTemporaryFile>
+#include "automation.h"
+#include "scripts.h"
+#include "sshauth.h"
 #include "filespage.h"
 #include "icons.h"
 #include "jumphost.h"
@@ -117,6 +124,12 @@ constexpr int SummaryColumn = 3; // folder summaries when no other column follow
 constexpr int FolderJumpHostRole = Qt::UserRole + 2;
 // A folder's proxy for its sessions (see ProxySettings); empty: its parent's.
 constexpr int FolderProxyRole = Qt::UserRole + 3;
+// A folder's Kerberos logons for its SSH sessions: 1 on, 0 off; none: its
+// parent's (in the end the preferences).
+constexpr int FolderKerberosRole = Qt::UserRole + 40;
+// A folder's login script and triggers (automationToText); empty: its
+// parent's.
+constexpr int FolderAutomationRole = Qt::UserRole + 41;
 constexpr int MaximumFolderDepth = 10;
 
 // User state (sessions, preferences, vault, known hosts) lives in settings/
@@ -134,10 +147,11 @@ QString stateFilePath(const QString &name)
 // Protocols a saved session can use, as shown in the session window.
 QStringList sessionProtocols()
 {
-    return {QStringLiteral("SSH"), QStringLiteral("VNC"), QStringLiteral("RDP"),
-            QStringLiteral("Telnet"), QStringLiteral("Mosh"), QStringLiteral("Serial"),
-            QStringLiteral("FTP"), QStringLiteral("SFTP"), QStringLiteral("SCP"),
-            QStringLiteral("Rlogin"), QStringLiteral("RSH"), QStringLiteral("XDMCP")};
+    return QStringList{QStringLiteral("SSH"), QStringLiteral("VNC"), QStringLiteral("RDP"),
+                       QStringLiteral("Telnet"), QStringLiteral("Mosh"), QStringLiteral("Serial"),
+                       QStringLiteral("FTP"), QStringLiteral("SFTP"), QStringLiteral("SCP"),
+                       QStringLiteral("Rlogin"), QStringLiteral("RSH"), QStringLiteral("XDMCP")}
+           + localSessionProtocols();
 }
 
 // Protocols over SSH: a terminal (SSH), or only files (SFTP, SCP).
@@ -157,7 +171,7 @@ bool isTerminalProtocol(const QString &protocol)
         if (protocol.compare(QLatin1String(name), Qt::CaseInsensitive) == 0)
             return true;
     }
-    return false;
+    return isLocalSessionProtocol(protocol);
 }
 
 QStringList loadRecentSessions();
@@ -306,46 +320,6 @@ void disableLocalTerminalWhereUnsupported(QAction *action)
 
 // The program a local terminal runs, from the Preferences: (program,
 // arguments, label). An empty program is the login shell (Linux).
-struct LocalShell
-{
-    QString program;
-    QStringList arguments;
-    QString label;
-};
-
-LocalShell localShell(const LocalShellPreferences &preferences)
-{
-#ifdef Q_OS_WIN
-    const QString system = QDir::fromNativeSeparators(qEnvironmentVariable("SystemRoot", QStringLiteral("C:\\Windows")));
-    const QString choice = preferences.windowsShell;
-    if (choice == QStringLiteral("custom") && !preferences.windowsCustom.isEmpty()) {
-        auto parts = QProcess::splitCommand(preferences.windowsCustom);
-        const QString program = parts.takeFirst();
-        return {program, parts, QFileInfo(program).completeBaseName()};
-    }
-    if (choice == QStringLiteral("pwsh")) {
-        QString pwsh = QStandardPaths::findExecutable(QStringLiteral("pwsh"));
-        if (pwsh.isEmpty() && QFile::exists(QStringLiteral("C:/Program Files/PowerShell/7/pwsh.exe")))
-            pwsh = QStringLiteral("C:/Program Files/PowerShell/7/pwsh.exe");
-        if (!pwsh.isEmpty())
-            return {pwsh, {QStringLiteral("-NoLogo")}, QStringLiteral("PowerShell")};
-    }
-    if (choice == QStringLiteral("cmd"))
-        return {qEnvironmentVariable("ComSpec", system + QStringLiteral("/System32/cmd.exe")), {},
-                QStringLiteral("Command Prompt")};
-    if (choice == QStringLiteral("wsl"))
-        return {system + QStringLiteral("/System32/wsl.exe"), {QStringLiteral("~")}, QStringLiteral("WSL")};
-    return {system + QStringLiteral("/System32/WindowsPowerShell/v1.0/powershell.exe"),
-            {QStringLiteral("-NoLogo")}, QStringLiteral("PowerShell")};
-#else
-    if (preferences.linuxShell == QStringLiteral("custom") && !preferences.linuxCustom.isEmpty()) {
-        auto parts = QProcess::splitCommand(preferences.linuxCustom);
-        const QString program = parts.takeFirst();
-        return {program, parts, QFileInfo(program).fileName()};
-    }
-    return {QString(), {}, QStringLiteral("Local Terminal")};
-#endif
-}
 
 QString loadIconThemePreference()
 {
@@ -578,6 +552,16 @@ YAML::Node sessionToYaml(const SessionDefinition &session)
         xdmcpOptionsToYaml(session.xdmcp, xdmcp);
         node["xdmcp"] = xdmcp;
     }
+    if (!session.local.isEmpty()) {
+        YAML::Node local(YAML::NodeType::Map);
+        localSessionOptionsToYaml(session.local, local);
+        node["local"] = local;
+    }
+    if (!session.automation.isEmpty()) {
+        YAML::Node automation(YAML::NodeType::Map);
+        automationToYaml(session.automation, automation);
+        node["automation"] = automation;
+    }
     if (session.protocol == QStringLiteral("Serial")) {
         YAML::Node serial(YAML::NodeType::Map);
         serialOptionsToYaml(session.serial, serial);
@@ -770,6 +754,14 @@ YAML::Node folderToYaml(const QTreeWidgetItem *folder,
         node["jump_host"] = jumpHost.toStdString();
     if (const auto proxy = folder->data(0, FolderProxyRole).toString(); !proxy.isEmpty())
         node["proxy"] = proxy.toStdString();
+    if (const auto kerberos = folder->data(0, FolderKerberosRole); kerberos.isValid())
+        node["kerberos"] = kerberos.toInt() == 1;
+    if (const auto automation = automationFromText(folder->data(0, FolderAutomationRole).toString());
+        !automation.isEmpty()) {
+        YAML::Node value(YAML::NodeType::Map);
+        automationToYaml(automation, value);
+        node["automation"] = value;
+    }
     YAML::Node sessionNodes(YAML::NodeType::Sequence);
     YAML::Node folderNodes(YAML::NodeType::Sequence);
     for (int index = 0; index < folder->childCount(); ++index) {
@@ -1471,6 +1463,28 @@ MainWindow::MainWindow(QWidget *parent)
     m_sftpStack->addWidget(m_sftpPlaceholder);
     // "Files": SFTP, SCP or FTP; the panel's header says which.
     m_leftTabs->addTab(m_sftpStack, QStringLiteral("Files"));
+    m_commandsPanel = new CommandsPanel([this] { return savedScriptNames(); }, m_leftTabs);
+    m_commandsPanel->setSnippets(m_snippets);
+    connect(m_commandsPanel, &CommandsPanel::sendRequested, this, &MainWindow::sendSnippet);
+    connect(m_commandsPanel, &CommandsPanel::snippetsEdited, this, &MainWindow::setSnippets);
+    m_leftTabs->addTab(m_commandsPanel, QStringLiteral("Commands"));
+    m_scriptsPanel = new ScriptsPanel(m_leftTabs);
+    connect(m_scriptsPanel, &ScriptsPanel::runRequested, this, [this](const QString &name) {
+        if (auto *page = activeTerminal(m_sessionTabs->currentWidget()))
+            runSavedScriptInTab(page, name);
+        else
+            statusBar()->showMessage(QStringLiteral("Open an SSH tab (or a local terminal) first."), 5000);
+    });
+    connect(m_scriptsPanel, &ScriptsPanel::runOnHostsRequested, this, [this](const QString &name) {
+        auto *item = selectedItem();
+        showRunCommand(item && isFolder(item) ? item : nullptr, scriptMarker(name));
+    });
+    connect(m_scriptsPanel, &ScriptsPanel::editRequested, this, [this](const QString &name) { showScripts(name); });
+    connect(m_scriptsPanel, &ScriptsPanel::newRequested, this, [this] {
+        showScripts();
+        m_scriptsWindow->newScript();
+    });
+    m_leftTabs->addTab(m_scriptsPanel, QStringLiteral("Scripts"));
 
     m_sessionTabs = new QTabWidget(splitter);
     m_sessionTabs->setTabsClosable(true);
@@ -1625,13 +1639,11 @@ void MainWindow::createMenus()
     bindShortcut(localTerminalAction, QStringLiteral("new_local_terminal"));
     connect(localTerminalAction, &QAction::triggered, this, &MainWindow::openLocalTerminal);
     disableLocalTerminalWhereUnsupported(localTerminalAction);
-#ifdef Q_OS_WIN
-    // Through UAC, in a tab like any other (see openLocalTerminalAsAdministrator()).
+    // Windows: through UAC; Linux: sudo or pkexec (see administratorTerminal()).
     auto *administratorAction = fileMenu->addAction(QStringLiteral("New Local Terminal (Administrator)"));
     administratorAction->setIcon(style()->standardIcon(QStyle::SP_VistaShield));
-    connect(administratorAction, &QAction::triggered, this, &MainWindow::openLocalTerminalAsAdministrator);
+    connect(administratorAction, &QAction::triggered, this, [this] { openLocalTerminalAsAdministrator(); });
     disableLocalTerminalWhereUnsupported(administratorAction);
-#endif
     auto *newSessionAction = fileMenu->addAction(QStringLiteral("New Session…"));
     setThemedIcon(newSessionAction, QStringLiteral("document-new"), QStyle::SP_FileIcon);
     bindShortcut(newSessionAction, QStringLiteral("new_session"));
@@ -1698,8 +1710,11 @@ void MainWindow::createMenus()
         }
         if (!m_snippets.isEmpty())
             snippetsMenu->addSeparator();
-        snippetsMenu->addAction(QStringLiteral("Edit Snippets…"), this,
-                                [this] { showPreferences(QStringLiteral("snippets")); });
+        snippetsMenu->addAction(QStringLiteral("Edit Commands…"), this, [this] {
+            m_leftTabs->show();
+            m_leftTabs->setTabVisible(m_leftTabs->indexOf(m_commandsPanel), true);
+            m_leftTabs->setCurrentWidget(m_commandsPanel);
+        });
     });
     sessionsMenu->addSeparator();
     auto *importAction = sessionsMenu->addAction(QStringLiteral("Import from YAML…"));
@@ -1760,6 +1775,28 @@ void MainWindow::createMenus()
     setThemedIcon(m_broadcastAction, QStringLiteral("network-transmit"), QStyle::SP_ArrowRight);
     bindShortcut(m_broadcastAction, QStringLiteral("broadcast"));
     connect(m_broadcastAction, &QAction::toggled, this, &MainWindow::setBroadcast);
+    viewMenu->addSeparator();
+    // The side panel's optional tabs (Sessions always shows).
+    const auto panel = loadCommandsPreferences();
+    for (const auto &[label, page, shown] : {std::tuple{QStringLiteral("Files Tab"), static_cast<QWidget *>(m_sftpStack), panel.showFiles},
+                                             std::tuple{QStringLiteral("Commands Tab"), static_cast<QWidget *>(m_commandsPanel), panel.showCommands},
+                                             std::tuple{QStringLiteral("Scripts Tab"), static_cast<QWidget *>(m_scriptsPanel), panel.showScripts}}) {
+        auto *action = viewMenu->addAction(label);
+        action->setCheckable(true);
+        action->setChecked(shown);
+        m_leftTabs->setTabVisible(m_leftTabs->indexOf(page), shown);
+        connect(action, &QAction::toggled, this, [this, page](bool on) {
+            m_leftTabs->setTabVisible(m_leftTabs->indexOf(page), on);
+            auto preferences = loadCommandsPreferences();
+            if (page == m_sftpStack)
+                preferences.showFiles = on;
+            else if (page == m_commandsPanel)
+                preferences.showCommands = on;
+            else
+                preferences.showScripts = on;
+            saveCommandsPreferences(preferences);
+        });
+    }
     auto *desktopFullScreen = viewMenu->addAction(QStringLiteral("Remote Desktop Full Screen"));
     desktopFullScreen->setShortcut(QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_Return));
     desktopFullScreen->setToolTip(QStringLiteral("Shows the current remote desktop tab on the whole "
@@ -1857,6 +1894,14 @@ void MainWindow::createMenus()
         auto *item = selectedItem();
         showRunCommand(item && isFolder(item) ? item : nullptr);
     });
+    auto *scriptsTool = toolsMenu->addAction(QStringLiteral("Scripts…"));
+    scriptsTool->setToolTip(QStringLiteral("Saved scripts to run in a tab or on many hosts"));
+    setThemedIcon(scriptsTool, QStringLiteral("text-x-script"), QStyle::SP_FileIcon);
+    connect(scriptsTool, &QAction::triggered, this, [this] { showScripts(); });
+    auto *kubeTool = toolsMenu->addAction(QStringLiteral("Kubernetes Credentials…"));
+    kubeTool->setToolTip(QStringLiteral("Saved kubeconfigs for Container (Kubernetes) sessions"));
+    setThemedIcon(kubeTool, QStringLiteral("dialog-password"), QStyle::SP_DialogApplyButton);
+    connect(kubeTool, &QAction::triggered, this, [this] { showKubeCredentials(this); });
     auto *keyManager = toolsMenu->addAction(QStringLiteral("SSH Keys…"));
     setThemedIcon(keyManager, QStringLiteral("dialog-password"), QStyle::SP_DialogApplyButton);
     connect(keyManager, &QAction::triggered, this, &MainWindow::showKeyManager);
@@ -2324,7 +2369,9 @@ bool MainWindow::appendSessionYaml(const YAML::Node &roots, QTreeWidgetItem *par
             node["name"].as<std::string>(""))).trimmed();
         const auto protocol = QString::fromStdString(value["protocol"].as<std::string>(""));
         const auto host = QString::fromStdString(value["host"].as<std::string>(""));
-        if (name.isEmpty() || protocol.isEmpty() || host.isEmpty()) {
+        // Earlier names (Docker, Kubernetes) are today's container types.
+        if (name.isEmpty() || protocol.isEmpty()
+            || (host.isEmpty() && protocolNeedsHost(currentProtocolName(protocol)))) {
             if (error) *error = QStringLiteral("Every session needs a name, protocol, and host.");
             return false;
         }
@@ -2413,7 +2460,8 @@ bool MainWindow::appendCompactSessionYaml(const YAML::Node &folders, QTreeWidget
             const auto protocol = QString::fromStdString(session["protocol"].as<std::string>(""));
             const auto host = QString::fromStdString(session["host"].as<std::string>(""));
             const auto port = session["port"].as<int>(0);
-            if (sessionName.isEmpty() || protocol.isEmpty() || host.isEmpty()
+            if (sessionName.isEmpty() || protocol.isEmpty()
+                || (host.isEmpty() && protocolNeedsHost(currentProtocolName(protocol)))
                 || port < 0 || port > 65535) {
                 if (error) *error = QStringLiteral("Every session needs a name, protocol, host, and valid port.");
                 return false;
@@ -2489,6 +2537,14 @@ bool MainWindow::appendCompactSessionYaml(const YAML::Node &folders, QTreeWidget
             session.ftp = ftpOptionsFromYaml(value["ftp"]);
             session.rsh = rshOptionsFromYaml(value["rsh"]);
             session.xdmcp = xdmcpOptionsFromYaml(value["xdmcp"]);
+            session.automation = automationFromYaml(value["automation"]);
+            session.local = localSessionOptionsFromYaml(value["local"]);
+            session.protocol = currentProtocolName(session.protocol);
+            // Before the administrator switch, its own session type.
+            if (session.protocol == QStringLiteral("Local (Administrator)")) {
+                session.protocol = QStringLiteral("Local");
+                session.local.administrator = true;
+            }
             session.jumpHost = QString::fromStdString(value["jump_host"].as<std::string>(""));
             session.forwards = portForwardsFromYaml(value["forwards"]);
             session.proxy = QString::fromStdString(value["proxy"].as<std::string>(""));
@@ -2513,6 +2569,10 @@ bool MainWindow::appendCompactSessionYaml(const YAML::Node &folders, QTreeWidget
                         QString::fromStdString(node["jump_host"].as<std::string>("")));
         folder->setData(0, FolderProxyRole,
                         QString::fromStdString(node["proxy"].as<std::string>("")));
+        if (node["kerberos"] && node["kerberos"].IsScalar())
+            folder->setData(0, FolderKerberosRole, node["kerberos"].as<bool>(false) ? 1 : 0);
+        folder->setData(0, FolderAutomationRole,
+                        automationToText(automationFromYaml(node["automation"])));
         addSessions(node["sessions"], folder);
         const auto children = node["folder"];
         if (children) {
@@ -2828,6 +2888,34 @@ void MainWindow::editFolderSettings(QTreeWidgetItem *folder)
     auto *proxy = new ProxyEditor(folder->data(0, FolderProxyRole).toString(), QString(),
                                   ProxySettings::label(inheritedProxy(folder->parent())), tabs);
     tabs->addTab(proxy, QStringLiteral("Proxy"));
+    auto *kerberosPage = new QWidget(tabs);
+    auto *kerberosForm = new QFormLayout(kerberosPage);
+    auto *kerberos = new QComboBox(kerberosPage);
+    kerberos->addItem(QStringLiteral("Inherit (%1)").arg(inheritedKerberos(folder->parent())
+                                                              ? QStringLiteral("on")
+                                                              : QStringLiteral("off")),
+                      QVariant());
+    kerberos->addItem(QStringLiteral("On"), 1);
+    kerberos->addItem(QStringLiteral("Off"), 0);
+    kerberos->setCurrentIndex(qMax(0, kerberos->findData(folder->data(0, FolderKerberosRole))));
+    kerberosForm->addRow(QStringLiteral("Log on with Kerberos:"), kerberos);
+    auto *kerberosNote = new QLabel(QStringLiteral("SSH sessions in this folder use your Kerberos "
+                                                   "ticket (GSSAPI) unless they choose otherwise."),
+                                    kerberosPage);
+    kerberosNote->setWordWrap(true);
+    kerberosForm->addRow(kerberosNote);
+    kerberosForm->addRow(new AvailabilityNote(&kerberosProblem, [kerberos](bool available) {
+        kerberos->setEnabled(available || kerberos->currentData().isValid());
+    }, kerberosPage));
+    tabs->addTab(kerberosPage, QStringLiteral("Kerberos"));
+    auto *automation = new AutomationEditor(
+        automationFromText(folder->data(0, FolderAutomationRole).toString()),
+        QStringLiteral("The parent folder's (%1)").arg(inheritedAutomation(folder->parent()).mode
+                                                           == QStringLiteral("own")
+                                                       ? QStringLiteral("set")
+                                                       : QStringLiteral("none")),
+        savedScriptNames(), tabs);
+    tabs->addTab(automation, QStringLiteral("Automation"));
     layout->addWidget(tabs);
     auto *note = new QLabel(QStringLiteral("Sessions in this folder and its subfolders use these "
                                            "settings unless they choose their own."), &dialog);
@@ -2841,6 +2929,8 @@ void MainWindow::editFolderSettings(QTreeWidgetItem *folder)
         return;
     folder->setData(0, FolderJumpHostRole, jumpHost->value());
     folder->setData(0, FolderProxyRole, proxy->value());
+    folder->setData(0, FolderKerberosRole, kerberos->currentData());
+    folder->setData(0, FolderAutomationRole, automationToText(automation->value()));
     saveProxyPassword(proxy->value(), proxy->password());
     saveSessions();
     statusBar()->showMessage(QStringLiteral("Saved folder settings: %1").arg(folder->text(0)), 3000);
@@ -2974,6 +3064,7 @@ QString MainWindow::createSessionOver(QWidget *over, const QString &protocol)
     auto *portEdit = new QLineEdit(&dialog);
     portEdit->setPlaceholderText(QStringLiteral("Use protocol default"));
     auto *usernameEdit = new QLineEdit(&dialog);
+    usernameEdit->setObjectName(QStringLiteral("usernameEdit"));
     auto *passwordEdit = new QLineEdit(&dialog);
     passwordEdit->setEchoMode(QLineEdit::Password);
 
@@ -2994,6 +3085,8 @@ QString MainWindow::createSessionOver(QWidget *over, const QString &protocol)
     SerialOptionsEditor *serialEditor = nullptr;
     auto *appearanceEditor = addTerminalAppearanceGroup(form, protocolCombo, {}, {}, &sshEditor,
                                                         {}, &serialEditor);
+    auto *automationEditor = addAutomationTab(appearanceEditor, {});
+    auto *localEditor = addLocalSessionTab(protocolCombo, appearanceEditor, {}, passwordEdit, QString());
     connectHostField(protocolCombo, hostEdit, portEdit);
     // Mosh needs the mosh program on this computer.
     auto *moshNote = new AvailabilityNote(
@@ -3046,8 +3139,12 @@ QString MainWindow::createSessionOver(QWidget *over, const QString &protocol)
         session.forwards = forwardsEditor->value();
         session.ssh = sshEditor->value();
     }
-    if (isTerminalProtocol(session.protocol))
+    if (isTerminalProtocol(session.protocol)) {
         session.terminal = appearanceEditor->value();
+        session.automation = automationEditor->value();
+        if (isLocalSessionProtocol(session.protocol))
+            session.local = localEditor->value();
+    }
     if (session.protocol == QStringLiteral("Serial"))
         session.serial = serialEditor->value();
     if (session.protocol == QStringLiteral("RDP"))
@@ -3080,7 +3177,7 @@ QString MainWindow::createSessionOver(QWidget *over, const QString &protocol)
 
 void MainWindow::openLocalTerminal()
 {
-    const auto shell = localShell(m_localShell);
+    const auto shell = localShellCommand(QString());
     TerminalPage *page = shell.program.isEmpty()
                              ? new TerminalPage(effectiveTerminalAppearance(), m_sessionTabs)
                              : newLocalProgramPage(shell.program, shell.arguments, shell.label,
@@ -3090,48 +3187,261 @@ void MainWindow::openLocalTerminal()
     addSessionTab(page, shell.label, QStringLiteral("Local shell: %1").arg(shell.label));
 }
 
+// Session tree → Open a Container…: a Docker (or Kubernetes) shell on an
+// SSH server, chosen from its containers, opened once (or saved).
+void MainWindow::openContainerOn(const QString &serverId)
+{
+    const auto server = m_sessions.value(serverId);
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("Open a Container on %1").arg(server.name));
+    dialog.setMinimumWidth(480);
+    auto *layout = new QVBoxLayout(&dialog);
+    auto *kind = new QComboBox(&dialog);
+    kind->addItems({dockerProtocol(), kubernetesProtocol()});
+    auto *form = new QFormLayout;
+    form->addRow(QStringLiteral("Type:"), kind);
+    layout->addLayout(form);
+    LocalSessionOptions options;
+    options.via = serverId;
+    auto *editor = new LocalSessionEditor(
+        options, [server] { return QList<QPair<QString, QString>>{{server.id, server.name}}; },
+        [this, server](const QString &) -> std::optional<SshConnectionSettings> {
+            SshConnectionSettings settings;
+            if (!sshSettingsForSession(server, &settings) || !settings.jumps.empty())
+                return std::nullopt;
+            return settings;
+        },
+        &dialog);
+    editor->setProtocol(kind->currentText());
+    connect(kind, &QComboBox::currentTextChanged, editor, &LocalSessionEditor::setProtocol);
+    layout->addWidget(editor);
+    auto *save = new QCheckBox(QStringLiteral("Also save it as a session, next to the server"), &dialog);
+    layout->addWidget(save);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Open | QDialogButtonBox::Cancel, &dialog);
+    layout->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+    SessionDefinition session;
+    session.protocol = kind->currentText();
+    session.local = editor->value();
+    const auto target = session.protocol == dockerProtocol() ? session.local.container : session.local.pod;
+    session.name = QStringLiteral("%1 on %2").arg(target.isEmpty() ? session.protocol : target, server.name);
+    if (save->isChecked()) {
+        session.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        QTreeWidgetItem *folder = nullptr;
+        for (QTreeWidgetItemIterator it(m_sessionTree); *it && !folder; ++it) {
+            if ((*it)->data(0, SessionIdRole).toString() == serverId && !isQuickItem(*it))
+                folder = (*it)->parent();
+        }
+        addSession(session, folder);
+        saveSessions();
+    } else {
+        session.id = QStringLiteral("container-") + QUuid::createUuid().toString(QUuid::WithoutBraces);
+    }
+    openSession(session);
+}
+
+// The terminal of a Local (also as administrator), WSL, Docker or
+// Kubernetes session; nullptr when it cannot open (the reason has been shown).
+TerminalPage *MainWindow::openLocalSession(const SessionDefinition &session)
+{
+    const auto appearance = effectiveTerminalAppearance().overriddenBy(session.terminal);
+    const auto &options = session.local;
+    const auto refuse = [this, &session](const QString &why) {
+        QMessageBox::information(this, session.name, why);
+        return nullptr;
+    };
+    TerminalPage *terminal = nullptr;
+    if (session.protocol == QStringLiteral("Local") && options.administrator) {
+        QString label;
+        terminal = administratorTerminal(options, appearance, &label);
+        if (!terminal)
+            return nullptr;
+        connectTerminalPage(terminal);
+        applyTabSettings(terminal, session.name);
+        applySessionAutomation(terminal, session);
+        return terminal;
+    }
+    const bool viaSsh = (session.protocol == dockerProtocol() || session.protocol == kubernetesProtocol())
+                        && runsOverSsh(options);
+    if (const auto problem = localSessionProblem(session.protocol, options.engine); !problem.isEmpty() && !viaSsh)
+        return refuse(problem);
+    if (session.protocol == QStringLiteral("Local")) {
+        auto shell = localShellCommand(options.localShell, options.program);
+        if (shell.program.isEmpty() && !options.localShell.isEmpty())
+            return refuse(QStringLiteral("%1 is not installed on this computer; choose another shell "
+                                         "on the session's Connection tab.").arg(shell.label));
+#ifndef Q_OS_WIN
+        // The start folder: through a shell that changes there first.
+        if (!options.folder.isEmpty()) {
+            const auto program = shell.program.isEmpty() ? qEnvironmentVariable("SHELL", QStringLiteral("/bin/sh"))
+                                                         : shell.program;
+            QStringList command{program};
+            command += shell.arguments;
+            for (auto &part : command)
+                part = QLatin1Char('\'') + part.replace(QLatin1Char('\''), QStringLiteral("'\\''")) + QLatin1Char('\'');
+            shell.arguments = {QStringLiteral("-c"),
+                               QStringLiteral("cd '%1' 2>/dev/null; exec %2")
+                                   .arg(QString(options.folder).replace(QLatin1Char('\''), QStringLiteral("'\\''")),
+                                        command.join(QLatin1Char(' ')))};
+            shell.program = QStringLiteral("/bin/sh");
+        }
+#endif
+        terminal = shell.program.isEmpty()
+                       ? new TerminalPage(appearance, m_sessionTabs)
+                       : newLocalProgramPage(shell.program, shell.arguments, shell.label, appearance, options.folder);
+    } else if (session.protocol == QStringLiteral("WSL")) {
+        const auto command = wslCommand(options);
+        terminal = newLocalProgramPage(command.program, command.arguments, QStringLiteral("WSL"), appearance);
+    } else {
+        const auto preferences = loadContainerPreferences();
+        const bool docker = session.protocol == dockerProtocol();
+        if (docker ? options.container.isEmpty() : options.pod.isEmpty())
+            return refuse(docker ? QStringLiteral("Choose the container on the session's Connection tab.")
+                                 : QStringLiteral("Choose the pod on the session's Connection tab."));
+        QString secret;
+        if (!docker && options.kubeAuth == QStringLiteral("saved")) {
+            secret = kubeCredentialContents(options.kubeCredential);
+            if (secret.isEmpty())
+                return refuse(QStringLiteral("The Kubernetes credential \"%1\" could not be read (deleted, or the "
+                                             "vault is locked).").arg(options.kubeCredential));
+        } else if (!docker && options.kubeAuth == QStringLiteral("token")) {
+            if (m_vault.needsUnlock(session.id) && !ensureVaultUnlocked())
+                return nullptr;
+            secret = m_vault.passwordForSession(session.id);
+            if (secret.isEmpty())
+                return refuse(QStringLiteral("The session has no token: type it as the session's password."));
+        }
+        const auto command = docker ? dockerCommand(options, preferences) : kubernetesCommand(options, preferences, secret);
+        secret.fill(QChar(0));
+        // kubectl reads the written kubeconfig when it starts.
+        if (!command.temporaryFile.isEmpty())
+            QTimer::singleShot(60000, this, [file = command.temporaryFile] { QFile::remove(file); });
+        if (viaSsh) {
+            const auto server = m_sessions.constFind(options.via);
+            if (server == m_sessions.cend())
+                return refuse(QStringLiteral("The SSH server this session runs on was deleted; choose another."));
+            SshConnectionSettings settings;
+            if (!sshSettingsForSession(*server, &settings))
+                return nullptr;
+            settings.remoteCommand = command.remoteCommand;
+            terminal = new TerminalPage(settings, appearance, m_sessionTabs);
+            settings.password.fill(QChar(0));
+        } else {
+            terminal = newLocalProgramPage(command.program, command.arguments, session.protocol, appearance);
+        }
+    }
+    // Saved scripts are sent into the container's shell (see runSavedScriptInTab).
+    if (session.protocol == dockerProtocol() || session.protocol == kubernetesProtocol())
+        terminal->setProperty("container", true);
+    connectTerminalPage(terminal);
+    applyTabSettings(terminal, session.name);
+    applySessionAutomation(terminal, session);
+    return terminal;
+}
+
+void MainWindow::openLocalProgram(const QString &program, const QStringList &arguments,
+                                  const QString &label)
+{
+    auto *page = newLocalProgramPage(program, arguments, label, effectiveTerminalAppearance());
+    connectTerminalPage(page);
+    applyTabSettings(page, QStringLiteral("local"));
+    addSessionTab(page, label, QStringLiteral("%1 %2").arg(program, arguments.join(QLatin1Char(' '))));
+}
+
 // A local program in a terminal tab: a PTY on Linux, a pseudo console on
 // Windows.
 TerminalPage *MainWindow::newLocalProgramPage(const QString &program, const QStringList &arguments,
                                               const QString &label,
-                                              const TerminalAppearance &appearance)
+                                              const TerminalAppearance &appearance,
+                                              const QString &folder)
 {
 #ifdef Q_OS_WIN
-    return new TerminalPage(new ConPtyConnection(program, arguments, label, QDir::homePath()),
+    return new TerminalPage(new ConPtyConnection(program, arguments, label,
+                                                 folder.isEmpty() ? QDir::homePath() : folder),
                             appearance, m_sessionTabs);
 #else
     Q_UNUSED(label);
+    Q_UNUSED(folder); // Linux: the caller starts the program in the folder.
     return new TerminalPage(program, arguments, appearance, m_sessionTabs);
 #endif
 }
 
-// File → New Local Terminal (Administrator), Windows only: through Windows
-// sudo when it is on in inline mode (and allowed), otherwise through the
-// elevated helper (ElevatedConsoleConnection).
+// File → New Local Terminal (Administrator): the default shell as
+// administrator, in a tab like any other.
 void MainWindow::openLocalTerminalAsAdministrator()
 {
-#ifdef Q_OS_WIN
-    if (m_localShell.windowsShell == QStringLiteral("wsl")) {
-        QMessageBox::information(this, QStringLiteral("Administrator Terminal"),
-                                 QStringLiteral("WSL does not run as a Windows administrator; use "
-                                                "sudo inside Linux instead."));
+    QString label;
+    auto *page = administratorTerminal({}, effectiveTerminalAppearance(), &label);
+    if (!page)
         return;
-    }
-    const auto shell = localShell(m_localShell);
-    const QString label = QStringLiteral("Administrator: %1").arg(shell.label);
-    StreamConnection *connection = nullptr;
-    if (m_localShell.useSudo && windowsSudoInlineEnabled())
-        connection = new ConPtyConnection(windowsSudoPath(), QStringList{shell.program} + shell.arguments,
-                                          label, QDir::homePath());
-    else
-        connection = new ElevatedConsoleConnection(shell.program, shell.arguments, label,
-                                                   QDir::homePath());
-    auto *page = new TerminalPage(connection, effectiveTerminalAppearance(), m_sessionTabs);
     connectTerminalPage(page);
     applyTabSettings(page, QStringLiteral("local-administrator"));
-    addSessionTab(page, label, QStringLiteral("Local shell as administrator: %1").arg(shell.label));
+    addSessionTab(page, label, label);
     if (const int index = m_sessionTabs->indexOf(page); index >= 0)
         m_sessionTabs->setTabIcon(index, style()->standardIcon(QStyle::SP_VistaShield));
+}
+
+// Windows: through Windows sudo when it is on in inline mode (and chosen),
+// otherwise through the elevated helper (ElevatedConsoleConnection), after
+// UAC. Linux: through sudo (in the terminal) or pkexec (a system window).
+// nullptr when it cannot start (the reason has been shown).
+TerminalPage *MainWindow::administratorTerminal(const LocalSessionOptions &options,
+                                                const TerminalAppearance &appearance, QString *label)
+{
+    const auto shell = localShellCommand(options.localShell, options.program);
+#ifdef Q_OS_WIN
+    if (shell.program.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("Administrator Terminal"),
+                                 QStringLiteral("%1 is not installed on this computer.").arg(shell.label));
+        return nullptr;
+    }
+    *label = QStringLiteral("Administrator: %1").arg(shell.label);
+    const QString start = options.folder.isEmpty() ? QDir::homePath() : options.folder;
+    const auto method = options.elevation.isEmpty()
+                            ? (m_localShell.useSudo ? QStringLiteral("sudo") : QStringLiteral("helper"))
+                            : options.elevation;
+    StreamConnection *connection = nullptr;
+    if (method == QStringLiteral("sudo") && windowsSudoInlineEnabled())
+        connection = new ConPtyConnection(windowsSudoPath(), QStringList{shell.program} + shell.arguments,
+                                          *label, start);
+    else
+        connection = new ElevatedConsoleConnection(shell.program, shell.arguments, *label, start);
+    return new TerminalPage(connection, appearance, m_sessionTabs);
+#else
+    const auto method = options.elevation.isEmpty() ? m_localShell.linuxElevation : options.elevation;
+    const auto elevator = QStandardPaths::findExecutable(method);
+    if (elevator.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("Administrator Terminal"),
+                                 QStringLiteral("%1 is not installed on this computer; choose the other way "
+                                                "on the session's Connection tab, or in Preferences → "
+                                                "Terminal → Administrator.").arg(method));
+        return nullptr;
+    }
+    *label = QStringLiteral("root: %1").arg(shell.program.isEmpty() ? QStringLiteral("shell") : shell.label);
+    const auto quote = [](QString text) {
+        return QLatin1Char('\'') + text.replace(QLatin1Char('\''), QStringLiteral("'\\''")) + QLatin1Char('\'');
+    };
+    QStringList arguments;
+    if (shell.program.isEmpty() && options.folder.isEmpty() && method == QStringLiteral("sudo")) {
+        arguments << QStringLiteral("-i"); // root's login shell
+    } else {
+        // pkexec needs a full path; the login shell is $SHELL.
+        const auto program = shell.program.isEmpty() ? qEnvironmentVariable("SHELL", QStringLiteral("/bin/sh"))
+                                                     : shell.program;
+        if (options.folder.isEmpty()) {
+            arguments << program << shell.arguments;
+        } else {
+            QStringList command{quote(program)};
+            for (const auto &argument : shell.arguments)
+                command << quote(argument);
+            arguments << QStringLiteral("/bin/sh") << QStringLiteral("-c")
+                      << QStringLiteral("cd %1 2>/dev/null; exec %2").arg(quote(options.folder), command.join(QLatin1Char(' ')));
+        }
+    }
+    return newLocalProgramPage(elevator, arguments, *label, appearance);
 #endif
 }
 
@@ -3184,6 +3494,7 @@ void MainWindow::editSelectedSession()
     auto *portEdit = new QLineEdit(original.port == 0 ? QString() : QString::number(original.port),
                                    &dialog);
     auto *usernameEdit = new QLineEdit(original.username, &dialog);
+    usernameEdit->setObjectName(QStringLiteral("usernameEdit"));
     auto *passwordEdit = new QLineEdit(&dialog);
     passwordEdit->setEchoMode(QLineEdit::Password);
     passwordEdit->setPlaceholderText(QStringLiteral("Leave blank to keep the stored password"));
@@ -3201,6 +3512,8 @@ void MainWindow::editSelectedSession()
     auto *appearanceEditor = addTerminalAppearanceGroup(form, protocolCombo, original.terminal,
                                                         original.ssh, &sshEditor, original.serial,
                                                         &serialEditor);
+    auto *automationEditor = addAutomationTab(appearanceEditor, original.automation);
+    auto *localEditor = addLocalSessionTab(protocolCombo, appearanceEditor, original.local, passwordEdit, original.id);
     connectHostField(protocolCombo, hostEdit, portEdit);
     // Mosh needs the mosh program on this computer.
     auto *moshNote = new AvailabilityNote(
@@ -3251,6 +3564,9 @@ void MainWindow::editSelectedSession()
     saveProxyPassword(updated.proxy, proxyEditor->password());
     updated.forwards = isSshProtocol(updated.protocol) ? forwardsEditor->value()
                                                       : QList<PortForward>();
+    updated.local = isLocalSessionProtocol(updated.protocol) ? localEditor->value() : LocalSessionOptions();
+    updated.automation = isTerminalProtocol(updated.protocol) ? automationEditor->value()
+                                                              : AutomationOptions();
     updated.terminal = isTerminalProtocol(updated.protocol) ? appearanceEditor->value()
                                                            : TerminalAppearance();
     updated.serial = updated.protocol == QStringLiteral("Serial") ? serialEditor->value()
@@ -3451,6 +3767,20 @@ void MainWindow::showTreeContextMenu(const QPoint &position)
         menu.addAction(QStringLiteral("Run Command on Hosts…"), this, [this, clickedItem] {
             showRunCommand(clickedItem);
         });
+        if (loadScriptPreferences().enabled) {
+            auto *scripts = menu.addMenu(QStringLiteral("Run Script on Hosts"));
+            const auto saved = loadSavedScripts();
+            for (const auto &script : saved)
+                scripts->addAction(script.group.isEmpty() ? script.name
+                                                          : QStringLiteral("%1 › %2").arg(script.group, script.name),
+                                   this, [this, clickedItem, name = script.name] {
+                                       showRunCommand(clickedItem, scriptMarker(name));
+                                   });
+            if (saved.isEmpty())
+                scripts->addAction(QStringLiteral("(none yet)"))->setEnabled(false);
+            scripts->addSeparator();
+            scripts->addAction(QStringLiteral("Edit Scripts…"), this, [this] { showScripts(); });
+        }
         addRename();
         auto *remove = menu.addAction(QStringLiteral("Delete Folder…"), this,
                                       &MainWindow::deleteSelectedItem);
@@ -3462,6 +3792,10 @@ void MainWindow::showTreeContextMenu(const QPoint &position)
         menu.addAction(QStringLiteral("Duplicate"), this, [this, clickedItem] {
             duplicateSession(clickedItem);
         });
+        const auto clickedId = clickedItem->data(0, SessionIdRole).toString();
+        if (m_sessions.value(clickedId).protocol.compare(QStringLiteral("SSH"), Qt::CaseInsensitive) == 0
+            && (loadContainerPreferences().docker.enabled || loadContainerPreferences().kubernetes.enabled))
+            menu.addAction(QStringLiteral("Open a Container…"), this, [this, clickedId] { openContainerOn(clickedId); });
         const QString pinId = clickedItem->data(0, SessionIdRole).toString();
         menu.addAction(m_sessions.value(pinId).pinned ? QStringLiteral("Unpin") : QStringLiteral("Pin"),
                        this, [this, pinId] {
@@ -3665,7 +3999,7 @@ void MainWindow::openSession(const SessionDefinition &session)
 
     QWidget *page = nullptr;
     if (session.protocol.compare(QStringLiteral("SSH"), Qt::CaseInsensitive) == 0) {
-        auto settings = sshSettingsFor(session.host, session.port, session.username, session.ssh);
+        auto settings = sshSettingsFor(session.host, session.port, session.username, sessionSshOptions(session));
         // A locked vault must be unlocked before a session opens (when its
         // password is kept there); a wrong master password or cancelling the
         // prompt does not open the session.
@@ -3686,6 +4020,7 @@ void MainWindow::openSession(const SessionDefinition &session)
             jump.password.fill(QChar(0));
         connectTerminalPage(terminal);
         applyTabSettings(terminal, session.name);
+        applySessionAutomation(terminal, session);
         page = terminal;
     } else if (session.protocol.compare(QStringLiteral("RDP"), Qt::CaseInsensitive) == 0) {
         RdpConnectionSettings settings;
@@ -3761,7 +4096,7 @@ void MainWindow::openSession(const SessionDefinition &session)
     } else if (session.protocol.compare(QStringLiteral("SFTP"), Qt::CaseInsensitive) == 0
                || session.protocol.compare(QStringLiteral("SCP"), Qt::CaseInsensitive) == 0) {
         // A file session: SSH without a terminal, the file browser in the tab.
-        auto settings = sshSettingsFor(session.host, session.port, session.username, session.ssh);
+        auto settings = sshSettingsFor(session.host, session.port, session.username, sessionSshOptions(session));
         if (m_vault.needsUnlock(session.id) && !ensureVaultUnlocked()) {
             statusBar()->showMessage(
                 QStringLiteral("Session not opened: the credential vault is locked"), 5000);
@@ -3845,6 +4180,7 @@ void MainWindow::openSession(const SessionDefinition &session)
             connection, effectiveTerminalAppearance().overriddenBy(session.terminal), m_sessionTabs);
         connectTerminalPage(terminal);
         applyTabSettings(terminal, session.name);
+        applySessionAutomation(terminal, session);
         page = terminal;
     } else if (session.protocol.compare(QStringLiteral("Mosh"), Qt::CaseInsensitive) == 0) {
         // The system's mosh client, which logs in with the system's ssh (on
@@ -3867,6 +4203,12 @@ void MainWindow::openSession(const SessionDefinition &session)
                                              effectiveTerminalAppearance().overriddenBy(session.terminal));
         connectTerminalPage(terminal);
         applyTabSettings(terminal, session.name);
+        applySessionAutomation(terminal, session);
+        page = terminal;
+    } else if (isLocalSessionProtocol(session.protocol)) {
+        auto *terminal = openLocalSession(session);
+        if (!terminal)
+            return;
         page = terminal;
     } else {
         page = new SessionPage(session, m_sessionTabs);
@@ -3943,7 +4285,12 @@ TerminalAppearanceEditor *MainWindow::addTerminalAppearanceGroup(
     // new protocol's tabs, which happens later in the same change.
     connect(protocolCombo, &QComboBox::currentTextChanged, tabs,
             [tabs, updateVisible] { QTimer::singleShot(0, tabs, updateVisible); });
-    QTimer::singleShot(0, tabs, updateVisible);
+    // Once every tab is in (Connection tabs of other protocols go first,
+    // later), the window opens on the protocol's first tab, its own settings.
+    QTimer::singleShot(0, tabs, [tabs, updateVisible] {
+        tabs->setProperty("shownProtocol", QString());
+        updateVisible();
+    });
     updateVisible();
     return editor;
 }
@@ -3968,7 +4315,12 @@ void MainWindow::connectHostField(QComboBox *protocolCombo, QLineEdit *hostEdit,
         if (form) {
             if (auto *label = qobject_cast<QLabel *>(form->labelForField(hostEdit)))
                 label->setText(serial ? QStringLiteral("Port:") : QStringLiteral("Host:"));
-            form->setRowVisible(portEdit, !serial);
+            // Local and container sessions have no host (their Connection tab says where).
+            const bool hostless = !protocolNeedsHost(protocolCombo->currentText());
+            form->setRowVisible(hostEdit, !hostless);
+            form->setRowVisible(portEdit, !serial && !hostless);
+            if (auto *username = hostEdit->window()->findChild<QLineEdit *>(QStringLiteral("usernameEdit")))
+                form->setRowVisible(username, !hostless);
         }
     };
     connect(protocolCombo, &QComboBox::currentTextChanged, hostEdit, update);
@@ -4045,7 +4397,7 @@ bool MainWindow::resolveJumpHosts(const SessionDefinition &session,
                 return false;
             }
             visited.insert(id);
-            hop = sshSettingsFor(gateway->host, gateway->port, gateway->username, gateway->ssh);
+            hop = sshSettingsFor(gateway->host, gateway->port, gateway->username, sessionSshOptions(*gateway));
             hop.password = m_vault.passwordForSession(id);
             next = effectiveJumpHost(*gateway);
         } else {
@@ -4095,6 +4447,16 @@ SshConnectionSettings MainWindow::sshSettingsFor(const QString &host, quint16 po
     // A passphrase remembered by the key manager; otherwise it is asked for.
     if (!ssh.identityFile.isEmpty())
         settings.keyPassphrase = m_vault.passwordForSession(keyPassphraseVaultKey(ssh.identityFile));
+    settings.useCertificates = ssh.useCertificates;
+    settings.certificateFile = options.certificateFile.isEmpty()
+                                       || options.certificateFile == QStringLiteral("none")
+                                       || QDir::isAbsolutePath(options.certificateFile)
+                                   ? options.certificateFile
+                                   : portableFilePath(options.certificateFile);
+    settings.securityKeys = ssh.securityKeys;
+    settings.kerberos = ssh.kerberos;
+    settings.kerberosDelegate = ssh.kerberosDelegate;
+    settings.kerberosServer = options.kerberosServer;
     settings.terminalType = ssh.terminalType;
     if (!options.backspace.isEmpty())
         settings.backspace = options.backspace;
@@ -4199,6 +4561,88 @@ JumpHostEditor *MainWindow::addJumpHostTab(QComboBox *protocolCombo,
 
 // A tab shown with whichever protocol is selected in the session window,
 // moved between the SSH, RDP and VNC settings' tabs.
+// The session window's Automation tab, after Appearance, for terminal
+// protocols.
+AutomationEditor *MainWindow::addAutomationTab(TerminalAppearanceEditor *sshTabsMember,
+                                               const AutomationOptions &value)
+{
+    QTabWidget *tabs = nullptr;
+    for (auto *widget = sshTabsMember->parentWidget(); widget && !tabs; widget = widget->parentWidget())
+        tabs = qobject_cast<QTabWidget *>(widget);
+    auto *editor = new AutomationEditor(value, QStringLiteral("The folder's"), savedScriptNames(), tabs);
+    editor->setProperty(ProtocolsProperty, sshTabsMember->property(ProtocolsProperty));
+    tabs->insertTab(tabs->indexOf(sshTabsMember) + 1, editor, QStringLiteral("Automation"));
+    return editor;
+}
+
+// The Connection tab of Local, WSL, Docker and Kubernetes sessions, first.
+LocalSessionEditor *MainWindow::addLocalSessionTab(QComboBox *protocolCombo, TerminalAppearanceEditor *sshTabsMember,
+                                                   const LocalSessionOptions &value, QLineEdit *passwordEdit,
+                                                   const QString &sessionId)
+{
+    QTabWidget *tabs = nullptr;
+    for (auto *widget = sshTabsMember->parentWidget(); widget && !tabs; widget = widget->parentWidget())
+        tabs = qobject_cast<QTabWidget *>(widget);
+    auto *editor = new LocalSessionEditor(
+        value,
+        [this] {
+            QList<QPair<QString, QString>> choices;
+            for (const auto &session : std::as_const(m_sessions)) {
+                if (session.protocol.compare(QStringLiteral("SSH"), Qt::CaseInsensitive) == 0)
+                    choices.append({session.id, session.name});
+            }
+            std::sort(choices.begin(), choices.end(), [](const auto &a, const auto &b) {
+                return a.second.localeAwareCompare(b.second) < 0;
+            });
+            return choices;
+        },
+        [this](const QString &id) -> std::optional<SshConnectionSettings> {
+            const auto session = m_sessions.constFind(id);
+            if (session == m_sessions.cend())
+                return std::nullopt;
+            SshConnectionSettings settings;
+            if (!sshSettingsForSession(*session, &settings) || !settings.jumps.empty())
+                return std::nullopt;
+            return settings;
+        },
+        tabs);
+    editor->setProperty(ProtocolsProperty, localSessionProtocols());
+    editor->setCredentialNames(&kubeCredentialNames);
+    // For listing: the token typed above (or the stored one), or a saved
+    // credential's kubeconfig.
+    editor->setSecretSource([this, passwordEdit = QPointer<QLineEdit>(passwordEdit), sessionId](const LocalSessionOptions &options) {
+        if (options.kubeAuth == QStringLiteral("saved"))
+            return kubeCredentialContents(options.kubeCredential);
+        if (passwordEdit && !passwordEdit->text().isEmpty())
+            return passwordEdit->text();
+        if (sessionId.isEmpty() || (m_vault.needsUnlock(sessionId) && !ensureVaultUnlocked()))
+            return QString();
+        return m_vault.passwordForSession(sessionId);
+    });
+    connect(editor, &LocalSessionEditor::manageCredentialsRequested, editor, [this, editor] {
+        showKubeCredentials(editor->window());
+        editor->setCredentialNames(&kubeCredentialNames);
+    });
+    tabs->insertTab(0, editor, QStringLiteral("Connection"));
+    connect(protocolCombo, &QComboBox::currentTextChanged, editor, &LocalSessionEditor::setProtocol);
+    editor->setProtocol(protocolCombo->currentText());
+    return editor;
+}
+
+// A saved SSH session's connection, with its jump hosts, proxy and password
+// (the vault is unlocked if needed); false when it cannot be made.
+bool MainWindow::sshSettingsForSession(const SessionDefinition &session, SshConnectionSettings *settings)
+{
+    *settings = sshSettingsFor(session.host, session.port, session.username, sessionSshOptions(session));
+    if (m_vault.needsUnlock(session.id) && !ensureVaultUnlocked())
+        return false;
+    if (!resolveJumpHosts(session, &settings->jumps))
+        return false;
+    applyProxy(session, settings, settings->jumps);
+    settings->password = m_vault.passwordForSession(session.id.section(QLatin1Char('#'), 0, 0));
+    return true;
+}
+
 void MainWindow::addProtocolTab(QComboBox *protocolCombo, TerminalAppearanceEditor *sshTabsMember,
                                 QWidget *rdpEditor, QWidget *vncEditor, QWidget *page,
                                 const QString &title)
@@ -4266,6 +4710,74 @@ QString MainWindow::inheritedProxy(const QTreeWidgetItem *folder) const
             return proxy;
     }
     return loadSshPreferences().proxy;
+}
+
+bool MainWindow::inheritedKerberos(const QTreeWidgetItem *folder) const
+{
+    for (; folder; folder = folder->parent()) {
+        if (const auto own = folder->data(0, FolderKerberosRole); own.isValid())
+            return own.toInt() == 1;
+    }
+    return loadSshPreferences().kerberos;
+}
+
+// The first login script and triggers set on a folder or its parents; mode
+// "own" when one was found.
+AutomationOptions MainWindow::inheritedAutomation(const QTreeWidgetItem *folder) const
+{
+    for (; folder; folder = folder->parent()) {
+        const auto own = automationFromText(folder->data(0, FolderAutomationRole).toString());
+        if (!own.mode.isEmpty())
+            return own;
+    }
+    return {};
+}
+
+// Starts a terminal tab's login script and triggers: the session's own, or
+// its folders', with the Preferences' global triggers first.
+void MainWindow::applySessionAutomation(TerminalPage *page, const SessionDefinition &session)
+{
+    auto options = session.automation;
+    if (options.mode.isEmpty()) {
+        const QTreeWidgetItem *item = nullptr;
+        for (QTreeWidgetItemIterator it(m_sessionTree); *it && !item; ++it) {
+            if ((*it)->data(0, SessionIdRole).toString() == session.id.section(QLatin1Char('#'), 0, 0)
+                && !isQuickItem(*it))
+                item = *it;
+        }
+        options = inheritedAutomation(item ? item->parent() : nullptr);
+    }
+    const auto preferences = loadAutomationPreferences();
+    const bool own = options.mode == QStringLiteral("own");
+    auto triggers = preferences.globalTriggers;
+    if (own)
+        triggers += options.triggers;
+    QHash<QString, QString> values{{QStringLiteral("user"), session.username},
+                                   {QStringLiteral("host"), session.host}};
+    const auto script = own ? options.loginScript : QList<LoginStep>();
+    if (!script.isEmpty())
+        values.insert(QStringLiteral("password"),
+                      m_vault.passwordForSession(session.id.section(QLatin1Char('#'), 0, 0)));
+    page->setAutomation(script, triggers, preferences, values);
+    if (own && !options.afterLoginScript.isEmpty()) {
+        const auto name = options.afterLoginScript;
+        connect(page, &TerminalPage::loggedOn, this, [this, page, name] { runSavedScriptInTab(page, name); });
+    }
+}
+
+// A session's SSH options with what its folders set (Kerberos) filled in.
+SshOptions MainWindow::sessionSshOptions(const SessionDefinition &session) const
+{
+    auto options = session.ssh;
+    if (options.kerberos < 0) {
+        for (QTreeWidgetItemIterator it(m_sessionTree); *it; ++it) {
+            if ((*it)->data(0, SessionIdRole).toString() == session.id && !isQuickItem(*it)) {
+                options.kerberos = inheritedKerberos((*it)->parent()) ? 1 : 0;
+                break;
+            }
+        }
+    }
+    return options;
 }
 
 ProxySettings MainWindow::effectiveProxy(const SessionDefinition &session) const
@@ -4340,7 +4852,7 @@ bool MainWindow::resolveTunnelServer(const QString &server, SshConnectionSetting
                                                 "session. Choose another in the tunnel's settings."));
             return false;
         }
-        *settings = sshSettingsFor(session->host, session->port, session->username, session->ssh);
+        *settings = sshSettingsFor(session->host, session->port, session->username, sessionSshOptions(*session));
         if (!resolveJumpHosts(*session, &settings->jumps))
             return false;
         applyProxy(*session, settings, settings->jumps);
@@ -4386,7 +4898,7 @@ bool MainWindow::resolveTunnel(const SavedTunnel &tunnel, SshConnectionSettings 
                                      QStringLiteral("A jump host of the tunnel is no longer a saved session."));
                 return false;
             }
-            jump = sshSettingsFor(gateway->host, gateway->port, gateway->username, gateway->ssh);
+            jump = sshSettingsFor(gateway->host, gateway->port, gateway->username, sessionSshOptions(*gateway));
             jump.password = m_vault.passwordForSession(id);
         } else {
             QString user, host;
@@ -4492,7 +5004,7 @@ void MainWindow::showNetworkTools()
     m_networkTools->activateWindow();
 }
 
-void MainWindow::showRunCommand(QTreeWidgetItem *folder)
+void MainWindow::showRunCommand(QTreeWidgetItem *folder, const QString &command)
 {
     QStringList ids;
     if (folder) {
@@ -4532,7 +5044,163 @@ void MainWindow::showRunCommand(QTreeWidgetItem *folder)
     auto *window = new RunCommandWindow(
         name, hosts, skipped, [this](const QStringList &chosen) { return resolveCommandHosts(chosen); },
         [this] { return m_snippets; }, this);
+    if (!command.isEmpty())
+        window->setCommand(command);
     window->show();
+}
+
+void MainWindow::showScripts(const QString &select)
+{
+    if (!m_scriptsWindow) {
+        m_scriptsWindow = new ScriptsWindow(this);
+        m_scriptsWindow->setAttribute(Qt::WA_DeleteOnClose);
+        connect(m_scriptsWindow, &ScriptsWindow::runInTabRequested, this, [this](const QString &name) {
+            auto *page = activeTerminal(m_sessionTabs->currentWidget());
+            if (!page) {
+                QMessageBox::information(m_scriptsWindow, QStringLiteral("Scripts"),
+                                         QStringLiteral("Open an SSH tab (or a local terminal) first."));
+                return;
+            }
+            runSavedScriptInTab(page, name);
+        });
+        connect(m_scriptsWindow, &ScriptsWindow::scriptsChanged, m_scriptsPanel, &ScriptsPanel::refresh);
+        connect(m_scriptsWindow, &ScriptsWindow::runOnHostsRequested, this, [this](const QString &name) {
+            auto *item = selectedItem();
+            showRunCommand(item && isFolder(item) ? item : nullptr, scriptMarker(name));
+        });
+    }
+    if (!select.isEmpty())
+        m_scriptsWindow->select(select);
+    m_scriptsWindow->show();
+    m_scriptsWindow->raise();
+    m_scriptsWindow->activateWindow();
+}
+
+void MainWindow::showKubeCredentials(QWidget *over)
+{
+    KubeCredentialsWindow window(
+        [this](const QString &key) {
+            if (m_vault.needsUnlock(key) && !ensureVaultUnlocked())
+                return QString();
+            return m_vault.passwordForSession(key);
+        },
+        [this](const QString &key, const QString &value, QString *error) {
+            if (m_vault.needsVault(key) && !ensureVaultUnlocked())
+                return false;
+            return m_vault.setPassword(key, value, error);
+        },
+        [this](const QString &key) { m_vault.removePassword(key); }, over);
+    window.exec();
+}
+
+QString MainWindow::kubeCredentialContents(const QString &name)
+{
+    for (const auto &credential : loadKubeCredentials()) {
+        if (credential.name == name)
+            return KubeCredentialsWindow::contents(credential, [this](const QString &key) {
+                if (m_vault.needsUnlock(key) && !ensureVaultUnlocked())
+                    return QString();
+                return m_vault.passwordForSession(key);
+            });
+    }
+    return {};
+}
+
+QStringList MainWindow::savedScriptNames() const
+{
+    QStringList names;
+    for (const auto &script : loadSavedScripts())
+        names << script.name;
+    return names;
+}
+
+void MainWindow::addScriptMenu(QMenu *menu, TerminalPage *page)
+{
+    if (!loadScriptPreferences().enabled)
+        return;
+    auto *scripts = menu->addMenu(QStringLiteral("Run Script"));
+    const auto saved = loadSavedScripts();
+    for (const auto &script : saved) {
+        auto *action = scripts->addAction(script.group.isEmpty() ? script.name
+                                                                 : QStringLiteral("%1 › %2").arg(script.group, script.name),
+                                          this, [this, page, name = script.name] {
+                                              if (auto *target = page ? page : activeTerminal(m_sessionTabs->currentWidget()))
+                                                  runSavedScriptInTab(target, name);
+                                          });
+        action->setToolTip(script.description);
+    }
+    if (saved.isEmpty())
+        scripts->addAction(QStringLiteral("(none yet)"))->setEnabled(false);
+    scripts->addSeparator();
+    scripts->addAction(QStringLiteral("Edit Scripts…"), this, [this] { showScripts(); });
+}
+
+// Runs a saved script in a tab: over SSH it is stored on the server through a
+// channel of its own and run by one short line typed into the shell; in a
+// local terminal it is stored here. Its output shows in the terminal.
+void MainWindow::runSavedScriptInTab(TerminalPage *page, const QString &name)
+{
+    if (!loadScriptPreferences().enabled)
+        return;
+    const auto script = findSavedScript(name);
+    if (!script) {
+        statusBar()->showMessage(QStringLiteral("There is no saved script called %1.").arg(name), 5000);
+        return;
+    }
+    QHash<QString, QString> values{{QStringLiteral("user"), page->sshSettings().username},
+                                   {QStringLiteral("host"), page->sshSettings().host}};
+    if (!askScriptParameters(*script, &values, this))
+        return;
+    const auto body = filledScript(*script, values);
+    // In a container the file would be outside it: the script goes into the
+    // container's shell as one here-document instead (typed, so it shows).
+    if (page->property("container").toBool()) {
+        page->sendInput((typedScript(*script, body) + QLatin1Char('\r')).toUtf8());
+        return;
+    }
+    if (page->isLocal()) {
+#ifdef Q_OS_WIN
+        statusBar()->showMessage(QStringLiteral("Saved scripts run on SSH servers; local terminals on "
+                                                "Windows are not supported yet."), 6000);
+#else
+        QTemporaryFile file(QDir::temp().filePath(QStringLiteral("opsremote-XXXXXX")));
+        file.setAutoRemove(false);
+        if (!file.open() || file.write(body.toUtf8() + '\n') < 0) {
+            statusBar()->showMessage(QStringLiteral("Could not store the script."), 5000);
+            return;
+        }
+        file.close();
+        page->sendInput((runStoredScriptLine(*script, file.fileName()) + QLatin1Char('\r')).toUtf8());
+#endif
+        return;
+    }
+    auto *ssh = page->sshSession();
+    if (!ssh || !page->isConnected()) {
+        statusBar()->showMessage(QStringLiteral("Scripts run in connected SSH tabs (and local terminals)."), 6000);
+        return;
+    }
+    const int id = ssh->runCommand(storeScriptCommand(body), false, 30, 4096);
+    auto *connection = new QMetaObject::Connection;
+    *connection = connect(ssh, &SshSession::commandFinished, page,
+                          [this, page, id, connection, script = *script](int finished, int exitStatus,
+                                                                         const QByteArray &output, bool,
+                                                                         const QString &error, int) {
+                              if (finished != id)
+                                  return;
+                              disconnect(*connection);
+                              delete connection;
+                              const auto marker = QByteArrayLiteral("OPSREMOTE-SCRIPT:");
+                              const int at = output.indexOf(marker);
+                              if (exitStatus != 0 || at < 0) {
+                                  statusBar()->showMessage(
+                                      QStringLiteral("Could not send the script %1 to the server%2.")
+                                          .arg(script.name, error.isEmpty() ? QString() : QStringLiteral(": ") + error),
+                                      8000);
+                                  return;
+                              }
+                              const auto path = QString::fromUtf8(output.mid(at + marker.size())).section(QLatin1Char('\n'), 0, 0).trimmed();
+                              page->sendInput((runStoredScriptLine(script, path) + QLatin1Char('\r')).toUtf8());
+                          });
 }
 
 QList<RunCommandWindow::Resolved> MainWindow::resolveCommandHosts(const QStringList &ids)
@@ -4548,7 +5216,7 @@ QList<RunCommandWindow::Resolved> MainWindow::resolveCommandHosts(const QStringL
             results.append(result);
             continue;
         }
-        result.settings = sshSettingsFor(session->host, session->port, session->username, session->ssh);
+        result.settings = sshSettingsFor(session->host, session->port, session->username, sessionSshOptions(*session));
         if (!resolveJumpHosts(*session, &result.settings.jumps)) {
             result.problem = QStringLiteral("Its jump host cannot be used.");
             results.append(result);
@@ -5069,6 +5737,15 @@ void MainWindow::connectTerminalPage(TerminalPage *page)
     };
     connect(page, &TerminalPage::activity, this, mark);
     connect(page, &TerminalPage::bell, this, mark);
+    connect(page, &TerminalPage::automationMark, this, mark);
+    connect(page, &TerminalPage::scriptMenuRequested, this, [this, page](QMenu *menu) { addScriptMenu(menu, page); });
+    connect(page, &TerminalPage::automationNotice, this, [this, page, mark](const QString &message) {
+        const int index = tabIndexOf(page);
+        const auto tab = index >= 0 ? m_sessionTabs->tabText(index) : QString();
+        statusBar()->showMessage(tab.isEmpty() ? message : QStringLiteral("%1: %2").arg(tab, message), 15000);
+        mark();
+        QApplication::alert(this);
+    });
     connect(page, &TerminalPage::userInput, this, [this, page](const QByteArray &data) {
         if (m_broadcasting)
             return;
@@ -5448,6 +6125,48 @@ void MainWindow::setSnippets(const QList<Snippet> &snippets)
 {
     m_snippets = snippets;
     saveSnippets(snippets);
+    if (m_commandsPanel)
+        m_commandsPanel->setSnippets(snippets);
+}
+
+void MainWindow::sendSnippet(const Snippet &snippet, bool toMultiExec, bool withoutEnter)
+{
+    QList<TerminalPage *> targets;
+    if (toMultiExec) {
+        for (auto *page : allTerminalPages()) {
+            if (page->isMultiExecTarget())
+                targets << page;
+        }
+        if (targets.isEmpty()) {
+            statusBar()->showMessage(QStringLiteral("No terminals are chosen for multi-exec (Tabs → Multi-exec…)."), 5000);
+            return;
+        }
+    } else if (auto *page = activeTerminal(m_sessionTabs->currentWidget())) {
+        targets << page;
+    } else {
+        statusBar()->showMessage(QStringLiteral("Open a terminal tab first."), 4000);
+        return;
+    }
+    if (const auto script = scriptFromMarker(snippet.text); !script.isEmpty()) {
+        for (auto *page : targets)
+            runSavedScriptInTab(page, script);
+        return;
+    }
+    if (snippet.text.contains(QLatin1Char('\n')) && loadCommandsPreferences().confirmMultiline
+        && QMessageBox::question(this, QStringLiteral("Commands"),
+                                 QStringLiteral("Send these %1 lines to %2 terminal(s)?\n\n%3")
+                                     .arg(snippet.text.count(QLatin1Char('\n')) + 1)
+                                     .arg(targets.size())
+                                     .arg(snippet.text.left(400)))
+               != QMessageBox::Yes)
+        return;
+    const auto text = snippet.text + (snippet.pressEnter && !withoutEnter ? QStringLiteral("\r") : QString());
+    for (auto *page : targets) {
+        if (targets.size() == 1)
+            page->typeText(text);
+        else
+            page->sendInput(QString(text).replace(QLatin1Char('\n'), QLatin1Char('\r')).toUtf8());
+    }
 }
 
 void MainWindow::setBroadcast(bool on)
@@ -6003,10 +6722,10 @@ std::optional<QString> MainWindow::choosePaneSession(const QString &currentId)
     if (LocalTerminalSupported)
         add(QStringLiteral("Local terminal"), QStringLiteral("local"), terminalIcon);
 #ifdef Q_OS_WIN
-    if (ConPtyConnection::isAvailable() && m_localShell.windowsShell != QStringLiteral("wsl"))
+    if (ConPtyConnection::isAvailable())
+#endif
         add(QStringLiteral("Local terminal as administrator"), QStringLiteral("local-administrator"),
             style()->standardIcon(QStyle::SP_VistaShield));
-#endif
     // Saved terminal sessions, in the list's order, with their folder.
     for (QTreeWidgetItemIterator it(m_sessionTree); *it; ++it) {
         if ((*it)->data(0, ItemKindRole).toString() != QStringLiteral("session"))
@@ -6312,7 +7031,7 @@ void MainWindow::validateSessionDialog(QDialog *dialog, QFormLayout *form, QDial
             }
         };
         require(nameEdit, !nameEdit->text().trimmed().isEmpty(), QStringLiteral("Name"));
-        require(hostEdit, !hostEdit->text().trimmed().isEmpty(),
+        require(hostEdit, !hostEdit->text().trimmed().isEmpty() || !protocolNeedsHost(protocolCombo->currentText()),
                 serial ? QStringLiteral("Port (the serial port)") : QStringLiteral("Host"));
         QString text;
         if (!missing.isEmpty())

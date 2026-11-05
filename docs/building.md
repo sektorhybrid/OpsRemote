@@ -4,7 +4,7 @@ Back to the [README](../README.md). Where settings are kept: [Portable data](por
 
 ## Build and run on Linux
 
-Requirements: CMake 3.21+, a C++20 compiler, Qt 6 Widgets (6.4+), yaml-cpp, libsodium, and libssh 0.10+ (Arch: `libssh`; Debian/Ubuntu: `libssh-dev`; Fedora: `libssh-devel`).
+Requirements: CMake 3.21+, a C++20 compiler, Qt 6 Widgets (6.4+), yaml-cpp, libsodium, and libssh 0.12+ (Arch: `libssh`; Debian/Ubuntu: `libssh-dev`; Fedora: `libssh-devel`).
 
 The helper script builds the portable package `dist/OpsRemote/`, with Linux and Windows in one folder and one shared `settings/` folder (Docker is required), then launches it:
 
@@ -19,7 +19,7 @@ The commands say what is built and what is run:
 | `package-linux` | Builds the Linux program and updates the package (keeps the last Windows build) |
 | `package-windows` | Builds the Windows program and updates the package (keeps the last Linux build) |
 | `package-all` | Builds both programs and updates the package |
-| `package-zip` | Packs the current package as `dist/OpsRemote-<arch>-<systems>-<version>.tar.gz` (for example `OpsRemote-x86_64-linux-windows-0.5.0.tar.gz`) and `.zip` for handing out (the version is in `CMakeLists.txt`), without your settings and backups |
+| `package-zip` | Packs the current package as `dist/OpsRemote-<arch>-<systems>-<version>.tar.gz` (for example `OpsRemote-x86_64-linux-windows-0.6.0.tar.gz`) and `.zip` for handing out (the version is in `CMakeLists.txt`), without your settings and backups |
 | `run-package` | Starts the package's Linux version |
 | `package-linux-and-run` | `package-linux`, then `run-package` (the default) |
 | `package-all-and-run` | `package-all`, then `run-package` |

@@ -4,13 +4,16 @@
 #include "sshoptions.h"
 #include "availabilitynote.h"
 #include "localresources.h"
+#include "sshauth.h"
 
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDir>
+#include <QFileInfo>
 #include <QFileDialog>
 #include <QFormLayout>
 #include <QHBoxLayout>
+#include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
 #include <QSpinBox>
@@ -37,6 +40,10 @@ SshPreferences SshOptions::appliedTo(SshPreferences preferences) const
         preferences.fileTransfer = fileTransfer;
     if (!identityFile.isEmpty())
         preferences.identityFile = identityFile;
+    if (kerberos >= 0)
+        preferences.kerberos = kerberos == 1;
+    if (kerberosDelegate >= 0)
+        preferences.kerberosDelegate = kerberosDelegate == 1;
     if (autoReconnect >= 0)
         preferences.autoReconnect = autoReconnect == 1;
     if (reconnectDelay > 0)
@@ -74,6 +81,10 @@ SshOptions sshOptionsFromYaml(const YAML::Node &node)
         flag("follow_terminal_folder", options.followTerminalFolder);
         flag("forward_x11", options.forwardX11);
         text("identity_file", options.identityFile);
+        text("certificate_file", options.certificateFile);
+        flag("kerberos", options.kerberos);
+        flag("kerberos_delegate", options.kerberosDelegate);
+        text("kerberos_server", options.kerberosServer);
         text("file_transfer", options.fileTransfer);
         if (!options.fileTransfer.isEmpty()
             && options.fileTransfer != QStringLiteral("auto") && options.fileTransfer != QStringLiteral("sftp")
@@ -112,6 +123,14 @@ void sshOptionsToYaml(const SshOptions &options, YAML::Node &node)
         node["file_transfer"] = options.fileTransfer.toStdString();
     if (!options.identityFile.isEmpty())
         node["identity_file"] = options.identityFile.toStdString();
+    if (!options.certificateFile.isEmpty())
+        node["certificate_file"] = options.certificateFile.toStdString();
+    if (options.kerberos >= 0)
+        node["kerberos"] = options.kerberos == 1;
+    if (options.kerberosDelegate >= 0)
+        node["kerberos_delegate"] = options.kerberosDelegate == 1;
+    if (!options.kerberosServer.isEmpty())
+        node["kerberos_server"] = options.kerberosServer.toStdString();
     if (options.autoReconnect >= 0)
         node["auto_reconnect"] = options.autoReconnect == 1;
     if (options.reconnectDelay > 0)
@@ -220,6 +239,64 @@ SshOptionsEditor::SshOptionsEditor(const SshOptions &value, const SshPreferences
     identityRow->setContentsMargins(0, 0, 0, 0);
     identityRow->addWidget(m_identityFile, 1);
     identityRow->addWidget(browse);
+
+    m_certificate = new QComboBox(this);
+    m_certificate->addItem(defaults.useCertificates
+                               ? QStringLiteral("Default (the key's own, key-cert.pub)")
+                               : QStringLiteral("Default (none: certificates are off)"),
+                           QString());
+    m_certificate->addItem(QStringLiteral("None"), QStringLiteral("none"));
+    if (!value.certificateFile.isEmpty() && value.certificateFile != QStringLiteral("none"))
+        m_certificate->addItem(QDir::toNativeSeparators(value.certificateFile), value.certificateFile);
+    m_certificate->setCurrentIndex(qMax(0, m_certificate->findData(value.certificateFile)));
+    m_certificate->setToolTip(QStringLiteral("An OpenSSH certificate signed by your organisation's "
+                                             "certificate authority, sent with the private key "
+                                             "above."));
+    auto *browseCertificate = new QPushButton(QStringLiteral("Browse…"), this);
+    connect(browseCertificate, &QPushButton::clicked, this, [this] {
+        const auto file = QFileDialog::getOpenFileName(
+            this, QStringLiteral("Certificate"), QDir::homePath() + QStringLiteral("/.ssh"),
+            QStringLiteral("Certificates (*-cert.pub);;All files (*)"));
+        if (file.isEmpty())
+            return;
+        int index = m_certificate->findData(file);
+        if (index < 0) {
+            m_certificate->addItem(QDir::toNativeSeparators(file), file);
+            index = m_certificate->count() - 1;
+        }
+        m_certificate->setCurrentIndex(index);
+    });
+    auto *certificateRow = new QHBoxLayout;
+    certificateRow->setContentsMargins(0, 0, 0, 0);
+    certificateRow->addWidget(m_certificate, 1);
+    certificateRow->addWidget(browseCertificate);
+    m_certificateInfo = new QLabel(this);
+    m_certificateInfo->setWordWrap(true);
+    m_certificateInfo->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    connect(m_certificate, &QComboBox::currentIndexChanged, this, &SshOptionsEditor::showCertificate);
+    connect(m_identityFile, &QLineEdit::textChanged, this, &SshOptionsEditor::showCertificate);
+
+    m_kerberos = makeSwitch(QStringLiteral("Log on with Kerberos (GSSAPI)"),
+                            QStringLiteral("Uses your Kerberos ticket (from logging on to the "
+                                           "domain, or kinit) instead of a password. Tried before "
+                                           "keys and passwords."),
+                            value.kerberos, defaults.kerberos);
+    m_kerberosDelegate = makeSwitch(QStringLiteral("Pass the ticket on to the server (ssh -K)"),
+                                    QStringLiteral("The server can use your ticket to reach "
+                                                   "other servers and file shares. Only for "
+                                                   "servers you trust."),
+                                    value.kerberosDelegate, defaults.kerberosDelegate);
+    m_kerberosServer = new QLineEdit(value.kerberosServer, this);
+    m_kerberosServer->setPlaceholderText(QStringLiteral("Default (the host name)"));
+    m_kerberosServer->setToolTip(QStringLiteral("The server's name in Kerberos (host/NAME), when "
+                                                "it differs from the host you connect to, e.g. "
+                                                "behind an alias or an IP address."));
+    connect(m_kerberos, &QCheckBox::toggled, this, [this](bool on) {
+        m_kerberosDelegate->setEnabled(on);
+        m_kerberosServer->setEnabled(on);
+    });
+    m_kerberosDelegate->setEnabled(m_kerberos->isChecked());
+    m_kerberosServer->setEnabled(m_kerberos->isChecked());
     m_autoReconnect = makeSwitch(QStringLiteral("Reconnect automatically if the network drops"),
                                  QString(), value.autoReconnect, defaults.autoReconnect);
     m_reconnectDelay = makeNumber(value.reconnectDelay, 1, 600,
@@ -258,11 +335,43 @@ SshOptionsEditor::SshOptionsEditor(const SshOptions &value, const SshPreferences
         m_forwardX11->setEnabled(available || m_forwardX11->isChecked());
     }, this));
     form->addRow(QStringLiteral("Private key:"), identityRow);
+    form->addRow(QStringLiteral("Certificate:"), certificateRow);
+    form->addRow(QString(), m_certificateInfo);
+    form->addRow(QString(), m_kerberos);
+    form->addRow(QString(), new AvailabilityNote(&kerberosProblem, [this](bool available) {
+        m_kerberos->setEnabled(available || m_kerberos->isChecked());
+    }, this));
+    form->addRow(QString(), m_kerberosDelegate);
+    form->addRow(QStringLiteral("Kerberos server name:"), m_kerberosServer);
     form->addRow(QString(), m_autoReconnect);
     form->addRow(QStringLiteral("Reconnect after:"), m_reconnectDelay);
     form->addRow(QStringLiteral("Reconnect attempts:"), m_reconnectAttempts);
     form->addRow(QStringLiteral("Terminal type:"), m_terminalType);
     form->addRow(QStringLiteral("Backspace sends:"), m_backspace);
+    showCertificate();
+}
+
+// Who the chosen certificate is for and until when; hidden without one.
+void SshOptionsEditor::showCertificate()
+{
+    auto path = m_certificate->currentData().toString();
+    if (path.isEmpty() && m_defaults.useCertificates) {
+        auto identity = m_identityFile->text().trimmed();
+        if (identity.isEmpty())
+            identity = m_defaults.identityFile;
+        path = defaultCertificateFor(identity);
+        if (!QFileInfo::exists(path))
+            path.clear();
+    }
+    if (path.isEmpty() || path == QStringLiteral("none")) {
+        m_certificateInfo->hide();
+        return;
+    }
+    const auto info = readSshCertificate(path);
+    const bool bad = !info.valid || info.expired() || info.notYetValid();
+    m_certificateInfo->setText(QStringLiteral("%1: %2").arg(QFileInfo(path).fileName(), info.summary()));
+    m_certificateInfo->setStyleSheet(bad ? QStringLiteral("color: #c0392b;") : QString());
+    m_certificateInfo->show();
 }
 
 SshOptions SshOptionsEditor::value() const
@@ -287,6 +396,10 @@ SshOptions SshOptionsEditor::value() const
     options.forwardX11 = flag(m_forwardX11, m_defaults.forwardX11);
     options.autoReconnect = flag(m_autoReconnect, m_defaults.autoReconnect);
     options.identityFile = m_identityFile->text().trimmed();
+    options.certificateFile = m_certificate->currentData().toString();
+    options.kerberos = flag(m_kerberos, m_defaults.kerberos);
+    options.kerberosDelegate = flag(m_kerberosDelegate, m_defaults.kerberosDelegate);
+    options.kerberosServer = m_kerberosServer->text().trimmed();
     options.fileTransfer = m_fileTransfer->currentData().toString();
     options.backspace = m_backspace->currentData().toString();
     const int index = m_terminalType->currentIndex();

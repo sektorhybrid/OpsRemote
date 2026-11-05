@@ -278,6 +278,8 @@ void TerminalPage::createTerminal()
     // Recordings get the output of local shells here; remote output comes
     // through logOutput().
     connect(m_terminal, &QTermWidget::receivedData, this, [this](const QString &text) {
+        if (m_automation && !m_ssh && !m_stream && m_sshSettings.host.isEmpty())
+            m_automation->feed(text.toUtf8());
         if (m_recorder && !m_ssh && !m_stream && m_sshSettings.host.isEmpty()) {
             m_recorder->output(text.toUtf8());
             checkRecording();
@@ -393,6 +395,13 @@ void TerminalPage::showTerminalMenu(const QPoint &position, bool always)
             });
         }
     }
+    emit scriptMenuRequested(&menu);
+    if (m_automation && m_automation->hasScript()) {
+        auto *loginMenu = menu.addMenu(QStringLiteral("Login Script"));
+        loginMenu->addAction(QStringLiteral("Run Again"), this, &TerminalPage::runLoginScript);
+        loginMenu->addAction(QStringLiteral("Stop"), this, &TerminalPage::stopLoginScript)
+            ->setEnabled(m_automation->isRunning());
+    }
     auto *saveAction = menu.addAction(QStringLiteral("Save Terminal Output…"));
     connect(saveAction, &QAction::triggered, this, &TerminalPage::saveTerminalOutput);
     auto *recordAction = menu.addAction(isRecording() ? QStringLiteral("Stop Recording")
@@ -500,9 +509,12 @@ void TerminalPage::startSsh()
         m_wasConnected = true;
         m_reconnectAttempts = 0;
         emit statusMessage(QStringLiteral("Connected to %1").arg(m_sshSettings.host));
+        runLoginScript();
     });
     connect(m_ssh, &SshSession::dataReceived, this, [this](const QByteArray &data) {
         logOutput(data);
+        if (m_automation)
+            m_automation->feed(data);
         if (m_sshSettings.followTerminalFolder)
             followReportedFolder(data);
         const auto shown = highlight(data);
@@ -809,9 +821,12 @@ TerminalPage::TerminalPage(StreamConnection *connection, const TerminalAppearanc
         m_endedBar->hide();
         m_stream->resize(m_terminal->screenColumnsCount(), m_terminal->screenLinesCount());
         emit statusMessage(QStringLiteral("Connected: %1").arg(m_stream->description()));
+        runLoginScript();
     });
     connect(m_stream, &StreamConnection::dataReceived, this, [this](const QByteArray &data) {
         logOutput(data);
+        if (m_automation)
+            m_automation->feed(data);
         const auto shown = highlight(data);
         m_terminal->receiveData(shown.constData(), static_cast<int>(shown.size()));
         if (m_behaviour.markActivity)
@@ -1103,6 +1118,39 @@ void TerminalPage::sendInput(const QByteArray &data)
         m_ssh->write(data);
     else if (!m_stream && !m_ssh && m_sshSettings.host.isEmpty())
         m_terminal->sendText(QString::fromUtf8(data));
+}
+
+void TerminalPage::setAutomation(const QList<LoginStep> &script, const QList<OutputTrigger> &triggers,
+                                 const AutomationPreferences &preferences,
+                                 const QHash<QString, QString> &values)
+{
+    if (!m_automation) {
+        m_automation = new AutomationRunner([this](const QByteArray &data) { sendInput(data); }, this);
+        connect(m_automation, &AutomationRunner::status, this, &TerminalPage::statusMessage);
+        connect(m_automation, &AutomationRunner::notify, this, &TerminalPage::automationNotice);
+        connect(m_automation, &AutomationRunner::markTab, this, &TerminalPage::automationMark);
+        connect(m_automation, &AutomationRunner::beep, this, [] { QApplication::beep(); });
+        connect(m_automation, &AutomationRunner::scriptFinished, this, &TerminalPage::loggedOn);
+    }
+    m_automation->configure(script, triggers, preferences, values);
+    // A local program is running already.
+    if (!m_ssh && !m_stream && m_sshSettings.host.isEmpty())
+        QTimer::singleShot(0, this, &TerminalPage::runLoginScript);
+}
+
+void TerminalPage::runLoginScript()
+{
+    if (!m_automation || !m_automation->hasScript()) {
+        emit loggedOn();
+        return;
+    }
+    m_automation->start();
+}
+
+void TerminalPage::stopLoginScript()
+{
+    if (m_automation)
+        m_automation->stop(QStringLiteral("Login script stopped."));
 }
 
 void TerminalPage::setMultiExecTarget(bool on)

@@ -4,6 +4,7 @@
 #include "stallwatch.h"
 #include "workerthreads.h"
 #include "mainwindow.h"
+#include "localsessions.h"
 #ifdef Q_OS_WIN
 #include "conpty.h"
 #endif
@@ -237,6 +238,19 @@ int main(int argc, char *argv[])
         return 0;
     }
     // For automated tests: every file operation against a server.
+    // OPSREMOTE_TEST_KUBECONFIG=token|certificate: prints the kubeconfig made
+    // for https://192.0.2.9:6443 (token "secret-token", namespace "web").
+    if (const auto kind = qEnvironmentVariable("OPSREMOTE_TEST_KUBECONFIG"); !kind.isEmpty()) {
+        LocalSessionOptions options;
+        options.kubeAuth = kind;
+        options.server = QStringLiteral("https://192.0.2.9:6443");
+        options.caFile = QStringLiteral("/tmp/ca.pem");
+        options.clientCertificate = QStringLiteral("/tmp/client.pem");
+        options.clientKey = QStringLiteral("/tmp/client-key.pem");
+        options.kubeNamespace = QStringLiteral("web");
+        std::fprintf(stdout, "%s\n", qUtf8Printable(generatedKubeconfig(options, QStringLiteral("secret-token"))));
+        return 0;
+    }
     if (const auto spec = qEnvironmentVariable("OPSREMOTE_TEST_FILES"); !spec.isEmpty())
         return runFileTransferTest(spec);
     if (const auto folder = qEnvironmentVariable("OPSREMOTE_TEST_SERVERS"); !folder.isEmpty())
@@ -366,6 +380,13 @@ int main(int argc, char *argv[])
                     window.showPreferences(page);
                 if (qEnvironmentVariableIsSet("OPSREMOTE_TEST_ADMIN"))
                     window.openLocalTerminalAsAdministrator();
+                // OPSREMOTE_TEST_SESSION_WINDOW=protocol: the New Session window
+                // for that protocol (picture it with OPSREMOTE_TEST_PREFERENCES=modal).
+                if (const auto protocol = qEnvironmentVariable("OPSREMOTE_TEST_SESSION_WINDOW"); !protocol.isEmpty())
+                    QTimer::singleShot(0, &window, [&window, protocol] {
+                        QMetaObject::invokeMethod(&window, "createSessionOver", Q_ARG(QWidget *, &window),
+                                                  Q_ARG(QString, protocol));
+                    });
                 if (const auto text = qEnvironmentVariable("OPSREMOTE_TEST_TYPE"); !text.isEmpty()) {
                     QTimer::singleShot(3000, &window, [&window, text] {
                         if (auto *terminal = window.findChild<TerminalPage *>())

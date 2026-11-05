@@ -8,12 +8,14 @@ Created by **Thanos Athanasopoulos** ([@sektorhybrid](https://github.com/sektorh
 
 ## Features
 
-- **One window for every connection:** SSH, SFTP/SCP, FTP/FTPS, RDP, VNC, Telnet, serial, Mosh, Rlogin/RSH and XDMCP. All open in tabs, which can be split into panes.
+- **One window for every connection:** SSH (with certificates, security keys and Kerberos), SFTP/SCP, FTP/FTPS, RDP, VNC, Telnet, serial, Mosh, Rlogin/RSH and XDMCP. All open in tabs, which can be split into panes.
 - **Sessions in folders:** each host has a live status dot, plus search, Pinned and Recent. Import from `~/.ssh/config`, PuTTY, MobaXterm, mRemoteNG and Remmina.
 - **Files pane:** browse the active SSH tab's server, drag and drop, sync folders, edit remote files, and use safe uploads.
 - **SSH tunnels:** Local, Remote, SOCKS, Reverse SOCKS, Socket and HTTP proxy forwards. Each tunnel is shown as a diagram with live state, traffic and checks. Jump hosts can be chained.
 - **Remote desktop:** dynamic resolution, high-DPI, clipboard and files, drives, sound, printers, RD Gateway and full screen.
-- **Tools:** run a command on many hosts, multi-exec and broadcast, snippets, recordings, SSH key manager, local TFTP and HTTP servers. The network tools cover ping, traceroute, port scan, iperf3 bandwidth, downloads and HTTP requests.
+- **Automation:** login scripts and triggers, saved scripts run in a tab or on many hosts, and Commands and Scripts tabs next to Sessions and Files.
+- **Local and containers:** local shells, WSL, Docker and Kubernetes shells as saved sessions, here or on an SSH server.
+- **Tools:** run a command or a saved script on many hosts, multi-exec and broadcast, recordings, SSH key and Kubernetes credential managers, local TFTP and HTTP servers. The network tools cover ping, traceroute, port scan, iperf3 bandwidth, downloads and HTTP requests.
 - **Secure passwords:** an encrypted, portable vault (Argon2id + XChaCha20-Poly1305) or the system credential store.
 - **Looks:** ready-made themes (light, dark, macOS-like WhiteSur and Mojave, Nord, Dracula and more), 89 terminal colour schemes and 15 icon themes. You can save looks of your own.
 - **Portable:** Linux and Windows in one folder, sharing the same `settings/`.
@@ -43,6 +45,7 @@ The first start of each version unpacks the program, which takes a few seconds. 
 
 | Page | What's in it |
 |---|---|
+| [What's new](docs/changes.md) | The changes of each version |
 | [Features](docs/features.md) | Every feature in detail |
 | [Portable data](docs/portable-data.md) | Where sessions, preferences, the vault and host keys are kept |
 | [Building](docs/building.md) | Building from source, the package scripts, the project layout |

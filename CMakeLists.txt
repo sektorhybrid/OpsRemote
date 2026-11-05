@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 cmake_minimum_required(VERSION 3.21)
 
-project(OpsRemote VERSION 0.5.0 LANGUAGES CXX)
+project(OpsRemote VERSION 0.6.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -27,7 +27,7 @@ if(NOT TARGET yaml-cpp::yaml-cpp AND TARGET yaml-cpp)
 endif()
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SODIUM REQUIRED IMPORTED_TARGET libsodium)
-pkg_check_modules(LIBSSH REQUIRED IMPORTED_TARGET libssh>=0.10)
+pkg_check_modules(LIBSSH REQUIRED IMPORTED_TARGET libssh>=0.12)
 # gzip and deflate bodies in the HTTP Request tool.
 pkg_check_modules(ZLIB REQUIRED IMPORTED_TARGET zlib)
 # OpenSSL itself: main() turns on its default provider first (see there).
@@ -64,6 +64,13 @@ qt_add_executable(opsremote
     src/app/vncsession.cpp
     src/app/vncsession.h
     src/app/sshoptions.cpp
+    src/app/sshauth.cpp
+    src/app/automation.cpp
+    src/app/scripts.cpp
+    src/app/sidepanels.cpp
+    src/app/kubecredentials.cpp
+    src/app/statusline.cpp
+    src/app/localsessions.cpp
     src/app/sshoptions.h
     src/app/terminalpage.cpp
     src/app/terminalpage.h

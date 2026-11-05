@@ -45,6 +45,13 @@ private:
     void buildStartupPage();
     void buildShortcutsPage();
     void buildSshPage();
+    void buildAutomationPage();
+    void buildScriptsPage();
+    void buildKeysPage();
+    void buildKerberosPage();
+    void buildDockerPage();
+    void buildKubernetesPage();
+    void buildWslPage();
     void buildRdpPage();
     void buildVncPage();
     void buildFtpPage();

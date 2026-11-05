@@ -41,6 +41,12 @@ struct FtpOptions;
 struct VncOptions;
 class PreferencesWindow;
 class QTreeWidget;
+class AutomationEditor;
+class ScriptsWindow;
+class TerminalPage;
+class CommandsPanel;
+class ScriptsPanel;
+class LocalSessionEditor;
 class LocalServersWindow;
 class QDialog;
 class QDialogButtonBox;
@@ -80,6 +86,13 @@ public:
                              QWidget *rdpEditor, QWidget *vncEditor, const QString &value,
                              const QTreeWidgetItem *folder);
     QString inheritedProxy(const QTreeWidgetItem *folder) const;
+    bool inheritedKerberos(const QTreeWidgetItem *folder) const;
+    SshOptions sessionSshOptions(const SessionDefinition &session) const;
+    AutomationOptions inheritedAutomation(const QTreeWidgetItem *folder) const;
+    void applySessionAutomation(TerminalPage *page, const SessionDefinition &session);
+    // Saved scripts (Tools → Scripts).
+    QStringList savedScriptNames() const;
+    void runSavedScriptInTab(TerminalPage *page, const QString &name);
     ProxySettings effectiveProxy(const SessionDefinition &session) const;
     void applyProxy(const SessionDefinition &session, SshConnectionSettings *server,
                     std::vector<SshConnectionSettings> &jumps) const;
@@ -98,7 +111,11 @@ public:
     void showKeyManager();
     // Run on Hosts for a folder's SSH sessions (with its subfolders), or
     // for every saved SSH session when folder is null.
-    void showRunCommand(QTreeWidgetItem *folder);
+    void showRunCommand(QTreeWidgetItem *folder, const QString &command = QString());
+    void showScripts(const QString &select = QString());
+    // A Run Script ▸ menu: run in page (or the current tab), Edit Scripts….
+    void addScriptMenu(QMenu *menu, TerminalPage *page);
+    void sendSnippet(const Snippet &snippet, bool toMultiExec, bool withoutEnter);
     void showNetworkTools();
     bool resolveJumpHosts(const SessionDefinition &session,
                           std::vector<SshConnectionSettings> *jumps);
@@ -115,6 +132,8 @@ public:
     void openInSplit(Qt::Orientation orientation, const QString &choice);
     void openLocalTerminal();
     void openLocalTerminalAsAdministrator();
+    // A local program (e.g. kinit) in a new terminal tab.
+    void openLocalProgram(const QString &program, const QStringList &arguments, const QString &label);
     void updateMultiExecIndicator();
     QString copyPasswords(bool toSystem);
     QComboBox *passwordStoreChoice(const QString &value, QWidget *parent) const;
@@ -289,7 +308,19 @@ private:
     void closePane(TerminalPage *pane);
     void chooseMultiExecTargets();
     TerminalPage *newLocalProgramPage(const QString &program, const QStringList &arguments,
-                                      const QString &label, const TerminalAppearance &appearance);
+                                      const QString &label, const TerminalAppearance &appearance,
+                                      const QString &folder = QString());
+    TerminalPage *openLocalSession(const SessionDefinition &session);
+    TerminalPage *administratorTerminal(const LocalSessionOptions &options, const TerminalAppearance &appearance,
+                                        QString *label);
+    void openContainerOn(const QString &serverId);
+    bool sshSettingsForSession(const SessionDefinition &session, SshConnectionSettings *settings);
+    // passwordEdit and sessionId: for the token of a Kubernetes session.
+    LocalSessionEditor *addLocalSessionTab(QComboBox *protocolCombo, TerminalAppearanceEditor *sshTabsMember,
+                                           const LocalSessionOptions &value, QLineEdit *passwordEdit,
+                                           const QString &sessionId);
+    void showKubeCredentials(QWidget *over);
+    QString kubeCredentialContents(const QString &name);
     void focusSessionSearch();
     QTreeWidgetItem *firstVisibleSession() const;
     void showSftpPanelForCurrentTab();
@@ -297,6 +328,8 @@ private:
     void refreshIcons();
     void applyTerminalAppearanceToTabs();
     void connectHostField(QComboBox *protocolCombo, QLineEdit *hostEdit, QLineEdit *portEdit);
+    AutomationEditor *addAutomationTab(TerminalAppearanceEditor *sshTabsMember,
+                                       const AutomationOptions &value);
     TerminalAppearanceEditor *addTerminalAppearanceGroup(QFormLayout *form, QComboBox *protocolCombo,
                                                          const TerminalAppearance &value,
                                                          const SshOptions &ssh,
@@ -373,6 +406,9 @@ private:
     bool m_filtering = false;
     QToolButton *m_multiExecIndicator = nullptr;
     LocalServersWindow *m_localServersWindow = nullptr;
+    QPointer<ScriptsWindow> m_scriptsWindow;
+    CommandsPanel *m_commandsPanel = nullptr;
+    ScriptsPanel *m_scriptsPanel = nullptr;
     // Set while Split Right / Split Down opens the new pane's terminal.
     struct PendingSplit
     {

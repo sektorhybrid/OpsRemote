@@ -10,6 +10,7 @@
 
 class QCheckBox;
 class QComboBox;
+class QLabel;
 class QLineEdit;
 class QSpinBox;
 namespace YAML { class Node; }
@@ -24,6 +25,13 @@ struct SshOptions
     int tryPublicKeys = -1;
     int forwardAgent = -1;
     QString identityFile;
+    // Empty: the key's own certificate (key-cert.pub), if any; "none": no
+    // certificate; otherwise a certificate file.
+    QString certificateFile;
+    int kerberos = -1;
+    int kerberosDelegate = -1;
+    // The server's Kerberos name when it differs from the host name.
+    QString kerberosServer;
     int autoReconnect = -1;
     int reconnectDelay = 0; // seconds
     int reconnectAttempts = -1;
@@ -60,6 +68,12 @@ private:
     QCheckBox *m_tryPublicKeys = nullptr;
     QCheckBox *m_forwardAgent = nullptr;
     QLineEdit *m_identityFile = nullptr;
+    QComboBox *m_certificate = nullptr;
+    QLabel *m_certificateInfo = nullptr;
+    QCheckBox *m_kerberos = nullptr;
+    QCheckBox *m_kerberosDelegate = nullptr;
+    QLineEdit *m_kerberosServer = nullptr;
+    void showCertificate();
     QCheckBox *m_autoReconnect = nullptr;
     QSpinBox *m_reconnectDelay = nullptr;
     QSpinBox *m_reconnectAttempts = nullptr;

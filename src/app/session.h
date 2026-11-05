@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "automation.h"
+#include "localsessions.h"
 #include "portforward.h"
 #include "rdpoptions.h"
 #include "serialoptions.h"
@@ -54,4 +56,8 @@ struct SessionDefinition
     RshOptions rsh;
     // XDMCP sessions; empty fields use the defaults.
     XdmcpOptions xdmcp;
+    // Terminal sessions: login script, triggers, and a script after logging on.
+    AutomationOptions automation;
+    // Local, Local (Administrator), WSL, Docker and Kubernetes sessions.
+    LocalSessionOptions local;
 };

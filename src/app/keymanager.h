@@ -50,6 +50,8 @@ private:
     void showSelected();
     void createKey();
     void importKey();
+    // Keys kept on a security key (resident keys, ssh-keygen -K).
+    void importFromSecurityKey();
     void deleteKey();
     // A saved session is chosen (not "New…").
     bool serverChosen() const;
@@ -64,6 +66,7 @@ private:
 
     QTreeWidget *m_list = nullptr;
     QPlainTextEdit *m_publicKey = nullptr;
+    QLabel *m_certificate = nullptr;
     QPushButton *m_copy = nullptr;
     QPushButton *m_delete = nullptr;
     QComboBox *m_server = nullptr;

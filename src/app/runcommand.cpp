@@ -70,7 +70,7 @@ RunCommandWindow::RunCommandWindow(const QString &folder, const QList<Host> &hos
         "Runs through each account's shell, as \"ssh host command\" does; several lines run one after another."));
     m_commandEdit->setFixedHeight(m_commandEdit->fontMetrics().lineSpacing() * 4 + 12);
     m_recent = new QToolButton(this);
-    m_recent->setText(QStringLiteral("Recent and Snippets"));
+    m_recent->setText(QStringLiteral("Recent, Snippets, Scripts"));
     m_recent->setPopupMode(QToolButton::InstantPopup);
     m_recent->setMenu(new QMenu(m_recent));
     connect(m_recent->menu(), &QMenu::aboutToShow, this, &RunCommandWindow::fillRecentMenu);
@@ -246,6 +246,29 @@ void RunCommandWindow::run(bool failedOnly)
         m_summary->setText(QStringLiteral("Check the hosts to run on first."));
         return;
     }
+    m_script.reset();
+    if (const auto name = scriptFromMarker(command); !name.isEmpty()) {
+        auto script = findSavedScript(name);
+        const auto preferences = loadScriptPreferences();
+        if (!preferences.enabled) {
+            m_summary->setText(QStringLiteral("Saved scripts are turned off (Preferences → Tools → Scripts)."));
+            return;
+        }
+        if (!script) {
+            m_summary->setText(QStringLiteral("There is no saved script called %1 (Tools → Scripts).").arg(name));
+            return;
+        }
+        QHash<QString, QString> values;
+        if (!askScriptParameters(*script, &values, this))
+            return;
+        if (preferences.confirmAbove > 0 && chosen.size() > preferences.confirmAbove
+            && QMessageBox::question(this, windowTitle(),
+                                     QStringLiteral("Run the script %1 on %2 hosts?").arg(name).arg(chosen.size()))
+                   != QMessageBox::Yes)
+            return;
+        m_script = *script;
+        m_scriptValues = values;
+    }
     rememberCommand(command);
     m_command = command;
     const auto resolved = m_resolver(ids);
@@ -345,7 +368,14 @@ void RunCommandWindow::connectJob(int index, quint16 viaLocalPort)
         job.state = State::Running;
         showJob(job);
         const auto preferences = loadRunCommandPreferences();
-        ssh->runCommand(m_command, m_terminal->isChecked(), m_timeout->value(), preferences.outputKb * 1024);
+        auto command = m_command;
+        if (m_script) {
+            auto values = m_scriptValues;
+            values.insert(QStringLiteral("user"), job.settings.username);
+            values.insert(QStringLiteral("host"), job.settings.host);
+            command = runScriptCommand(*m_script, filledScript(*m_script, values));
+        }
+        ssh->runCommand(command, m_terminal->isChecked(), m_timeout->value(), preferences.outputKb * 1024);
     });
     connect(ssh, &SshSession::commandFinished, this,
             [this, index, ssh](int, int exitStatus, const QByteArray &output, bool truncated,
@@ -521,6 +551,18 @@ void RunCommandWindow::fillRecentMenu()
         menu->addAction(QStringLiteral("(none: Preferences → Snippets)"))->setEnabled(false);
     for (const auto &snippet : snippets)
         menu->addAction(snippet.name, this, [use, text = snippet.text] { use(text); });
+    menu->addSection(QStringLiteral("Saved scripts"));
+    const auto scripts = loadSavedScripts();
+    if (scripts.isEmpty())
+        menu->addAction(QStringLiteral("(none: Tools → Scripts)"))->setEnabled(false);
+    for (const auto &script : scripts)
+        menu->addAction(script.group.isEmpty() ? script.name : QStringLiteral("%1 › %2").arg(script.group, script.name),
+                        this, [use, name = script.name] { use(scriptMarker(name)); });
+}
+
+void RunCommandWindow::setCommand(const QString &command)
+{
+    m_commandEdit->setPlainText(command);
 }
 
 QString RunCommandWindow::resultsText(QChar separator, bool quote) const

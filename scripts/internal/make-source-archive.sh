@@ -50,6 +50,8 @@ zstd="$(arg ZSTD_VERSION)"
 libvnc="$(arg LIBVNC_VERSION)"
 libssh="$(arg LIBSSH_VERSION)"
 utf8proc="$(arg UTF8PROC_VERSION)"
+libcbor="$(arg LIBCBOR_VERSION)"
+libfido2="$(arg LIBFIDO2_VERSION)"
 fetch "https://github.com/FreeRDP/FreeRDP/releases/download/${freerdp}/freerdp-${freerdp}.tar.gz" \
     "$(arg FREERDP_SHA256)" "freerdp-${freerdp}.tar.gz"
 fetch "https://github.com/facebook/zstd/releases/download/v${zstd}/zstd-${zstd}.tar.gz" \
@@ -60,6 +62,10 @@ fetch "https://www.libssh.org/files/${libssh%.*}/libssh-${libssh}.tar.xz" \
     "$(arg LIBSSH_SHA256)" "libssh-${libssh}.tar.xz"
 fetch "https://github.com/JuliaStrings/utf8proc/archive/refs/tags/v${utf8proc}.tar.gz" \
     "$(arg UTF8PROC_SHA256)" "utf8proc-${utf8proc}.tar.gz"
+fetch "https://github.com/PJK/libcbor/archive/refs/tags/v${libcbor}.tar.gz" \
+    "$(arg LIBCBOR_SHA256)" "libcbor-${libcbor}.tar.gz"
+fetch "https://developers.yubico.com/libfido2/Releases/libfido2-${libfido2}.tar.gz" \
+    "$(arg LIBFIDO2_SHA256)" "libfido2-${libfido2}.tar.gz"
 
 cat > "${work}/${NAME}/README.txt" <<TEXT
 OpsRemote ${VERSION}: Corresponding Source
@@ -72,7 +78,8 @@ upstream/    The source archives of the libraries built for the packages,
              exactly as downloaded by packaging/linux/Dockerfile and
              packaging/windows/Dockerfile (checksums verified):
                FreeRDP ${freerdp}, zstd ${zstd}, LibVNCServer ${libvnc},
-               libssh ${libssh} (Windows), utf8proc ${utf8proc} (Windows)
+               libssh ${libssh}, utf8proc ${utf8proc} (Windows),
+               libcbor ${libcbor} (Windows), libfido2 ${libfido2} (Windows)
 
 The other libraries in the packages come from AlmaLinux 9 (Linux) and
 Fedora's MinGW packages (Windows). Each package lists them with their exact

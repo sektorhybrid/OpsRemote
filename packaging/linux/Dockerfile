@@ -115,3 +115,28 @@ RUN dnf -y install qt6-qtsvg-devel && dnf clean all
 # Qt Serial Port for serial console sessions (a separate step, so the
 # layers above stay cached).
 RUN dnf -y install qt6-qtserialport-devel && dnf clean all
+
+# libssh 0.12 (LGPL-2.1-or-later), built here instead of AlmaLinux's 0.10, for
+# FIDO2 security keys (sk-ed25519, sk-ecdsa, through libfido2) and Kerberos
+# logons (GSSAPI, through MIT krb5). The pinned release tarball was verified
+# against the libssh release key 88A2 28D8 9B07 C2C7 7D0C 7809 03D5 DF8C FDD3 E8E7
+# when this pin was set. /usr/local comes first for the linker, pkg-config, and
+# the bundle (ld.so.conf above). WITH_SERVER stays on: without it libssh
+# 0.12.2 drops the server's GSSAPI token (message 61, shared with a server-side
+# message), so Kerberos logons never finish.
+ARG LIBSSH_VERSION=0.12.2
+ARG LIBSSH_SHA256=49560f677d96e3706a904ac2de1116e25f3680937d51e5c92198fcba4a1c1e9f
+RUN dnf -y remove libssh-devel && dnf -y install krb5-devel libfido2-devel && dnf clean all \
+    && curl -fsSLo /tmp/libssh.tar.xz \
+        "https://www.libssh.org/files/0.12/libssh-${LIBSSH_VERSION}.tar.xz" \
+    && echo "${LIBSSH_SHA256}  /tmp/libssh.tar.xz" | sha256sum -c - \
+    && mkdir /tmp/libssh && tar -C /tmp/libssh --strip-components=1 -xf /tmp/libssh.tar.xz \
+    && mkdir -p /opt/licenses/libssh && cp /tmp/libssh/COPYING /opt/licenses/libssh/ \
+    && cmake -S /tmp/libssh -B /tmp/libssh/build -G Ninja \
+        -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_INSTALL_LIBDIR=lib64 \
+        -DCMAKE_BUILD_TYPE=Release -DWITH_GSSAPI=ON -DWITH_FIDO2=ON -DWITH_EXAMPLES=OFF \
+        -DUNIT_TESTING=OFF -DCLIENT_TESTING=OFF -DWITH_SERVER=ON \
+    && cmake --build /tmp/libssh/build \
+    && cmake --install /tmp/libssh/build \
+    && ldconfig \
+    && rm -rf /tmp/libssh /tmp/libssh.tar.xz

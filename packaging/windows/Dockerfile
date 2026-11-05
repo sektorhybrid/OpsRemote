@@ -12,17 +12,52 @@ RUN dnf -y install \
         qt6-qtbase-devel qt6-qttools-devel \
     && dnf clean all
 
+# libcbor (MIT) and libfido2 (BSD-2-Clause) give libssh FIDO2 security keys
+# (sk-ed25519, sk-ecdsa): USB keys directly, and Windows Hello (webauthn.dll),
+# which needs no administrator rights. libfido2 was verified against its
+# maintainer's key 78D9 97D5 3E9C 0A2A 2053 92ED 14A1 9784 723C 9988 when
+# this pin was set; libcbor publishes no signed release files, so its pin is
+# the SHA-256 of the GitHub release archive as downloaded when it was set.
+ARG LIBCBOR_VERSION=0.13.0
+ARG LIBCBOR_SHA256=95a7f0dd333fd1dce3e4f92691ca8be38227b27887599b21cd3c4f6d6a7abb10
+ARG LIBFIDO2_VERSION=1.17.0
+ARG LIBFIDO2_SHA256=c1012c8871d71b65872fd5ff1a9d6b0838a55683a03e85ba97479ce57129c736
+RUN curl -fsSLo /tmp/libcbor.tar.gz \
+        "https://github.com/PJK/libcbor/archive/refs/tags/v${LIBCBOR_VERSION}.tar.gz" \
+    && echo "${LIBCBOR_SHA256}  /tmp/libcbor.tar.gz" | sha256sum -c - \
+    && mkdir /tmp/libcbor && tar -C /tmp/libcbor --strip-components=1 -xf /tmp/libcbor.tar.gz \
+    && mingw64-cmake -S /tmp/libcbor -B /tmp/libcbor/build -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DWITH_EXAMPLES=OFF \
+    && cmake --build /tmp/libcbor/build \
+    && cmake --install /tmp/libcbor/build \
+    && curl -fsSLo /tmp/libfido2.tar.gz \
+        "https://developers.yubico.com/libfido2/Releases/libfido2-${LIBFIDO2_VERSION}.tar.gz" \
+    && echo "${LIBFIDO2_SHA256}  /tmp/libfido2.tar.gz" | sha256sum -c - \
+    && mkdir /tmp/libfido2 && tar -C /tmp/libfido2 --strip-components=1 -xf /tmp/libfido2.tar.gz \
+    && mingw64-cmake -S /tmp/libfido2 -B /tmp/libfido2/build -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release -DBUILD_STATIC_LIBS=OFF -DBUILD_TESTS=OFF \
+        -DBUILD_EXAMPLES=OFF -DBUILD_MANPAGES=OFF -DBUILD_TOOLS=OFF -DUSE_WINHELLO=ON \
+    && cmake --build /tmp/libfido2/build \
+    && cmake --install /tmp/libfido2/build \
+    && rm -rf /tmp/libcbor /tmp/libcbor.tar.gz /tmp/libfido2 /tmp/libfido2.tar.gz
+
 # libssh is not packaged for MinGW. Build the pinned release from its
 # official tarball (signature verified against the libssh release key
-# 88A2 28D8 9B07 C2C7 7D0C 7809 03D5 DF8C FDD3 E8E7 when this pin was set).
-ARG LIBSSH_VERSION=0.11.5
-ARG LIBSSH_SHA256=6898ba9dd836d618b71dc7a4bb786a502c173cef5cafbf20fe5e0567ba4ea30c
+# 88A2 28D8 9B07 C2C7 7D0C 7809 03D5 DF8C FDD3 E8E7 when this pin was set),
+# with FIDO2. Kerberos (GSSAPI) needs MIT krb5, which has no MinGW build.
+# libfido2's MinGW build has no logging (FIDO_NO_DIAGNOSTIC), so the one call
+# that routes its debug output to libssh's trace log is left out.
+ARG LIBSSH_VERSION=0.12.2
+ARG LIBSSH_SHA256=49560f677d96e3706a904ac2de1116e25f3680937d51e5c92198fcba4a1c1e9f
 RUN curl -fsSLo /tmp/libssh.tar.xz \
-        "https://www.libssh.org/files/0.11/libssh-${LIBSSH_VERSION}.tar.xz" \
+        "https://www.libssh.org/files/0.12/libssh-${LIBSSH_VERSION}.tar.xz" \
     && echo "${LIBSSH_SHA256}  /tmp/libssh.tar.xz" | sha256sum -c - \
     && mkdir /tmp/libssh && tar -C /tmp/libssh --strip-components=1 -xf /tmp/libssh.tar.xz \
+    && sed -i 's/^\( *\)fido_set_log_handler(fido_log_handler);/\1(void)fido_log_handler;/' \
+        /tmp/libssh/src/sk_usbhid.c \
+    && grep -q '(void)fido_log_handler;' /tmp/libssh/src/sk_usbhid.c \
     && mingw64-cmake -S /tmp/libssh -B /tmp/libssh/build -G Ninja \
-        -DCMAKE_BUILD_TYPE=Release -DWITH_GSSAPI=OFF -DWITH_EXAMPLES=OFF \
+        -DCMAKE_BUILD_TYPE=Release -DWITH_GSSAPI=OFF -DWITH_FIDO2=ON -DWITH_EXAMPLES=OFF \
         -DUNIT_TESTING=OFF -DCLIENT_TESTING=OFF -DWITH_SERVER=OFF \
     && cmake --build /tmp/libssh/build \
     && cmake --install /tmp/libssh/build \
@@ -133,7 +168,9 @@ RUN set -e; \
             -exec cp {} "/opt/licenses/$3/" \; ; \
         rm -rf /tmp/lic /tmp/lic.archive; \
     }; \
-    take "https://www.libssh.org/files/0.11/libssh-${LIBSSH_VERSION}.tar.xz" "${LIBSSH_SHA256}" libssh; \
+    take "https://www.libssh.org/files/0.12/libssh-${LIBSSH_VERSION}.tar.xz" "${LIBSSH_SHA256}" libssh; \
+    take "https://github.com/PJK/libcbor/archive/refs/tags/v${LIBCBOR_VERSION}.tar.gz" "${LIBCBOR_SHA256}" libcbor; \
+    take "https://developers.yubico.com/libfido2/Releases/libfido2-${LIBFIDO2_VERSION}.tar.gz" "${LIBFIDO2_SHA256}" libfido2; \
     take "https://github.com/JuliaStrings/utf8proc/archive/refs/tags/v${UTF8PROC_VERSION}.tar.gz" "${UTF8PROC_SHA256}" utf8proc; \
     take "https://github.com/FreeRDP/FreeRDP/releases/download/${FREERDP_VERSION}/freerdp-${FREERDP_VERSION}.tar.gz" "${FREERDP_SHA256}" FreeRDP; \
     take "https://github.com/facebook/zstd/releases/download/v${ZSTD_VERSION}/zstd-${ZSTD_VERSION}.tar.gz" "${ZSTD_SHA256}" zstd; \

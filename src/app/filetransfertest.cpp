@@ -97,6 +97,12 @@ int runFileTransferTest(const QString &spec)
         settings.tryPublicKeys = false;
         settings.fileTransfer = query.hasQueryItem(QStringLiteral("auto")) ? QStringLiteral("auto")
                                                                           : scheme;
+        // ?key=PATH (a private key) and ?certificate=PATH|none (its
+        // certificate; default: PATH-cert.pub next to the key).
+        settings.identityFile = query.queryItemValue(QStringLiteral("key"), QUrl::FullyDecoded);
+        settings.certificateFile = query.queryItemValue(QStringLiteral("certificate"), QUrl::FullyDecoded);
+        // ?kerberos: log on with the Kerberos ticket (GSSAPI).
+        settings.kerberos = query.hasQueryItem(QStringLiteral("kerberos"));
         // ?only: a file session (no shell), as the SFTP and SCP session types.
         if (query.hasQueryItem(QStringLiteral("only"))) {
             settings.openShell = false;

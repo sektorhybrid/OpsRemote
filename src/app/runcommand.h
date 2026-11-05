@@ -3,7 +3,10 @@
 
 #pragma once
 
+#include <optional>
+
 #include "preferences.h"
+#include "scripts.h"
 #include "sshsession.h"
 
 #include <QElapsedTimer>
@@ -50,6 +53,8 @@ public:
     RunCommandWindow(const QString &folder, const QList<Host> &hosts, int skipped, Resolver resolver,
                      SnippetSource snippets, QWidget *parent);
     ~RunCommandWindow() override;
+    // Puts a command (or a saved script's "#!script NAME") in the box.
+    void setCommand(const QString &command);
 
 protected:
     void closeEvent(QCloseEvent *event) override;
@@ -92,6 +97,9 @@ private:
     int m_skipped = 0;
     QList<Job> m_jobs;
     QString m_command;
+    // A saved script being run instead of m_command, with its {fields}.
+    std::optional<SavedScript> m_script;
+    QHash<QString, QString> m_scriptValues;
     int m_running = 0;
 
     QPlainTextEdit *m_commandEdit = nullptr;

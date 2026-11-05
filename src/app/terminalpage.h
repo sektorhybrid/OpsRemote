@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "automation.h"
 #include "preferences.h"
 #include "sshsession.h"
 #include "terminalappearance.h"
@@ -53,6 +54,8 @@ public:
     void setShortcuts(const QHash<QString, QKeySequence> &shortcuts);
     // Whether an SSH tab has a live connection (local shells count as connected).
     bool isConnected() const;
+    // A shell or program on this computer (not SSH, Telnet, serial…).
+    bool isLocal() const { return !m_ssh && !m_stream && m_sshSettings.host.isEmpty(); }
     const SshConnectionSettings &sshSettings() const { return m_sshSettings; }
     // The SSH connection of this tab (tunnels can use it); nullptr when none.
     SshSession *sshSession() const { return m_ssh; }
@@ -76,6 +79,13 @@ public:
     // A chosen terminal has an accent bar along its top.
     void setMultiExecTarget(bool on);
     bool isMultiExecTarget() const { return m_multiExecTarget; }
+    // A login script and triggers (see AutomationRunner), started on each
+    // connect; values fill {password}, {user} and {host}.
+    void setAutomation(const QList<LoginStep> &script, const QList<OutputTrigger> &triggers,
+                       const AutomationPreferences &preferences, const QHash<QString, QString> &values);
+    // Runs the login script again, or stops it.
+    void runLoginScript();
+    void stopLoginScript();
 
 signals:
     void statusMessage(const QString &message);
@@ -93,6 +103,14 @@ signals:
     // Asks MainWindow to add Split Right ▸ / Split Down ▸ to this menu.
     void splitMenuRequested(QMenu *menu);
     void duplicateRequested();
+    // Asks MainWindow to add Run Script ▸ (saved scripts) to this menu.
+    void scriptMenuRequested(QMenu *menu);
+    // A trigger asked to notify, or to mark the tab.
+    void automationNotice(const QString &message);
+    void automationMark();
+    // Logged on: the login script finished, or there was none (after
+    // connecting); for the session's "after logging on" script.
+    void loggedOn();
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -155,6 +173,7 @@ private:
         QByteArray start;
     };
     QList<CompiledRule> m_highlights;
+    AutomationRunner *m_automation = nullptr;
     QStringDecoder m_decoder{QStringDecoder::Utf8};
     bool m_alternateScreen = false;
     int m_reconnectAttempts = 0;

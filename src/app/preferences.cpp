@@ -146,6 +146,10 @@ SshPreferences loadSshPreferences()
     read(node, "agent", value.agent);
     read(node, "proxy", value.proxy);
     read(node, "identity_file", value.identityFile);
+    read(node, "use_certificates", value.useCertificates);
+    read(node, "security_keys", value.securityKeys);
+    read(node, "kerberos", value.kerberos);
+    read(node, "kerberos_delegate", value.kerberosDelegate);
     read(node, "auto_reconnect", value.autoReconnect);
     read(node, "reconnect_delay", value.reconnectDelay);
     value.reconnectDelay = qBound(1, value.reconnectDelay, 600);
@@ -171,6 +175,10 @@ void saveSshPreferences(const SshPreferences &value)
     node["agent"] = value.agent.toStdString();
     node["proxy"] = value.proxy.toStdString();
     node["identity_file"] = value.identityFile.toStdString();
+    node["use_certificates"] = value.useCertificates;
+    node["security_keys"] = value.securityKeys;
+    node["kerberos"] = value.kerberos;
+    node["kerberos_delegate"] = value.kerberosDelegate;
     node["auto_reconnect"] = value.autoReconnect;
     node["reconnect_delay"] = value.reconnectDelay;
     node["reconnect_attempts"] = value.reconnectAttempts;
@@ -311,24 +319,16 @@ LocalShellPreferences loadLocalShellPreferences()
 {
     const auto node = loadSection("local_shell");
     LocalShellPreferences value;
-    readChoice(node, "windows", value.windowsShell,
-               {QStringLiteral("powershell"), QStringLiteral("pwsh"), QStringLiteral("cmd"),
-                QStringLiteral("wsl"), QStringLiteral("custom")});
-    read(node, "windows_custom", value.windowsCustom);
     read(node, "use_sudo", value.useSudo);
-    readChoice(node, "linux", value.linuxShell, {QStringLiteral("default"), QStringLiteral("custom")});
-    read(node, "linux_custom", value.linuxCustom);
+    readChoice(node, "linux_elevation", value.linuxElevation, {QStringLiteral("sudo"), QStringLiteral("pkexec")});
     return value;
 }
 
 void saveLocalShellPreferences(const LocalShellPreferences &value)
 {
     YAML::Node node(YAML::NodeType::Map);
-    node["windows"] = value.windowsShell.toStdString();
-    node["windows_custom"] = value.windowsCustom.toStdString();
     node["use_sudo"] = value.useSudo;
-    node["linux"] = value.linuxShell.toStdString();
-    node["linux_custom"] = value.linuxCustom.toStdString();
+    node["linux_elevation"] = value.linuxElevation.toStdString();
     saveSection("local_shell", node);
 }
 
@@ -487,6 +487,37 @@ void saveBackupPreferences(const BackupPreferences &value)
     saveSection("backup", node);
 }
 
+CommandsPreferences loadCommandsPreferences()
+{
+    const auto node = loadSection("commands");
+    CommandsPreferences value;
+    read(node, "confirm_multiline", value.confirmMultiline);
+    read(node, "show_files", value.showFiles);
+    read(node, "show_commands", value.showCommands);
+    read(node, "show_scripts", value.showScripts);
+    return value;
+}
+
+void saveCommandsPreferences(const CommandsPreferences &value)
+{
+    YAML::Node node(YAML::NodeType::Map);
+    node["confirm_multiline"] = value.confirmMultiline;
+    node["show_files"] = value.showFiles;
+    node["show_commands"] = value.showCommands;
+    node["show_scripts"] = value.showScripts;
+    saveSection("commands", node);
+}
+
+YAML::Node loadPreferencesSection(const char *section)
+{
+    return loadSection(section);
+}
+
+void savePreferencesSection(const char *section, const YAML::Node &node)
+{
+    saveSection(section, node);
+}
+
 QList<Snippet> loadSnippets()
 {
     QList<Snippet> snippets;
@@ -498,6 +529,7 @@ QList<Snippet> loadSnippets()
                 read(item, "name", snippet.name);
                 read(item, "text", snippet.text);
                 read(item, "press_enter", snippet.pressEnter);
+                read(item, "group", snippet.group);
                 if (!snippet.name.isEmpty())
                     snippets.append(snippet);
             }
@@ -515,6 +547,8 @@ void saveSnippets(const QList<Snippet> &snippets)
         item["name"] = snippet.name.toStdString();
         item["text"] = snippet.text.toStdString();
         item["press_enter"] = snippet.pressEnter;
+        if (!snippet.group.isEmpty())
+            item["group"] = snippet.group.toStdString();
         node.push_back(item);
     }
     saveSection("snippets", node);
