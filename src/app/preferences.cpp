@@ -676,6 +676,14 @@ TerminalBehaviour loadTerminalBehaviour()
     read(node, "links_enabled", value.linksEnabled);
     read(node, "ctrl_click_opens_links", value.ctrlClickOpensLinks);
     read(node, "mark_activity", value.markActivity);
+    readChoice(node, "activity_style", value.activityStyle,
+               {QStringLiteral("pulse"), QStringLiteral("steady"), QStringLiteral("text")});
+    for (auto [key, colour] : {std::pair{"activity_color", &value.activityColor},
+                               std::pair{"activity_pulse_color", &value.activityPulseColor}}) {
+        QString name;
+        read(node, key, name);
+        *colour = name.isEmpty() ? QColor() : QColor::fromString(name);
+    }
     return value;
 }
 
@@ -697,6 +705,10 @@ void saveTerminalBehaviour(const TerminalBehaviour &value)
     node["links_enabled"] = value.linksEnabled;
     node["ctrl_click_opens_links"] = value.ctrlClickOpensLinks;
     node["mark_activity"] = value.markActivity;
+    node["activity_style"] = value.activityStyle.toStdString();
+    node["activity_color"] = value.activityColor.isValid() ? value.activityColor.name().toStdString() : std::string();
+    node["activity_pulse_color"] =
+        value.activityPulseColor.isValid() ? value.activityPulseColor.name().toStdString() : std::string();
     saveSection("behaviour", node);
 }
 

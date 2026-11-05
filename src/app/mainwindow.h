@@ -182,6 +182,8 @@ public:
     QString darkTerminalColorScheme() const { return m_darkTerminalColorScheme; }
     void setDarkTerminalColorScheme(const QString &scheme);
     TerminalBehaviour terminalBehaviour() const { return m_behaviour; }
+    // The mark colours of background tabs with new output, as shown now.
+    std::pair<QColor, QColor> activityColors() const;
     void setTerminalBehaviour(const TerminalBehaviour &behaviour);
     StartupPreferences startupPreferences() const { return m_startup; }
     void setStartupPreferences(const StartupPreferences &preferences);
@@ -237,6 +239,8 @@ signals:
     // A look was applied, or looks were saved, renamed or deleted: every
     // appearance control may show something else now.
     void looksChanged();
+    // Preferences → Terminal behaviour (also tab activity marks) changed.
+    void terminalBehaviourChanged();
 
 protected:
     void closeEvent(QCloseEvent *event) override;
@@ -252,6 +256,10 @@ private:
     void bindShortcut(QAction *action, const QString &id);
     void addSessionTab(QWidget *page, const QString &title, const QString &toolTip);
     void connectTerminalPage(class TerminalPage *page);
+    // Background tabs with new output (Preferences → Terminal → Notifications).
+    void markTabActivity(QWidget *page);
+    void clearTabActivity(int index);
+    void showTabActivity(int index);
     void duplicateTab(int index);
     void showTabContextMenu(const QPoint &position);
     void restoreStartupTabs();

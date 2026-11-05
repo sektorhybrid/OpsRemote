@@ -16,6 +16,8 @@
 /private/
 # Design notes and reviews: kept locally, not published.
 /design/
+# The release helper (commit, tag, push): kept locally, not published.
+/scripts/bump-version.sh
 # What OpsRemote writes next to itself: sessions, preferences, the
 # encrypted vault, trusted host keys and certificates, backups, and the
 # unpacked program.

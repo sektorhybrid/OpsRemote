@@ -2,6 +2,11 @@
 
 Back to the [README](../README.md). Each version's details are in [Features](features.md).
 
+## 0.6.1
+
+- **Pasting several lines:** the confirmation (terminal paste and **Commands**) is a resizable window that shows the whole text in a fixed-width font, with its line count. It keeps its size until OpsRemote is closed.
+- **Tabs with new output** are marked again with every look: before, the OpsRemote style and the Kvantum styles drew over the title's colour. The mark is now a softly pulsing dot beside the title (or a steady dot, or the title's colour, or off); each tab keeps room for it, so tabs do not move when one is marked. Its dot colour and pulse colour are Automatic (from the look, chosen to stand out against the tab bar) or Custom (**Preferences → Workspace → Tabs → Activity in background tabs**).
+
 ## 0.6.0
 
 **Logging on**

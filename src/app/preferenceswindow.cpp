@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "preferenceswindow.h"
+#include "tabactivity.h"
 #include "kvantumthemes.h"
 #include "availabilitynote.h"
 #include "localresources.h"
@@ -45,10 +46,13 @@
 #include <QKeySequenceEdit>
 #include <QMap>
 #include <QToolButton>
+#include <QAbstractButton>
+#include <QEnterEvent>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QPixmap>
 #include <QPushButton>
 #include <QStandardItemModel>
 #include <QScrollArea>
@@ -85,6 +89,65 @@ QLabel *secondaryLabel(const QString &text, QWidget *parent)
     label->setStyleSheet(QStringLiteral("color: palette(placeholder-text);"));
     return label;
 }
+
+// A colour to click on. Painted here, not as a button icon: styles (Kvantum)
+// turn a disabled button's icon grey, and a greyed-out swatch should still
+// show its colour, only fainter.
+class ColourSwatch final : public QAbstractButton
+{
+public:
+    explicit ColourSwatch(QWidget *parent = nullptr) : QAbstractButton(parent)
+    {
+        setCursor(Qt::PointingHandCursor);
+        setFixedSize(40, fontMetrics().height() + 10);
+    }
+
+    void setColour(const QColor &colour)
+    {
+        m_colour = colour;
+        update();
+    }
+    QColor colour() const { return m_colour; }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        const bool enabled = isEnabled();
+        QPen border(palette().color(enabled && (underMouse() || hasFocus()) ? QPalette::Highlight
+                                                                           : QPalette::Mid));
+        border.setWidthF(enabled ? 1.0 : 0.8);
+        if (!enabled)
+            border.setStyle(Qt::DashLine);
+        // A see-through colour (the faint pulse colour) shows as it does on
+        // the tab bar: over the window colour.
+        const QRectF box = QRectF(rect()).adjusted(1.5, 3.5, -1.5, -3.5);
+        painter.setOpacity(enabled ? 1.0 : 0.45);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(palette().color(QPalette::Window));
+        painter.drawRoundedRect(box, 4, 4);
+        painter.setBrush(m_colour);
+        painter.drawRoundedRect(box, 4, 4);
+        painter.setOpacity(1.0);
+        painter.setPen(border);
+        painter.setBrush(Qt::NoBrush);
+        painter.drawRoundedRect(box, 4, 4);
+    }
+    void enterEvent(QEnterEvent *event) override
+    {
+        QAbstractButton::enterEvent(event);
+        update();
+    }
+    void leaveEvent(QEvent *event) override
+    {
+        QAbstractButton::leaveEvent(event);
+        update();
+    }
+
+private:
+    QColor m_colour;
+};
 
 // A combo box of (value, label) choices showing current.
 QComboBox *choiceBox(const QList<QPair<QString, QString>> &choices, const QString &current)
@@ -1187,12 +1250,118 @@ void PreferencesWindow::buildTerminalPage()
                           QStringLiteral("What happens when a program rings the bell."), bell,
                           QStringLiteral("beep alert"));
     connectChoice(bell, &TerminalBehaviour::bell);
-    auto *activity = toggle(current.markActivity);
-    notifications->addRow(QStringLiteral("Highlight tabs with new output"),
-                          QStringLiteral("A background tab's title turns the accent colour when "
-                                         "it prints something, for example when a long job ends."),
-                          activity, QStringLiteral("activity monitor tab"));
-    connectToggle(activity, &TerminalBehaviour::markActivity);
+}
+
+// On Workspace → Tabs; the settings are the terminals' (settings.yaml "behaviour:").
+void PreferencesWindow::buildTabActivityCard(SettingsPage *page)
+{
+    auto *mainWindow = m_mainWindow;
+    auto update = [mainWindow](auto change) {
+        auto behaviour = mainWindow->terminalBehaviour();
+        change(behaviour);
+        mainWindow->setTerminalBehaviour(behaviour);
+    };
+    const auto current = mainWindow->terminalBehaviour();
+
+    auto *card = page->addCard(QStringLiteral("Activity in background tabs"));
+    // A dot as the tabs show it, beside the choice.
+    auto *preview = new ActivityDot;
+    preview->setToolTip(QStringLiteral("How a marked tab looks"));
+    auto *style = choiceBox({{QStringLiteral("pulse"), QStringLiteral("Pulsing dot")},
+                             {QStringLiteral("steady"), QStringLiteral("Steady dot")},
+                             {QStringLiteral("text"), QStringLiteral("Title colour")},
+                             {QStringLiteral("off"), QStringLiteral("Off")}},
+                            current.markActivity ? current.activityStyle : QStringLiteral("off"));
+    auto *styleRow = new QWidget;
+    auto *styleLayout = new QHBoxLayout(styleRow);
+    styleLayout->setContentsMargins(0, 0, 0, 0);
+    styleLayout->addWidget(preview);
+    styleLayout->addWidget(style);
+    card->addRow(QStringLiteral("Mark background tabs"),
+                 QStringLiteral("A tab that prints something while another is shown is marked until "
+                                "you open it. Title colour does not show with Kvantum styles: they "
+                                "colour tab titles themselves."),
+                 styleRow, QStringLiteral("activity monitor tab highlight blink pulse dot"));
+
+    // One colour: Automatic or Custom, and a swatch of the colour in use.
+    // The swatch chooses a colour only with Custom; with Automatic it is
+    // greyed out but still shows what OpsRemote picked.
+    struct ColourRow
+    {
+        QWidget *row;
+        ColourSwatch *swatch;
+        QComboBox *source;
+    };
+    auto addColour = [&](const QString &label, const QString &description,
+                         QColor TerminalBehaviour::*field) {
+        auto *swatch = new ColourSwatch;
+        auto *source = choiceBox({{QStringLiteral("auto"), QStringLiteral("Automatic")},
+                                  {QStringLiteral("custom"), QStringLiteral("Custom")}},
+                                 (current.*field).isValid() ? QStringLiteral("custom") : QStringLiteral("auto"));
+        auto *row = new QWidget;
+        auto *layout = new QHBoxLayout(row);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->addWidget(source);
+        layout->addWidget(swatch);
+        card->addRow(label, description, row, QStringLiteral("activity tab colour color"));
+        connect(swatch, &QAbstractButton::clicked, this, [this, update, swatch, field] {
+            const auto chosen = QColorDialog::getColor(swatch->colour(), this);
+            if (chosen.isValid())
+                update([&](TerminalBehaviour &b) { b.*field = chosen; });
+        });
+        // Custom starts from the colour in use; the swatch then changes it.
+        connect(source, &QComboBox::activated, this, [update, source, swatch, field] {
+            const bool custom = source->currentData().toString() == QStringLiteral("custom");
+            const auto colour = custom ? swatch->colour() : QColor();
+            update([&](TerminalBehaviour &b) { b.*field = colour; });
+        });
+        return ColourRow{row, swatch, source};
+    };
+    const auto first = addColour(QStringLiteral("Dot colour"),
+                                 QStringLiteral("Also the title's colour with Title colour. "
+                                                "Automatic: the accent colour of your look, or "
+                                                "another one if the accent would be hard to see on "
+                                                "the tab bar."),
+                                 &TerminalBehaviour::activityColor);
+    const auto second = addColour(QStringLiteral("Pulse colour"),
+                                  QStringLiteral("The colour the dot fades into while it pulses. "
+                                                 "Automatic: a faint dot colour."),
+                                  &TerminalBehaviour::activityPulseColor);
+
+    // Swatches, preview and what can be changed follow the settings.
+    auto refresh = [mainWindow, preview, style, first, second] {
+        const auto behaviour = mainWindow->terminalBehaviour();
+        const auto [colour, pulse] = mainWindow->activityColors();
+        const auto shown = behaviour.markActivity ? behaviour.activityStyle : QStringLiteral("off");
+        for (const auto &[row, value, own] : {std::tuple{first, colour, behaviour.activityColor},
+                                              std::tuple{second, pulse, behaviour.activityPulseColor}}) {
+            row.swatch->setColour(value);
+            row.swatch->setEnabled(own.isValid());
+            row.swatch->setToolTip(own.isValid() ? QStringLiteral("Choose a colour")
+                                                 : QStringLiteral("Chosen automatically; pick Custom "
+                                                                  "to choose your own"));
+            row.source->setCurrentIndex(row.source->findData(own.isValid() ? QStringLiteral("custom")
+                                                                            : QStringLiteral("auto")));
+        }
+        first.row->setEnabled(shown != QStringLiteral("off"));
+        second.row->setEnabled(shown == QStringLiteral("pulse"));
+        preview->setColors(colour, pulse);
+        preview->setPulsing(shown == QStringLiteral("pulse"));
+        preview->setActive(shown == QStringLiteral("pulse") || shown == QStringLiteral("steady"));
+    };
+    refresh();
+    connect(style, &QComboBox::activated, this, [update, style] {
+        const auto chosen = style->currentData().toString();
+        update([&](TerminalBehaviour &b) {
+            b.markActivity = chosen != QStringLiteral("off");
+            if (b.markActivity)
+                b.activityStyle = chosen;
+        });
+    });
+    // Also after a change of look, which changes the colours from the look.
+    connect(mainWindow, &MainWindow::terminalBehaviourChanged, preview, refresh);
+    connect(mainWindow, &MainWindow::appearanceChanged, preview,
+            [preview, refresh] { QTimer::singleShot(0, preview, refresh); });
 }
 
 void PreferencesWindow::buildStartupPage()
@@ -1260,7 +1429,7 @@ void PreferencesWindow::buildStartupPage()
 
     page = addPage(QStringLiteral("tabs"), QStringLiteral("Tabs"), QStringLiteral("tab-new"),
                    QStyle::SP_FileDialogDetailedView);
-    auto *tabs = page->addCard(QStringLiteral("Tabs"));
+    auto *tabs = page->addCard(QStringLiteral("General"));
     auto *title = choiceBox({{QStringLiteral("name"), QStringLiteral("Session name")},
                              {QStringLiteral("userhost"), QStringLiteral("user@host")}},
                             current.tabTitle);
@@ -1290,6 +1459,7 @@ void PreferencesWindow::buildStartupPage()
     tabs->addRow(QStringLiteral("Ask before closing a connected SSH tab"), QString(),
                  closeConnected, QStringLiteral("confirm disconnect"));
     connectToggle(closeConnected, &StartupPreferences::confirmCloseConnected);
+    buildTabActivityCard(page);
 
     page = addPage(QStringLiteral("mouse"), QStringLiteral("Mouse"), QStringLiteral("input-mouse"),
                    QStyle::SP_ArrowUp);

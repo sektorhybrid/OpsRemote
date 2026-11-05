@@ -42,6 +42,7 @@
 #include "vncpage.h"
 #include "remotescreenpage.h"
 #include "sftppanel.h"
+#include "tabactivity.h"
 #include "terminalpage.h"
 
 #include <QAction>
@@ -81,6 +82,7 @@
 #include <QProcess>
 #include <QScrollBar>
 #include <QFont>
+#include <QFontDatabase>
 #include <QPushButton>
 #include <QSaveFile>
 #include <QSet>
@@ -1247,6 +1249,26 @@ private:
 };
 }
 
+namespace {
+
+// The session tabs; tells when a tab is added, wherever that happens.
+class SessionTabWidget final : public QTabWidget
+{
+public:
+    using QTabWidget::QTabWidget;
+    std::function<void(int)> inserted;
+
+protected:
+    void tabInserted(int index) override
+    {
+        QTabWidget::tabInserted(index);
+        if (inserted)
+            inserted(index);
+    }
+};
+
+} // namespace
+
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent),
       m_vault(stateFilePath(QStringLiteral("credentials.vault")))
@@ -1486,7 +1508,17 @@ MainWindow::MainWindow(QWidget *parent)
     });
     m_leftTabs->addTab(m_scriptsPanel, QStringLiteral("Scripts"));
 
-    m_sessionTabs = new QTabWidget(splitter);
+    auto *sessionTabs = new SessionTabWidget(splitter);
+    // Each new tab gets its (idle) activity mark.
+    sessionTabs->inserted = [this](int index) { showTabActivity(index); };
+    m_sessionTabs = sessionTabs;
+    // Colours from the look follow a new look, once its palette is applied.
+    connect(this, &MainWindow::appearanceChanged, this, [this] {
+        QTimer::singleShot(0, this, [this] {
+            for (int index = 0; index < m_sessionTabs->count(); ++index)
+                showTabActivity(index);
+        });
+    });
     m_sessionTabs->setTabsClosable(true);
     m_sessionTabs->setDocumentMode(true);
     // Session tabs can be dragged into a different order; they stay inside
@@ -1499,7 +1531,7 @@ MainWindow::MainWindow(QWidget *parent)
     // The current tab is no longer marked as having new output.
     connect(m_sessionTabs, &QTabWidget::currentChanged, this, [this](int index) {
         if (index >= 0)
-            m_sessionTabs->tabBar()->setTabTextColor(index, QColor());
+            clearTabActivity(index);
     });
     m_sessionTabs->tabBar()->installEventFilter(this);
     m_sessionTabs->tabBar()->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -5710,6 +5742,76 @@ void MainWindow::setTerminalBehaviour(const TerminalBehaviour &behaviour)
     saveTerminalBehaviour(behaviour);
     for (auto *page : allTerminalPages())
         page->setBehaviour(behaviour);
+    // Every tab takes the new style and colours.
+    for (int index = 0; index < m_sessionTabs->count(); ++index)
+        showTabActivity(index);
+    emit terminalBehaviourChanged();
+}
+
+void MainWindow::markTabActivity(QWidget *page)
+{
+    const int index = tabIndexOf(page);
+    if (index < 0 || index == m_sessionTabs->currentIndex()
+        || m_sessionTabs->widget(index)->property("opsremoteActivity").toBool())
+        return;
+    m_sessionTabs->widget(index)->setProperty("opsremoteActivity", true);
+    showTabActivity(index);
+}
+
+void MainWindow::clearTabActivity(int index)
+{
+    m_sessionTabs->widget(index)->setProperty("opsremoteActivity", false);
+    showTabActivity(index);
+}
+
+// Unless chosen in Preferences, from the look: the first of the accent,
+// link, amber and blue that stands out against the tab bar, pulsing towards
+// a faint copy of it.
+std::pair<QColor, QColor> MainWindow::activityColors() const
+{
+    const auto palette = m_sessionTabs->tabBar()->palette();
+    const auto colour = m_behaviour.activityColor.isValid()
+        ? m_behaviour.activityColor
+        : visibleColor(palette.color(QPalette::Window),
+                       {palette.color(QPalette::Highlight), palette.color(QPalette::Link),
+                        QColor(0xf0, 0xa0, 0x30), QColor(0x3d, 0xae, 0xe9)});
+    auto faded = colour;
+    faded.setAlphaF(0.2);
+    return {colour, m_behaviour.activityPulseColor.isValid() ? m_behaviour.activityPulseColor : faded};
+}
+
+// With a dot, every tab keeps an idle one on the side without the close
+// button, so a tab does not grow when it is marked. Where another widget
+// sits there, or with "Title colour", the title is coloured instead.
+void MainWindow::showTabActivity(int index)
+{
+    auto *bar = m_sessionTabs->tabBar();
+    auto *page = m_sessionTabs->widget(index);
+    if (!m_behaviour.markActivity)
+        page->setProperty("opsremoteActivity", false);
+    const bool marked = page->property("opsremoteActivity").toBool();
+    const bool wantDot = m_behaviour.markActivity && m_behaviour.activityStyle != QStringLiteral("text");
+
+    const auto closeSide = static_cast<QTabBar::ButtonPosition>(
+        bar->style()->styleHint(QStyle::SH_TabBar_CloseButtonPosition, nullptr, bar));
+    const auto side = closeSide == QTabBar::LeftSide ? QTabBar::RightSide : QTabBar::LeftSide;
+    auto *dot = qobject_cast<ActivityDot *>(bar->tabButton(index, side));
+    if (wantDot && !dot && !bar->tabButton(index, side)) {
+        dot = new ActivityDot(bar);
+        bar->setTabButton(index, side, dot);
+    } else if (!wantDot && dot) {
+        bar->setTabButton(index, side, nullptr);
+        dot->deleteLater();
+        dot = nullptr;
+    }
+
+    const auto [colour, second] = activityColors();
+    if (dot) {
+        dot->setColors(colour, second);
+        dot->setPulsing(m_behaviour.activityStyle == QStringLiteral("pulse"));
+        dot->setActive(marked);
+    }
+    bar->setTabTextColor(index, marked && !dot ? colour : QColor());
 }
 
 void MainWindow::setStartupPreferences(const StartupPreferences &preferences)
@@ -5729,12 +5831,8 @@ void MainWindow::connectTerminalPage(TerminalPage *page)
     connect(page, &TerminalPage::statusMessage, this, [this](const QString &message) {
         statusBar()->showMessage(message, 5000);
     });
-    // Background tabs with new output or a bell get the accent colour.
-    auto mark = [this, page] {
-        const int index = tabIndexOf(page);
-        if (index >= 0 && index != m_sessionTabs->currentIndex())
-            m_sessionTabs->tabBar()->setTabTextColor(index, palette().color(QPalette::Highlight));
-    };
+    // Background tabs with new output or a bell are marked.
+    auto mark = [this, page] { markTabActivity(page); };
     connect(page, &TerminalPage::activity, this, mark);
     connect(page, &TerminalPage::bell, this, mark);
     connect(page, &TerminalPage::automationMark, this, mark);
@@ -6129,6 +6227,35 @@ void MainWindow::setSnippets(const QList<Snippet> &snippets)
         m_commandsPanel->setSnippets(snippets);
 }
 
+// Resizable, so the whole text can be read before it is sent; the size is
+// kept for the rest of the session.
+static bool confirmMultilineSend(QWidget *parent, const QString &text, int terminals)
+{
+    static QSize lastSize(640, 420);
+    QDialog dialog(parent);
+    dialog.setWindowTitle(QStringLiteral("Commands"));
+    dialog.setSizeGripEnabled(true);
+    auto *layout = new QVBoxLayout(&dialog);
+    layout->addWidget(new QLabel(QStringLiteral("Send these %1 lines to %2 terminal(s)?")
+                                     .arg(text.count(QLatin1Char('\n')) + 1)
+                                     .arg(terminals)));
+    auto *view = new QPlainTextEdit(text);
+    view->setReadOnly(true);
+    view->setLineWrapMode(QPlainTextEdit::NoWrap);
+    view->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    layout->addWidget(view, 1);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Yes | QDialogButtonBox::No);
+    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+    buttons->button(QDialogButtonBox::Yes)->setDefault(true);
+    buttons->button(QDialogButtonBox::Yes)->setFocus();
+    dialog.resize(lastSize);
+    const bool accepted = dialog.exec() == QDialog::Accepted;
+    lastSize = dialog.size();
+    return accepted;
+}
+
 void MainWindow::sendSnippet(const Snippet &snippet, bool toMultiExec, bool withoutEnter)
 {
     QList<TerminalPage *> targets;
@@ -6153,12 +6280,7 @@ void MainWindow::sendSnippet(const Snippet &snippet, bool toMultiExec, bool with
         return;
     }
     if (snippet.text.contains(QLatin1Char('\n')) && loadCommandsPreferences().confirmMultiline
-        && QMessageBox::question(this, QStringLiteral("Commands"),
-                                 QStringLiteral("Send these %1 lines to %2 terminal(s)?\n\n%3")
-                                     .arg(snippet.text.count(QLatin1Char('\n')) + 1)
-                                     .arg(targets.size())
-                                     .arg(snippet.text.left(400)))
-               != QMessageBox::Yes)
+        && !confirmMultilineSend(this, snippet.text, targets.size()))
         return;
     const auto text = snippet.text + (snippet.pressEnter && !withoutEnter ? QStringLiteral("\r") : QString());
     for (auto *page : targets) {

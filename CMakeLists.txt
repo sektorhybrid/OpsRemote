@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 cmake_minimum_required(VERSION 3.21)
 
-project(OpsRemote VERSION 0.6.0 LANGUAGES CXX)
+project(OpsRemote VERSION 0.6.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -70,6 +70,8 @@ qt_add_executable(opsremote
     src/app/sidepanels.cpp
     src/app/kubecredentials.cpp
     src/app/statusline.cpp
+    src/app/tabactivity.cpp
+    src/app/tabactivity.h
     src/app/localsessions.cpp
     src/app/sshoptions.h
     src/app/terminalpage.cpp

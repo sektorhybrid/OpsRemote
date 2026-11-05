@@ -28,6 +28,10 @@
 #include <QApplication>
 #include <QBoxLayout>
 #include <QClipboard>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QPlainTextEdit>
+#include <QPushButton>
 #include <QKeyEvent>
 #include <QEvent>
 #include <QTime>
@@ -3228,25 +3232,32 @@ void TerminalDisplay::bracketText(QString& text) const
 
 bool TerminalDisplay::multilineConfirmation(const QString& text)
 {
-    QMessageBox confirmation(this);
+    // OpsRemote addition: a resizable window that shows the whole text, in
+    // place of a fixed-size message box with collapsed details. Its size is
+    // kept for the rest of the session.
+    static QSize lastSize(640, 420);
+    const QString shown = QString(text).replace(QLatin1Char('\r'), QLatin1Char('\n'));
+    QDialog confirmation(this);
     confirmation.setWindowTitle(tr("Paste multiline text"));
-    confirmation.setText(tr("Are you sure you want to paste this text?"));
-    confirmation.setDetailedText(text);
-    confirmation.setStandardButtons(QMessageBox::Yes | QMessageBox::No);
-    // Click "Show details..." to show those by default
-    const auto buttons = confirmation.buttons();
-    for( QAbstractButton * btn : buttons ) {
-        if (confirmation.buttonRole(btn) == QMessageBox::ActionRole && btn->text() == QMessageBox::tr("Show Details...")) {
-            Q_EMIT btn->clicked();
-            break;
-        }
-    }
-    confirmation.setDefaultButton(QMessageBox::Yes);
-    confirmation.exec();
-    if (confirmation.standardButton(confirmation.clickedButton()) != QMessageBox::Yes) {
-        return false;
-    }
-    return true;
+    confirmation.setSizeGripEnabled(true);
+    auto *layout = new QVBoxLayout(&confirmation);
+    layout->addWidget(new QLabel(tr("Are you sure you want to paste these %1 lines?")
+                                     .arg(shown.count(QLatin1Char('\n')) + 1), &confirmation));
+    auto *view = new QPlainTextEdit(shown, &confirmation);
+    view->setReadOnly(true);
+    view->setLineWrapMode(QPlainTextEdit::NoWrap);
+    view->setFont(getVTFont());
+    layout->addWidget(view, 1);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Yes | QDialogButtonBox::No, &confirmation);
+    connect(buttons, &QDialogButtonBox::accepted, &confirmation, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &confirmation, &QDialog::reject);
+    layout->addWidget(buttons);
+    buttons->button(QDialogButtonBox::Yes)->setDefault(true);
+    buttons->button(QDialogButtonBox::Yes)->setFocus();
+    confirmation.resize(lastSize);
+    const bool accepted = confirmation.exec() == QDialog::Accepted;
+    lastSize = confirmation.size();
+    return accepted;
 }
 
 void TerminalDisplay::setSelection(const QString& t)

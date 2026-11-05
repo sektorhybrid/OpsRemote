@@ -32,6 +32,12 @@ struct TerminalBehaviour
     bool linksEnabled = true;
     bool ctrlClickOpensLinks = true;
     bool markActivity = true; // Marks background tabs that print output.
+    // How: "pulse" (a dot fading between two colours), "steady" (a dot), or
+    // "text" (the title's colour; Kvantum styles keep their own).
+    QString activityStyle = QStringLiteral("pulse");
+    // Empty: chosen from the look so they show against the tab bar.
+    QColor activityColor;
+    QColor activityPulseColor;
 
     bool operator==(const TerminalBehaviour &) const = default;
 };

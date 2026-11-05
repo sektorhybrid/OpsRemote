@@ -248,9 +248,12 @@ void OpsRemoteStyle::drawControl(ControlElement element, const QStyleOption *opt
         return;
     }
     if (element == CE_TabBarTabLabel) {
-        // Inactive tabs in a quieter colour.
+        // Inactive tabs in a quieter colour, unless the tab has its own (a
+        // tab marked for new output).
         if (const auto *tab = qstyleoption_cast<const QStyleOptionTab *>(option);
-            tab && !(tab->state & State_Selected)) {
+            tab && !(tab->state & State_Selected)
+            && (!widget || tab->palette.color(QPalette::WindowText)
+                               == widget->palette().color(QPalette::WindowText))) {
             QStyleOptionTab quiet(*tab);
             quiet.palette.setColor(QPalette::WindowText,
                                    mix(tab->palette.color(QPalette::Window),

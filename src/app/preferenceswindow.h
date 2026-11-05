@@ -41,6 +41,7 @@ private:
                           int fallbackIcon);
     void buildAppearancePage();
     void buildTerminalPage();
+    void buildTabActivityCard(SettingsPage *page);
     void buildLocalShellPage();
     void buildStartupPage();
     void buildShortcutsPage();
