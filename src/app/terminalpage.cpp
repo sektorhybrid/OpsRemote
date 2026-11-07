@@ -2,6 +2,10 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "terminalpage.h"
+#include "filedrop.h"
+#include "filedialogs.h"
+#include "clipboard.h"
+#include "reconnect.h"
 #include "jumphost.h"
 #include "castrecorder.h"
 #include "sessionendedpanel.h"
@@ -15,6 +19,10 @@
 #include <QDir>
 #include <QApplication>
 #include <QClipboard>
+#include <QLineEdit>
+#include <QInputDialog>
+#include <QMimeData>
+#include <QDropEvent>
 #include <QCoreApplication>
 #include <QDesktopServices>
 #include <QTimer>
@@ -95,6 +103,7 @@ TerminalPage::TerminalPage(const SshConnectionSettings &settings,
             m_ssh->resizeTerminal(columns, lines);
     });
     m_terminal->startTerminalTeletype();
+    m_fileDropKind = FileDropKind::Ssh; // dropped files go to the shell's folder on the server
     m_sftpPanel = new SftpPanel;
     m_folderTimer = new QTimer(this);
     m_folderTimer->setSingleShot(true);
@@ -123,7 +132,103 @@ void TerminalPage::setAppearance(const TerminalAppearance &appearance)
         return;
     m_appearance = appearance;
     applyTerminalAppearance(m_terminal, m_appearance);
-    applyLinkSettings();
+    applyMouseClipboard();
+}
+
+// Files dropped on the terminal go into the folder of the program in it
+// (filedrop.h), unless turned off or Shift is held: then the paths are typed.
+bool TerminalPage::dropFiles(const QStringList &files, bool shift)
+{
+    const bool on = m_appearance.uploadDroppedFiles < 0 ? m_behaviour.uploadDroppedFiles
+                                                       : m_appearance.uploadDroppedFiles == 1;
+    if (!on || shift || files.isEmpty() || m_fileDropKind == FileDropKind::None)
+        return false;
+    if (m_fileDropKind == FileDropKind::Local) {
+        auto folder = FileDrop::localFolder(m_terminal->getShellPID(), m_terminal->getForegroundProcessId());
+        const auto choice = FileDrop::confirm(this, files, &folder, [this, &folder] {
+            return FileDialogs::existingDirectory(this, QStringLiteral("Upload Into"),
+                                                  folder.path.isEmpty() ? QDir::homePath() : folder.path);
+        });
+        if (choice == FileDrop::Choice::PastePaths)
+            return false;
+        if (choice == FileDrop::Choice::Cancel)
+            return true;
+        QStringList clashing;
+        for (const auto &file : files) {
+            const auto name = QFileInfo(file).fileName();
+            if (QFileInfo::exists(QDir(folder.path).filePath(name)))
+                clashing.append(name);
+        }
+        FileDrop::Existing action;
+        if (!FileDrop::existingAction(this, clashing, &action))
+            return true;
+        const auto target = folder.path;
+        emit statusMessage(QStringLiteral("Copying %1 item(s) to %2…").arg(files.size()).arg(target));
+        FileDrop::copyLocal(this, files, target, action, [this, files, target](const QStringList &problems) {
+            if (problems.isEmpty())
+                emit statusMessage(QStringLiteral("Copied %1 item(s) to %2").arg(files.size()).arg(target));
+            FileDrop::report(this, files.size(), target, problems);
+        });
+        return true;
+    }
+    if (m_fileDropKind == FileDropKind::Ssh) {
+        if (!m_ssh || !isConnected()) {
+            FileDrop::report(this, files.size(), m_sshSettings.host,
+                             {QStringLiteral("This tab is not connected.")});
+            return true;
+        }
+        // The server tells where its shell is now (SshSession::queryDropFolder).
+        m_droppedFiles = files;
+        emit statusMessage(QStringLiteral("Asking %1 which folder the shell is in…").arg(m_sshSettings.host));
+        m_ssh->queryDropFolder();
+        return true;
+    }
+    return false;
+}
+
+// The server's answer for files dropped on an SSH tab: ask, then upload
+// through the Files panel (its transfers show there).
+void TerminalPage::uploadDropped(const QString &answer)
+{
+    const auto files = std::exchange(m_droppedFiles, {});
+    if (files.isEmpty() || !m_sftpPanel)
+        return;
+    const auto where = QStringLiteral("%1@%2").arg(m_sshSettings.username, m_sshSettings.host);
+    auto folder = FileDrop::remoteFolder(answer, where, m_lastShellFolder);
+    const auto choice = FileDrop::confirm(this, files, &folder, [this, &folder] {
+        bool ok = false;
+        const auto path = QInputDialog::getText(this, QStringLiteral("Upload Into"),
+                                                QStringLiteral("Folder on %1:").arg(m_sshSettings.host),
+                                                QLineEdit::Normal,
+                                                folder.path.isEmpty() ? m_sftpPanel->currentPath() : folder.path,
+                                                &ok)
+                              .trimmed();
+        return ok && path.startsWith(QLatin1Char('/')) ? path : QString();
+    });
+    if (choice == FileDrop::Choice::PastePaths) {
+        QString text;
+        for (const auto &file : files)
+            text += QLatin1Char('\'') + QString(file).replace(QLatin1Char('\''), QStringLiteral("'\\''"))
+                    + QStringLiteral("' ");
+        m_terminal->pasteText(text);
+        return;
+    }
+    if (choice == FileDrop::Choice::Cancel)
+        return;
+    const auto problem = m_sftpPanel->uploadInto(files, folder.path);
+    if (!problem.isEmpty()) {
+        FileDrop::report(this, files.size(), QStringLiteral("%1:%2").arg(where, folder.path), {problem});
+        return;
+    }
+    emit statusMessage(QStringLiteral("Uploading %1 item(s) to %2:%3 (see the Files panel)")
+                           .arg(files.size())
+                           .arg(where, folder.path));
+}
+
+// Every paste in a terminal: the text the paste rule gives (clipboard.h).
+void TerminalPage::paste(bool middleClick)
+{
+    m_terminal->pasteText(Clipboard::textToPaste(middleClick));
 }
 
 // Ctrl+wheel zooms instead of scrolling or reaching the remote program.
@@ -141,16 +246,26 @@ bool TerminalPage::eventFilter(QObject *watched, QEvent *event)
             return true;
         }
     }
+    // Dropped files (not text): uploaded, or their paths typed (filedrop.h).
+    if (event->type() == QEvent::Drop && watched->inherits("Konsole::TerminalDisplay")) {
+        auto *drop = static_cast<QDropEvent *>(event);
+        QStringList files;
+        for (const auto &url : drop->mimeData()->urls())
+            if (url.isLocalFile())
+                files.append(url.toLocalFile());
+        if (dropFiles(files, drop->modifiers() & Qt::ShiftModifier)) {
+            drop->acceptProposedAction();
+            return true;
+        }
+    }
     // Middle-click, unless the program in the terminal takes the mouse (Shift overrides).
     if (event->type() == QEvent::MouseButtonPress && watched->inherits("Konsole::TerminalDisplay")) {
         auto *mouse = static_cast<QMouseEvent *>(event);
         if (mouse->button() == Qt::MiddleButton
             && (!m_terminal->terminalUsesMouse() || (mouse->modifiers() & Qt::ShiftModifier))) {
-            const auto &action = m_behaviour.middleClick;
+            const auto &action = Clipboard::preferences().middleClick;
             if (action == QStringLiteral("paste"))
-                m_terminal->pasteSelection();
-            else if (action == QStringLiteral("clipboard"))
-                m_terminal->pasteClipboard();
+                paste(true);
             else if (action == QStringLiteral("menu"))
                 showTerminalMenu(static_cast<QWidget *>(watched)->mapTo(m_terminal,
                                                                          mouse->position().toPoint()),
@@ -190,15 +305,21 @@ void TerminalPage::setBehaviour(const TerminalBehaviour &behaviour)
         : behaviour.scrollBar == QStringLiteral("hidden") ? QTermWidget::NoScrollBar
                                                           : QTermWidget::ScrollBarRight);
     m_terminal->setMargin(behaviour.padding);
-    m_terminal->setConfirmMultilinePaste(behaviour.confirmMultilinePaste);
-    m_terminal->setTrimPastedTrailingNewlines(behaviour.trimPastedNewlines);
-    m_terminal->setWordCharacters(behaviour.wordCharacters);
-    applyLinkSettings();
+    applyMouseClipboard();
 }
 
-void TerminalPage::applyLinkSettings()
+// Preferences → Workspace → Mouse and clipboard, with the session's own
+// links and multi-line confirmation.
+void TerminalPage::applyMouseClipboard()
 {
-    const bool enabled = m_appearance.linksEnabled < 0 ? m_behaviour.linksEnabled
+    const auto &mouse = Clipboard::preferences();
+    m_terminal->setConfirmMultilinePaste(m_appearance.confirmMultilinePaste < 0
+                                             ? mouse.confirmMultilinePaste
+                                             : m_appearance.confirmMultilinePaste == 1);
+    m_terminal->setEditMultilinePaste(mouse.editMultilinePaste);
+    m_terminal->setTrimPastedTrailingNewlines(mouse.trimPastedNewlines);
+    m_terminal->setWordCharacters(Clipboard::wordCharacters());
+    const bool enabled = m_appearance.linksEnabled < 0 ? mouse.links != QStringLiteral("off")
                                                      : m_appearance.linksEnabled == 1;
     m_terminal->setLinksEnabled(enabled);
     m_terminal->setLinkTooltipsEnabled(enabled);
@@ -293,6 +414,7 @@ void TerminalPage::createTerminal()
     });
     setFocusProxy(m_terminal);
     setBehaviour(loadTerminalBehaviour());
+    connect(Clipboard::notifier(), &Clipboard::Notifier::changed, this, &TerminalPage::applyMouseClipboard);
 
     // Page-level shortcuts take priority over the terminal, which does not
     // claim Ctrl+=/-/0 for the remote program. Ctrl+= and Ctrl+Shift++ cover
@@ -325,19 +447,22 @@ void TerminalPage::createTerminal()
     m_copyAction = addZoomAction(QStringLiteral("Copy"), {});
     connect(m_copyAction, &QAction::triggered, m_terminal, &QTermWidget::copyClipboard);
     m_pasteAction = addZoomAction(QStringLiteral("Paste"), {});
-    connect(m_pasteAction, &QAction::triggered, m_terminal, &QTermWidget::pasteClipboard);
+    connect(m_pasteAction, &QAction::triggered, this, [this] { paste(false); });
     m_findAction = addZoomAction(QStringLiteral("Search…"), {});
     connect(m_findAction, &QAction::triggered, m_terminal, &QTermWidget::toggleShowSearchBar);
     m_clearAction = addZoomAction(QStringLiteral("Clear Terminal"), {});
     connect(m_clearAction, &QAction::triggered, m_terminal, &QTermWidget::clear);
     setShortcuts(loadShortcuts());
 
-    connect(m_terminal, &QTermWidget::copyAvailable, this, [this](bool available) {
-        if (available && m_behaviour.copyOnSelect)
-            QApplication::clipboard()->setText(m_terminal->selectedText());
+    // Once a selection is finished (not on every mouse move, which would fill
+    // Windows' clipboard history).
+    connect(m_terminal, &QTermWidget::selectionFinished, this, [this](const QString &text) {
+        Clipboard::selectionFinished(text);
     });
     connect(m_terminal, &QTermWidget::urlActivated, this, [this](const QUrl &url, bool fromMenu) {
-        if (m_terminal->linksEnabled() && (fromMenu || m_behaviour.ctrlClickOpensLinks))
+        // Ctrl+click opens them unless only the menu should; a session that
+        // turns links on while they are off globally uses Ctrl+click.
+        if (m_terminal->linksEnabled() && (fromMenu || Clipboard::preferences().links != QStringLiteral("menu")))
             QDesktopServices::openUrl(url);
     });
     connect(m_terminal, &QTermWidget::bell, this, [this] {
@@ -373,10 +498,11 @@ void TerminalPage::createTerminal()
 void TerminalPage::showTerminalMenu(const QPoint &position, bool always)
 {
     // Like PuTTY and MobaXterm: right-click pastes, Shift+right-click opens the menu.
-    if (!always && m_behaviour.rightClick != QStringLiteral("menu")
+    const auto &rightClick = Clipboard::preferences().rightClick;
+    if (!always && rightClick != QStringLiteral("menu")
         && !(QApplication::keyboardModifiers() & Qt::ShiftModifier)) {
-        if (m_behaviour.rightClick == QStringLiteral("paste"))
-            m_terminal->pasteClipboard();
+        if (rightClick == QStringLiteral("paste"))
+            paste(false);
         return;
     }
     QMenu menu(this);
@@ -462,7 +588,7 @@ void TerminalPage::setFollowsFolder(bool on)
 
 void TerminalPage::saveTerminalOutput()
 {
-    const auto filePath = QFileDialog::getSaveFileName(
+    const auto filePath = FileDialogs::saveFileName(
         this, QStringLiteral("Save Terminal Output"), QStringLiteral("terminal-output.txt"),
         QStringLiteral("Text files (*.txt);;All files (*)"));
     if (filePath.isEmpty())
@@ -537,9 +663,12 @@ void TerminalPage::startSsh()
             });
     connect(m_ssh, &SshSession::disconnected, this, &TerminalPage::handleSshDisconnected);
     m_sftpPanel->setSession(m_ssh);
+    connect(m_ssh, &SshSession::dropFolder, this, &TerminalPage::uploadDropped);
     m_sftpPanel->setFollowControl([this] { return followsFolder(); }, [this](bool on) { setFollowsFolder(on); });
     connect(m_ssh, &SshSession::shellFolder, this,
             [this, session = QPointer<SshSession>(m_ssh)](const QString &path) {
+                if (session && session == m_ssh)
+                    m_lastShellFolder = path;
                 // A query may complete after following was turned off or the
                 // tab reconnected. Do not navigate for a stale result.
                 if (session && session == m_ssh && followsFolder() && m_sftpPanel)
@@ -622,6 +751,7 @@ void TerminalPage::followReportedFolder(const QByteArray &data)
     if (folder.isEmpty())
         return;
     m_folderReported = true;
+    m_lastShellFolder = folder;
     if (m_sftpPanel)
         m_sftpPanel->followFolder(folder);
 }
@@ -895,12 +1025,11 @@ void TerminalPage::handleSshDisconnected(const QString &reason, bool error)
     // by itself when enabled.
     const auto &ssh = m_sshSettings;
     if (ssh.autoReconnect && error && m_wasConnected
-        && m_reconnectAttempts < ssh.reconnectAttempts) {
+        && mayReconnect(m_reconnectAttempts, ssh.reconnectAttempts)) {
         ++m_reconnectAttempts;
-        showLocalText(QStringLiteral("Reconnecting in %1 s (attempt %2 of %3)…\n")
+        showLocalText(QStringLiteral("Reconnecting in %1 s (%2)…\n")
                           .arg(ssh.reconnectDelay)
-                          .arg(m_reconnectAttempts)
-                          .arg(ssh.reconnectAttempts));
+                          .arg(reconnectAttemptText(m_reconnectAttempts, ssh.reconnectAttempts)));
         QTimer::singleShot(ssh.reconnectDelay * 1000, this, [this] {
             if (m_inputMode == InputMode::Closed && !m_ssh)
                 startSsh();

@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "localservers.h"
+#include "filedialogs.h"
 #include "appdirs.h"
 #include "listenaddress.h"
 #include "remotefiles.h"
@@ -941,7 +942,7 @@ QWidget *LocalServersWindow::buildCard(bool tftp)
     connect(largest, &QSpinBox::valueChanged, this, save);
     updateUploads();
     connect(browse, &QPushButton::clicked, this, [this, custom, save] {
-        const QString folder = QFileDialog::getExistingDirectory(this, QStringLiteral("Folder to Share"), custom->text());
+        const QString folder = FileDialogs::existingDirectory(this, QStringLiteral("Folder to Share"), custom->text());
         if (!folder.isEmpty()) {
             custom->setText(folder);
             save();

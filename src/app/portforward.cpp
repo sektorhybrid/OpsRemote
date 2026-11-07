@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "portforward.h"
+#include "formcard.h"
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -281,7 +282,7 @@ PortForwardListEditor::PortForwardListEditor(const QList<PortForward> &value, QW
     m_list = new QTreeWidget(this);
     m_list->setHeaderHidden(true);
     m_list->setRootIsDecorated(false);
-    m_list->setMinimumHeight(110);
+    showRows(m_list); // five rows, more scroll
     layout->addWidget(m_list);
     auto *buttons = new QHBoxLayout;
     auto *add = new QPushButton(QStringLiteral("Add…"), this);

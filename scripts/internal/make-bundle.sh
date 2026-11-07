@@ -170,6 +170,14 @@ mkdir -p "${BUNDLE}/lib/ossl-modules"
 cp -L "${openssl_modules}/legacy.so" "${BUNDLE}/lib/ossl-modules/"
 plugin_files+=("${BUNDLE}/lib/ossl-modules/legacy.so")
 
+# libsecret (the system keyring), opened at run time: the bundle's own,
+# matching its GLib. A newer system's libsecret needs a newer GLib than the
+# bundle's and fails to load next to it (on Arch: undefined symbol
+# g_pointer_bit_unlock_and_set). It talks to the keyring over D-Bus, so this
+# copy works with any system's GNOME Keyring, KWallet or KeePassXC.
+cp -L /usr/lib64/libsecret-1.so.0 "${BUNDLE}/lib/libsecret-1.so.0"
+plugin_files+=("${BUNDLE}/lib/libsecret-1.so.0")
+
 bundle_dependencies "${BUNDLE}/opsremote" "${BUNDLE}/lib/libqtermwidget6.so.2" \
     "${plugin_files[@]}"
 strip --strip-unneeded "${BUNDLE}/opsremote" "${BUNDLE}/lib/libqtermwidget6.so.2"

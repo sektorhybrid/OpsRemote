@@ -2,6 +2,8 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "preferences.h"
+#include "reconnect.h"
+#include "settingsmigrations.h"
 #include "appdirs.h"
 
 #include <QCoreApplication>
@@ -27,14 +29,30 @@ QString settingsPath()
     return portableFilePath(QStringLiteral("settings/settings.yaml"));
 }
 
+// While set (captureSettings), every section is read from and written to
+// this document instead of settings.yaml.
+YAML::Node *captured = nullptr;
+
+// All of settings.yaml; null when it is missing or invalid.
+YAML::Node loadDocument()
+{
+    if (captured)
+        return *captured;
+    try {
+        return YAML::LoadFile(settingsPath().toStdString());
+    } catch (const YAML::Exception &) {
+        return YAML::Node();
+    }
+}
+
 YAML::Node loadSection(const char *section)
 {
     try {
-        const auto node = YAML::LoadFile(settingsPath().toStdString())[section];
-        if (node && node.IsMap())
-            return node;
+        const auto document = loadDocument();
+        if (const auto node = document.IsMap() ? document[section] : YAML::Node(); node && node.IsMap())
+            return YAML::Clone(node);
     } catch (const YAML::Exception &) {
-        // Missing or invalid settings use the defaults.
+        // Invalid settings use the defaults.
     }
     return YAML::Node(YAML::NodeType::Map);
 }
@@ -42,17 +60,26 @@ YAML::Node loadSection(const char *section)
 // Replaces one top-level section and keeps the rest of settings.yaml.
 void saveSection(const char *section, const YAML::Node &node)
 {
+    if (captured) {
+        (*captured)[section] = YAML::Clone(node);
+        return;
+    }
     const auto path = settingsPath();
     if (!QDir().mkpath(QFileInfo(path).absolutePath()))
         return;
+    const SettingsFileLock lock(path); // from reading to writing
     YAML::Node settings;
     try {
         settings = YAML::LoadFile(path.toStdString());
     } catch (const YAML::Exception &) {
         // Start a fresh settings document if it does not exist or is invalid.
     }
-    if (!settings.IsMap())
+    // A new file is in the current shape (see settingsmigrations.h); an
+    // existing one gets its version only from migrateSettings().
+    if (!settings.IsMap()) {
         settings = YAML::Node(YAML::NodeType::Map);
+        settings["settings_version"] = CurrentSettingsVersion;
+    }
     settings[section] = node;
 
     YAML::Emitter emitter;
@@ -108,7 +135,8 @@ bool copyTree(const QString &from, const QString &to, QString *error)
     }
     for (const auto &info : source.entryInfoList(QDir::AllEntries | QDir::Hidden | QDir::NoDotAndDotDot)) {
         // Links are not followed: one could loop, or reach outside settings/.
-        if (info.isSymLink())
+        // Lock files belong to the moment they were taken, not to a copy.
+        if (info.isSymLink() || info.fileName().endsWith(QStringLiteral(".lock")))
             continue;
         const auto target = QDir(to).filePath(info.fileName());
         if (info.isDir()) {
@@ -150,11 +178,10 @@ SshPreferences loadSshPreferences()
     read(node, "security_keys", value.securityKeys);
     read(node, "kerberos", value.kerberos);
     read(node, "kerberos_delegate", value.kerberosDelegate);
+    readChoice(node, "kerberos_order", value.kerberosOrder,
+               {QStringLiteral("first"), QStringLiteral("after-keys"), QStringLiteral("last")});
     read(node, "auto_reconnect", value.autoReconnect);
-    read(node, "reconnect_delay", value.reconnectDelay);
-    value.reconnectDelay = qBound(1, value.reconnectDelay, 600);
-    read(node, "reconnect_attempts", value.reconnectAttempts);
-    value.reconnectAttempts = qBound(1, value.reconnectAttempts, 100);
+    readReconnectTiming(node, value.reconnectDelay, value.reconnectAttempts);
     readChoice(node, "terminal_type", value.terminalType,
                {QStringLiteral("xterm-256color"), QStringLiteral("xterm"),
                 QStringLiteral("vt100"), QStringLiteral("linux")});
@@ -179,9 +206,9 @@ void saveSshPreferences(const SshPreferences &value)
     node["security_keys"] = value.securityKeys;
     node["kerberos"] = value.kerberos;
     node["kerberos_delegate"] = value.kerberosDelegate;
+    node["kerberos_order"] = value.kerberosOrder.toStdString();
     node["auto_reconnect"] = value.autoReconnect;
-    node["reconnect_delay"] = value.reconnectDelay;
-    node["reconnect_attempts"] = value.reconnectAttempts;
+    writeReconnectTiming(node, value.reconnectDelay, value.reconnectAttempts);
     node["terminal_type"] = value.terminalType.toStdString();
     saveSection("ssh", node);
 }
@@ -345,11 +372,6 @@ SessionListPreferences loadSessionListPreferences()
     read(node, "check_status", value.checkStatus);
     read(node, "check_seconds", value.checkSeconds);
     value.checkSeconds = qBound(10, value.checkSeconds, 3600);
-    // Earlier versions had summary_in_column: true/false.
-    bool inColumn = false;
-    read(node, "summary_in_column", inColumn);
-    if (inColumn)
-        value.folderSummary = QStringLiteral("column");
     readChoice(node, "folder_summary", value.folderSummary,
                {QStringLiteral("name"), QStringLiteral("column"), QStringLiteral("off")});
     read(node, "show_search", value.showSearch);
@@ -359,6 +381,7 @@ SessionListPreferences loadSessionListPreferences()
     read(node, "folder_gap", value.folderGap);
     readChoice(node, "folders_at_start", value.foldersAtStart,
                {QStringLiteral("remember"), QStringLiteral("expanded"), QStringLiteral("collapsed")});
+    read(node, "show_revert_buttons", value.showRevertButtons);
     value.folderGap = qBound(0, value.folderGap, 30);
     return value;
 }
@@ -379,6 +402,7 @@ void saveSessionListPreferences(const SessionListPreferences &value)
     node["indentation"] = value.indentation;
     node["folder_gap"] = value.folderGap;
     node["folders_at_start"] = value.foldersAtStart.toStdString();
+    node["show_revert_buttons"] = value.showRevertButtons;
     saveSection("session_list", node);
 }
 
@@ -491,7 +515,6 @@ CommandsPreferences loadCommandsPreferences()
 {
     const auto node = loadSection("commands");
     CommandsPreferences value;
-    read(node, "confirm_multiline", value.confirmMultiline);
     read(node, "show_files", value.showFiles);
     read(node, "show_commands", value.showCommands);
     read(node, "show_scripts", value.showScripts);
@@ -501,11 +524,15 @@ CommandsPreferences loadCommandsPreferences()
 void saveCommandsPreferences(const CommandsPreferences &value)
 {
     YAML::Node node(YAML::NodeType::Map);
-    node["confirm_multiline"] = value.confirmMultiline;
     node["show_files"] = value.showFiles;
     node["show_commands"] = value.showCommands;
     node["show_scripts"] = value.showScripts;
     saveSection("commands", node);
+}
+
+void captureSettings(YAML::Node *document)
+{
+    captured = document;
 }
 
 YAML::Node loadPreferencesSection(const char *section)
@@ -522,7 +549,7 @@ QList<Snippet> loadSnippets()
 {
     QList<Snippet> snippets;
     try {
-        const auto node = YAML::LoadFile(settingsPath().toStdString())["snippets"];
+        const auto node = loadDocument()["snippets"];
         if (node && node.IsSequence()) {
             for (const auto &item : node) {
                 Snippet snippet;
@@ -558,7 +585,7 @@ QList<HighlightRule> loadHighlightRules()
 {
     QList<HighlightRule> rules;
     try {
-        const auto node = YAML::LoadFile(settingsPath().toStdString())["highlights"];
+        const auto node = loadDocument()["highlights"];
         if (node && node.IsSequence()) {
             for (const auto &item : node) {
                 HighlightRule rule;
@@ -662,19 +689,9 @@ TerminalBehaviour loadTerminalBehaviour()
                {QStringLiteral("left"), QStringLiteral("right"), QStringLiteral("hidden")});
     read(node, "padding", value.padding);
     value.padding = qBound(0, value.padding, 32);
-    read(node, "copy_on_select", value.copyOnSelect);
-    readChoice(node, "right_click", value.rightClick,
-               {QStringLiteral("menu"), QStringLiteral("paste"), QStringLiteral("none")});
-    readChoice(node, "middle_click", value.middleClick,
-               {QStringLiteral("paste"), QStringLiteral("clipboard"), QStringLiteral("menu"),
-                QStringLiteral("none")});
-    read(node, "confirm_multiline_paste", value.confirmMultilinePaste);
-    read(node, "trim_pasted_newlines", value.trimPastedNewlines);
-    read(node, "word_characters", value.wordCharacters);
     readChoice(node, "bell", value.bell,
                {QStringLiteral("none"), QStringLiteral("visual"), QStringLiteral("sound")});
-    read(node, "links_enabled", value.linksEnabled);
-    read(node, "ctrl_click_opens_links", value.ctrlClickOpensLinks);
+    read(node, "upload_dropped_files", value.uploadDroppedFiles);
     read(node, "mark_activity", value.markActivity);
     readChoice(node, "activity_style", value.activityStyle,
                {QStringLiteral("pulse"), QStringLiteral("steady"), QStringLiteral("text")});
@@ -695,15 +712,8 @@ void saveTerminalBehaviour(const TerminalBehaviour &value)
     node["cursor_blinks"] = value.cursorBlinks;
     node["scroll_bar"] = value.scrollBar.toStdString();
     node["padding"] = value.padding;
-    node["copy_on_select"] = value.copyOnSelect;
-    node["right_click"] = value.rightClick.toStdString();
-    node["middle_click"] = value.middleClick.toStdString();
-    node["confirm_multiline_paste"] = value.confirmMultilinePaste;
-    node["trim_pasted_newlines"] = value.trimPastedNewlines;
-    node["word_characters"] = value.wordCharacters.toStdString();
     node["bell"] = value.bell.toStdString();
-    node["links_enabled"] = value.linksEnabled;
-    node["ctrl_click_opens_links"] = value.ctrlClickOpensLinks;
+    node["upload_dropped_files"] = value.uploadDroppedFiles;
     node["mark_activity"] = value.markActivity;
     node["activity_style"] = value.activityStyle.toStdString();
     node["activity_color"] = value.activityColor.isValid() ? value.activityColor.name().toStdString() : std::string();
@@ -721,12 +731,9 @@ StartupPreferences loadStartupPreferences()
     read(node, "confirm_close_connected", value.confirmCloseConnected);
     read(node, "confirm_exit", value.confirmExit);
     read(node, "new_tab_next_to_current", value.newTabNextToCurrent);
-    read(node, "middle_click_closes", value.middleClickCloses);
     read(node, "allow_duplicate_session_tabs", value.allowDuplicateSessionTabs);
-    readChoice(node, "wheel_on_fields", value.wheelOnFields,
-               {QStringLiteral("focused"), QStringLiteral("always"), QStringLiteral("never")});
     readChoice(node, "tab_title", value.tabTitle,
-               {QStringLiteral("name"), QStringLiteral("userhost")});
+               {QStringLiteral("name"), QStringLiteral("userhost"), QStringLiteral("both")});
     read(node, "remember_window", value.rememberWindow);
     read(node, "single_instance", value.singleInstance);
     read(node, "wayland_activation", value.waylandActivation);
@@ -754,14 +761,57 @@ void saveStartupPreferences(const StartupPreferences &value)
     node["confirm_close_connected"] = value.confirmCloseConnected;
     node["confirm_exit"] = value.confirmExit;
     node["new_tab_next_to_current"] = value.newTabNextToCurrent;
-    node["middle_click_closes"] = value.middleClickCloses;
     node["allow_duplicate_session_tabs"] = value.allowDuplicateSessionTabs;
-    node["wheel_on_fields"] = value.wheelOnFields.toStdString();
     node["tab_title"] = value.tabTitle.toStdString();
     node["remember_window"] = value.rememberWindow;
     node["single_instance"] = value.singleInstance;
     node["wayland_activation"] = value.waylandActivation;
     saveSection("startup", node);
+}
+
+MouseClipboardPreferences loadMouseClipboardPreferences()
+{
+    const auto node = loadSection("mouse_clipboard");
+    MouseClipboardPreferences value;
+    read(node, "copy_on_select", value.copyOnSelect);
+    readChoice(node, "double_click", value.doubleClick,
+               {QStringLiteral("word-characters"), QStringLiteral("letters")});
+    read(node, "word_characters", value.wordCharacters);
+    readChoice(node, "paste", value.paste,
+               {QStringLiteral("newest"), QStringLiteral("clipboard"), QStringLiteral("system")});
+    read(node, "other_programs_selection", value.otherProgramsSelection);
+    readChoice(node, "right_click", value.rightClick,
+               {QStringLiteral("menu"), QStringLiteral("paste"), QStringLiteral("none")});
+    readChoice(node, "middle_click", value.middleClick,
+               {QStringLiteral("paste"), QStringLiteral("menu"), QStringLiteral("none")});
+    read(node, "middle_click_closes_tab", value.middleClickClosesTab);
+    readChoice(node, "wheel_on_fields", value.wheelOnFields,
+               {QStringLiteral("focused"), QStringLiteral("always"), QStringLiteral("never")});
+    read(node, "confirm_multiline_paste", value.confirmMultilinePaste);
+    read(node, "edit_multiline_paste", value.editMultilinePaste);
+    read(node, "trim_pasted_newlines", value.trimPastedNewlines);
+    readChoice(node, "links", value.links,
+               {QStringLiteral("ctrl-click"), QStringLiteral("menu"), QStringLiteral("off")});
+    return value;
+}
+
+void saveMouseClipboardPreferences(const MouseClipboardPreferences &value)
+{
+    YAML::Node node(YAML::NodeType::Map);
+    node["copy_on_select"] = value.copyOnSelect;
+    node["double_click"] = value.doubleClick.toStdString();
+    node["word_characters"] = value.wordCharacters.toStdString();
+    node["paste"] = value.paste.toStdString();
+    node["other_programs_selection"] = value.otherProgramsSelection;
+    node["right_click"] = value.rightClick.toStdString();
+    node["middle_click"] = value.middleClick.toStdString();
+    node["middle_click_closes_tab"] = value.middleClickClosesTab;
+    node["wheel_on_fields"] = value.wheelOnFields.toStdString();
+    node["confirm_multiline_paste"] = value.confirmMultilinePaste;
+    node["edit_multiline_paste"] = value.editMultilinePaste;
+    node["trim_pasted_newlines"] = value.trimPastedNewlines;
+    node["links"] = value.links.toStdString();
+    saveSection("mouse_clipboard", node);
 }
 
 QStringList loadOpenSessions()

@@ -51,6 +51,11 @@ public:
 
     QString value() const;
     QString password() const;
+    // What is missing for the chosen proxy (host, port), or empty. While
+    // something is, the fields are marked and value() is not to be saved.
+    QString problem() const;
+    // Names the session's protocol in the explanation under the fields.
+    void setProtocol(const QString &protocol);
 
 signals:
     // The proxy itself changed (not the password).
@@ -66,4 +71,6 @@ private:
     QSpinBox *m_port = nullptr;
     QLineEdit *m_user = nullptr;
     QLineEdit *m_password = nullptr;
+    class StatusLine *m_status = nullptr;
+    class QLabel *m_help = nullptr;
 };

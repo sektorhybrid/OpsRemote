@@ -21,16 +21,10 @@ struct TerminalBehaviour
     bool cursorBlinks = false;
     QString scrollBar = QStringLiteral("right"); // left, right, hidden
     int padding = 2;
-    bool copyOnSelect = false;
-    QString rightClick = QStringLiteral("menu"); // menu, paste, none
-    // paste: the X11 selection where there is one (Linux), else the clipboard.
-    QString middleClick = QStringLiteral("paste"); // paste, clipboard, menu, none
-    bool confirmMultilinePaste = true;
-    bool trimPastedNewlines = false;
-    QString wordCharacters = QStringLiteral(":@-./_~?&=%+#");
     QString bell = QStringLiteral("visual"); // none, visual, sound
-    bool linksEnabled = true;
-    bool ctrlClickOpensLinks = true;
+    // Files dropped on a terminal go into the folder of the program in it
+    // (asking first); off: their paths are typed, as before.
+    bool uploadDroppedFiles = true;
     bool markActivity = true; // Marks background tabs that print output.
     // How: "pulse" (a dot fading between two colours), "steady" (a dot), or
     // "text" (the title's colour; Kvantum styles keep their own).
@@ -49,11 +43,10 @@ struct StartupPreferences
     bool confirmCloseConnected = true;
     bool confirmExit = true;
     bool newTabNextToCurrent = false;
-    bool middleClickCloses = true;
     // Off: choosing an already-open saved session focuses its existing tab.
     // On: every Open command starts an independent tab/connection.
     bool allowDuplicateSessionTabs = false;
-    QString tabTitle = QStringLiteral("name"); // name, userhost
+    QString tabTitle = QStringLiteral("name"); // name, userhost, both ("Name (user@host)")
     bool rememberWindow = true;
     // Session list entries read "Name (host)".
     // Starting OpsRemote again brings the running copy forward instead.
@@ -62,13 +55,48 @@ struct StartupPreferences
     // (xdg-activation). Off: GNOME shows its busy pointer for several
     // seconds after each request, that is after most menus and dialogs.
     bool waylandActivation = false;
+
+    bool operator==(const StartupPreferences &) const = default;
+};
+
+// Mouse and clipboard, the same in terminals and every other place of
+// OpsRemote and on every system (settings.yaml "mouse_clipboard:"; used
+// through clipboard.h).
+struct MouseClipboardPreferences
+{
+    // Selected text also goes to the clipboard when a selection is finished.
+    bool copyOnSelect = true;
+    // Double-click: "word-characters" (letters, digits and wordCharacters)
+    // or "letters" (letters and digits only).
+    QString doubleClick = QStringLiteral("word-characters");
+    QString wordCharacters = QStringLiteral(":@-./_~?&=%+#");
+    // What every paste pastes: "newest" (the last selection made in
+    // OpsRemote or the last clipboard copy, whichever is newer),
+    // "clipboard", or "system" (Linux: middle-click the selection).
+    QString paste = QStringLiteral("newest");
+    // Linux, with "newest": selections in other programs count too.
+    bool otherProgramsSelection = false;
+    QString rightClick = QStringLiteral("menu"); // menu, paste, none
+    QString middleClick = QStringLiteral("paste"); // paste, menu, none
+    bool middleClickClosesTab = true;
     // The mouse wheel over drop-down lists and number fields: "focused"
     // (only after clicking the field; otherwise it scrolls the page),
     // "always" (Qt's default), or "never".
     QString wheelOnFields = QStringLiteral("focused");
+    bool confirmMultilinePaste = true;
+    // That window (and the Commands tab's) opens with its text editable.
+    bool editMultilinePaste = false;
+    bool trimPastedNewlines = false;
+    // Links in terminal output: "ctrl-click" (Ctrl+click or the right-click
+    // menu opens them), "menu" (only the menu), "off" (not recognised). A
+    // session can turn them on or off for itself.
+    QString links = QStringLiteral("ctrl-click");
 
-    bool operator==(const StartupPreferences &) const = default;
+    bool operator==(const MouseClipboardPreferences &) const = default;
 };
+
+MouseClipboardPreferences loadMouseClipboardPreferences();
+void saveMouseClipboardPreferences(const MouseClipboardPreferences &value);
 
 // SSH connections (settings.yaml "ssh:").
 struct SshPreferences
@@ -88,6 +116,10 @@ struct SshPreferences
     // Kerberos (GSSAPI) logons with the user's ticket; delegation passes the
     // ticket on to the server (ssh -K).
     bool kerberos = false;
+    // Where Kerberos comes in the sequence of authentication: "first",
+    // "after-keys", or "last" (after keys and the saved password, still
+    // before anything that asks).
+    QString kerberosOrder = QStringLiteral("first");
     bool kerberosDelegate = false;
     bool autoReconnect = false;
     int reconnectDelay = 5; // seconds
@@ -203,6 +235,9 @@ struct SessionListPreferences
     // closed; folders it knows nothing about are collapsed), "expanded", or
     // "collapsed".
     QString foldersAtStart = QStringLiteral("remember");
+    // Session and folder windows: a ↺ button on rows with their own value,
+    // back to the inherited one (inheritance.h).
+    bool showRevertButtons = true;
 
     bool operator==(const SessionListPreferences &) const = default;
 };
@@ -290,8 +325,8 @@ struct HighlightRule
 // "commands:").
 struct CommandsPreferences
 {
-    // Ask before sending a command of several lines.
-    bool confirmMultiline = true;
+    // Asking before a command of several lines is the terminal's
+    // confirmMultilinePaste (TerminalBehaviour).
     bool showFiles = true;
     bool showCommands = true;
     bool showScripts = true;
@@ -333,6 +368,9 @@ void saveBackupPreferences(const BackupPreferences &preferences);
 // modules that keep their own settings.
 YAML::Node loadPreferencesSection(const char *section);
 void savePreferencesSection(const char *section, const YAML::Node &node);
+// Until called with nullptr, sections are read from and written to document,
+// never to settings.yaml (the settings snapshot, see settingsSnapshot()).
+void captureSettings(YAML::Node *document);
 QList<Snippet> loadSnippets();
 void saveSnippets(const QList<Snippet> &snippets);
 QList<HighlightRule> loadHighlightRules();

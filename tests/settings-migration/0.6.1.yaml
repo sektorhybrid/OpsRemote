@@ -1,0 +1,96 @@
+# Settings files of OpsRemote 0.6.1 (no settings_version yet), one case
+# each; checked in tests/settingsmigrationtest.cpp. Upgrades are tested for
+# the last 10 releases: this file goes with its checks when 0.6.1 is older.
+
+default:
+  # settings.yaml as OpsRemote 0.6.1 saves it, Copy on select left at its default (off).
+  startup:
+    single_instance: true
+    wayland_activation: false
+  behaviour:
+    scrollback_lines: 1000000
+    cursor_shape: block
+    cursor_blinks: false
+    scroll_bar: right
+    padding: 2
+    copy_on_select: false
+    right_click: menu
+    middle_click: paste
+    confirm_multiline_paste: true
+    trim_pasted_newlines: false
+    word_characters: :@-./_~?&=%+#
+    bell: visual
+    links_enabled: true
+    ctrl_click_opens_links: true
+    mark_activity: true
+    activity_style: pulse
+    activity_color: "#d18a59"
+    activity_pulse_color: "#33f8eb"
+
+copy-on-select:
+  # settings.yaml of OpsRemote 0.6.1 with Copy on select turned on by hand.
+  startup:
+    single_instance: true
+  behaviour:
+    scrollback_lines: 1000000
+    cursor_shape: block
+    cursor_blinks: false
+    scroll_bar: right
+    padding: 2
+    copy_on_select: true
+    right_click: menu
+    middle_click: paste
+    confirm_multiline_paste: true
+    trim_pasted_newlines: false
+    word_characters: :@-./_~?&=%+#
+    bell: visual
+    links_enabled: true
+    ctrl_click_opens_links: true
+    mark_activity: true
+    activity_style: pulse
+    activity_color: "#d18a59"
+    activity_pulse_color: "#33f8eb"
+
+leftovers:
+  # Keys left behind by earlier versions, as in a real 0.6.1 file (the user's).
+  startup:
+    single_instance: true
+    show_host_in_list: false
+  session_list:
+    show_host: true
+    summary_in_column: true
+  command_bar:
+    shown: false
+    bottom: false
+    small_buttons: false
+    confirm_multiline: true
+  behaviour:
+    confirm_multiline_paste: true
+
+links-menu:
+  # Links on, but Ctrl+click turned off (open from the menu only).
+  behaviour:
+    links_enabled: true
+    ctrl_click_opens_links: false
+
+links-off:
+  # Links turned off by hand.
+  behaviour:
+    links_enabled: false
+    ctrl_click_opens_links: true
+
+multiline-both-off:
+  # Both "ask before several lines" settings turned off by hand.
+  behaviour:
+    confirm_multiline_paste: false
+  commands:
+    confirm_multiline: false
+    show_files: true
+
+multiline-one-off:
+  # Only the Commands tab's "ask before several lines" turned off.
+  behaviour:
+    confirm_multiline_paste: true
+  commands:
+    confirm_multiline: false
+    show_files: true

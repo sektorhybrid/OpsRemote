@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "automation.h"
+#include "formcard.h"
 #include "preferences.h"
 
 #include <QComboBox>
@@ -181,7 +182,7 @@ QTableWidget *makeTable(const QStringList &headers, QWidget *parent)
     table->verticalHeader()->hide();
     table->setSelectionBehavior(QAbstractItemView::SelectRows);
     table->setSelectionMode(QAbstractItemView::SingleSelection);
-    table->setMinimumHeight(140);
+    showRows(table); // five rows, more scroll
     return table;
 }
 }

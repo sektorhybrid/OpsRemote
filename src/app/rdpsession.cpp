@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "rdpsession.h"
+#include "reconnect.h"
 #include "appdirs.h"
 #include "localresources.h"
 #include "rdpclipboard.h"
@@ -660,16 +661,19 @@ void RdpSession::run(RdpConnectionSettings settings)
             if (m_clipboard)
                 m_clipboard->attach(nullptr);
             bool resumed = false;
-            constexpr int attempts = 6;
-            for (int attempt = 1; attempt <= attempts && !m_stopping && !resumed; ++attempt) {
-                QMetaObject::invokeMethod(this, [this, attempt] {
-                    emit statusMessage(QStringLiteral("Connection lost. Reconnecting (attempt %1 of %2)…")
-                                           .arg(attempt)
-                                           .arg(attempts));
+            // The session type's wait and tries (reconnect.h); 0 keeps trying.
+            const int attempts = settings.options.reconnectAttempts < 0 ? DefaultReconnectAttempts
+                                                                        : settings.options.reconnectAttempts;
+            const int delay = settings.options.reconnectDelay > 0 ? settings.options.reconnectDelay
+                                                                 : DefaultReconnectDelay;
+            for (int attempt = 1; mayReconnect(attempt - 1, attempts) && !m_stopping && !resumed; ++attempt) {
+                QMetaObject::invokeMethod(this, [this, attempt, attempts] {
+                    emit statusMessage(QStringLiteral("Connection lost. Reconnecting (%1)…")
+                                           .arg(reconnectAttemptText(attempt, attempts)));
                 }, Qt::QueuedConnection);
                 qInfo("RDP: reconnecting, attempt %d of %d", attempt, attempts);
                 resumed = freerdp_reconnect(instance);
-                for (int wait = 0; !resumed && wait < 50 && !m_stopping; ++wait)
+                for (int wait = 0; !resumed && wait < delay * 10 && !m_stopping; ++wait)
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
             if (!resumed)

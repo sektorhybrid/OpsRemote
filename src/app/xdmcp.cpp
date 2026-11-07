@@ -2,6 +2,9 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "xdmcp.h"
+#include "formcard.h"
+#include "inheritance.h"
+#include "preferences.h"
 #include "appdirs.h"
 #include "availabilitynote.h"
 
@@ -17,7 +20,6 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRegularExpression>
-#include <QSaveFile>
 #include <QScreen>
 #include <QStandardPaths>
 #include <QTabWidget>
@@ -27,10 +29,6 @@
 #include <yaml-cpp/yaml.h>
 
 namespace {
-QString settingsPath()
-{
-    return portableFilePath(QStringLiteral("settings/settings.yaml"));
-}
 
 QString labelFor(const RdpChoices &choices, const QString &value)
 {
@@ -171,7 +169,7 @@ XdmcpOptions loadXdmcpDefaults()
 {
     try {
         return XdmcpOptions::builtIn().overriddenBy(
-            xdmcpOptionsFromYaml(YAML::LoadFile(settingsPath().toStdString())["xdmcp"]));
+            xdmcpOptionsFromYaml(loadPreferencesSection("xdmcp")));
     } catch (const YAML::Exception &) {
         return XdmcpOptions::builtIn();
     }
@@ -179,30 +177,9 @@ XdmcpOptions loadXdmcpDefaults()
 
 void saveXdmcpDefaults(const XdmcpOptions &options)
 {
-    const auto path = settingsPath();
-    if (!QDir().mkpath(QFileInfo(path).absolutePath()))
-        return;
-    YAML::Node settings;
-    try {
-        settings = YAML::LoadFile(path.toStdString());
-    } catch (const YAML::Exception &) {
-    }
-    if (!settings.IsMap())
-        settings = YAML::Node(YAML::NodeType::Map);
     YAML::Node node(YAML::NodeType::Map);
     xdmcpOptionsToYaml(options, node);
-    settings["xdmcp"] = node;
-    YAML::Emitter emitter;
-    emitter << settings;
-    QSaveFile file(path);
-    if (!file.open(QIODevice::WriteOnly))
-        return;
-    QByteArray contents(emitter.c_str());
-    contents.append('\n');
-    if (file.write(contents) == contents.size())
-        file.commit();
-    else
-        file.cancelWriting();
+    savePreferencesSection("xdmcp", node);
 }
 
 XServerProgram findXServer(const QString &choice)
@@ -298,9 +275,10 @@ XdmcpOptionsEditor::XdmcpOptionsEditor(const XdmcpOptions &value, const XdmcpOpt
 {
     const auto makeBox = [this](const RdpChoices &choices, const QString &current, const QString &defaultValue) {
         auto *box = new QComboBox(this);
-        box->addItem(QStringLiteral("Default (%1)").arg(labelFor(choices, defaultValue)), QString());
+        addInheritedItem(box, QString(labelFor(choices, defaultValue)), QString());
         for (const auto &choice : choices)
-            box->addItem(choice.second, choice.first);
+            if (choice.first != defaultValue) // listed once, as the inherited one
+                box->addItem(choice.second, choice.first);
         box->setCurrentIndex(qMax(0, box->findData(current)));
         return box;
     };
@@ -331,7 +309,9 @@ XdmcpOptionsEditor::XdmcpOptionsEditor(const XdmcpOptions &value, const XdmcpOpt
     layout->addWidget(tabs);
     auto *page = new QWidget(tabs);
     tabs->addTab(page, QStringLiteral("Display"));
-    auto *form = new QFormLayout(page);
+    // Light cards (formcard.h).
+    auto *cards = new QVBoxLayout(page);
+    auto *form = addFormCard(cards, QStringLiteral("General"), page);
     form->addRow(QStringLiteral("Show:"), m_mode);
     form->addRow(QStringLiteral("X server program:"), m_program);
     form->addRow(QString(), m_path);
@@ -346,6 +326,8 @@ XdmcpOptionsEditor::XdmcpOptionsEditor(const XdmcpOptions &value, const XdmcpOpt
     help->setWordWrap(true);
     help->setForegroundRole(QPalette::PlaceholderText);
     form->addRow(help);
+    cards->addStretch();
+    alignFormLabels(this);
     connect(m_program, &QComboBox::currentIndexChanged, this, &XdmcpOptionsEditor::updateCustom);
     connect(m_path, &QLineEdit::editingFinished, m_note, &AvailabilityNote::check);
     updateCustom();

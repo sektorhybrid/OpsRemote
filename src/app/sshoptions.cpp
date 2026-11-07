@@ -2,6 +2,10 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "sshoptions.h"
+#include "filedialogs.h"
+#include "inheritance.h"
+#include "formcard.h"
+#include "reconnect.h"
 #include "availabilitynote.h"
 #include "localresources.h"
 #include "sshauth.h"
@@ -12,6 +16,7 @@
 #include <QFileInfo>
 #include <QFileDialog>
 #include <QFormLayout>
+#include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -44,6 +49,8 @@ SshPreferences SshOptions::appliedTo(SshPreferences preferences) const
         preferences.kerberos = kerberos == 1;
     if (kerberosDelegate >= 0)
         preferences.kerberosDelegate = kerberosDelegate == 1;
+    if (!kerberosOrder.isEmpty())
+        preferences.kerberosOrder = kerberosOrder;
     if (autoReconnect >= 0)
         preferences.autoReconnect = autoReconnect == 1;
     if (reconnectDelay > 0)
@@ -85,14 +92,17 @@ SshOptions sshOptionsFromYaml(const YAML::Node &node)
         flag("kerberos", options.kerberos);
         flag("kerberos_delegate", options.kerberosDelegate);
         text("kerberos_server", options.kerberosServer);
+        text("kerberos_order", options.kerberosOrder);
+        if (!QStringList{QString(), QStringLiteral("first"), QStringLiteral("after-keys"),
+                         QStringLiteral("last")}.contains(options.kerberosOrder))
+            options.kerberosOrder.clear();
         text("file_transfer", options.fileTransfer);
         if (!options.fileTransfer.isEmpty()
             && options.fileTransfer != QStringLiteral("auto") && options.fileTransfer != QStringLiteral("sftp")
             && options.fileTransfer != QStringLiteral("scp"))
             options.fileTransfer.clear();
         flag("auto_reconnect", options.autoReconnect);
-        number("reconnect_delay", options.reconnectDelay, 1, 600);
-        number("reconnect_attempts", options.reconnectAttempts, 0, 100);
+        readReconnectTiming(node, options.reconnectDelay, options.reconnectAttempts);
         text("terminal_type", options.terminalType);
         text("backspace", options.backspace);
         if (options.backspace != QStringLiteral("del") && options.backspace != QStringLiteral("ctrl-h"))
@@ -131,12 +141,11 @@ void sshOptionsToYaml(const SshOptions &options, YAML::Node &node)
         node["kerberos_delegate"] = options.kerberosDelegate == 1;
     if (!options.kerberosServer.isEmpty())
         node["kerberos_server"] = options.kerberosServer.toStdString();
+    if (!options.kerberosOrder.isEmpty())
+        node["kerberos_order"] = options.kerberosOrder.toStdString();
     if (options.autoReconnect >= 0)
         node["auto_reconnect"] = options.autoReconnect == 1;
-    if (options.reconnectDelay > 0)
-        node["reconnect_delay"] = options.reconnectDelay;
-    if (options.reconnectAttempts >= 0)
-        node["reconnect_attempts"] = options.reconnectAttempts;
+    writeReconnectTiming(node, options.reconnectDelay, options.reconnectAttempts);
     if (!options.terminalType.isEmpty())
         node["terminal_type"] = options.terminalType.toStdString();
     if (!options.backspace.isEmpty())
@@ -154,12 +163,13 @@ SshOptionsEditor::SshOptionsEditor(const SshOptions &value, const SshPreferences
                                    QWidget *parent)
     : QWidget(parent), m_defaults(defaults)
 {
-    // A number whose lowest value means "Default (…)".
+    // A number whose lowest value means the inherited one (shown as it).
     const auto makeNumber = [this](int own, int low, int high, const QString &defaultText,
                                    const QString &suffix) {
         auto *box = new QSpinBox(this);
         box->setRange(low - 1, high);
-        box->setSpecialValueText(QStringLiteral("Default (%1)").arg(defaultText));
+        box->setSpecialValueText(defaultText);
+        box->setProperty("inherits", true); // applyInheritance()
         box->setSuffix(suffix);
         box->setValue(own >= low ? own : low - 1);
         return box;
@@ -168,6 +178,7 @@ SshOptionsEditor::SshOptionsEditor(const SshOptions &value, const SshPreferences
         auto *box = new QCheckBox(text, this);
         box->setToolTip(tip);
         box->setChecked(own >= 0 ? own == 1 : fallback);
+        box->setProperty("inheritedOn", fallback); // applyInheritance()
         return box;
     };
 
@@ -195,11 +206,13 @@ SshOptionsEditor::SshOptionsEditor(const SshOptions &value, const SshPreferences
                                                "connected."),
                                 value.forwardAgent, defaults.forwardAgent);
     m_followTerminalFolder = new QComboBox(this);
-    m_followTerminalFolder->addItem(
-        QStringLiteral("Use global setting (%1)").arg(defaults.followTerminalFolder
-            ? QStringLiteral("enabled") : QStringLiteral("disabled")), -1);
-    m_followTerminalFolder->addItem(QStringLiteral("Enabled"), 1);
-    m_followTerminalFolder->addItem(QStringLiteral("Disabled"), 0);
+    // The inherited choice first, then only the other one (inheritance.h).
+    addInheritedItem(m_followTerminalFolder,
+                     defaults.followTerminalFolder ? QStringLiteral("On") : QStringLiteral("Off"), -1);
+    if (defaults.followTerminalFolder)
+        m_followTerminalFolder->addItem(QStringLiteral("Off"), 0);
+    else
+        m_followTerminalFolder->addItem(QStringLiteral("On"), 1);
     m_followTerminalFolder->setCurrentIndex(
         qMax(0, m_followTerminalFolder->findData(value.followTerminalFolder)));
     m_followTerminalFolder->setToolTip(QStringLiteral(
@@ -213,10 +226,11 @@ SshOptionsEditor::SshOptionsEditor(const SshOptions &value, const SshPreferences
     m_fileTransfer = new QComboBox(this);
     for (const auto &[choice, label] : sshFileTransferChoices()) {
         if (choice == defaults.fileTransfer)
-            m_fileTransfer->insertItem(0, QStringLiteral("Default (%1)").arg(label), QString());
+            insertInheritedItem(m_fileTransfer, QString(label), QString());
     }
     for (const auto &[choice, label] : sshFileTransferChoices())
-        m_fileTransfer->addItem(label, choice);
+        if (choice != defaults.fileTransfer) // listed once, as the inherited one
+            m_fileTransfer->addItem(label, choice);
     m_fileTransfer->setCurrentIndex(qMax(0, m_fileTransfer->findData(value.fileTransfer)));
     m_fileTransfer->setToolTip(QStringLiteral("How the file browser reaches the server's files. SCP "
                                               "suits devices without SFTP (routers, switches, "
@@ -224,13 +238,13 @@ SshOptionsEditor::SshOptionsEditor(const SshOptions &value, const SshPreferences
     m_identityFile = new QLineEdit(value.identityFile, this);
     m_identityFile->setPlaceholderText(
         defaults.identityFile.isEmpty()
-            ? QStringLiteral("Default (none)")
-            : QStringLiteral("Default (%1)").arg(QDir::toNativeSeparators(defaults.identityFile)));
+            ? QStringLiteral("None")
+            : QDir::toNativeSeparators(defaults.identityFile));
     m_identityFile->setToolTip(QStringLiteral("An unencrypted private key tried before the "
                                               "others."));
     auto *browse = new QPushButton(QStringLiteral("Browse…"), this);
     connect(browse, &QPushButton::clicked, this, [this] {
-        const auto file = QFileDialog::getOpenFileName(this, QStringLiteral("Private Key"),
+        const auto file = FileDialogs::openFileName(this, QStringLiteral("Private Key"),
                                                        QDir::homePath() + QStringLiteral("/.ssh"));
         if (!file.isEmpty())
             m_identityFile->setText(file);
@@ -241,10 +255,10 @@ SshOptionsEditor::SshOptionsEditor(const SshOptions &value, const SshPreferences
     identityRow->addWidget(browse);
 
     m_certificate = new QComboBox(this);
-    m_certificate->addItem(defaults.useCertificates
-                               ? QStringLiteral("Default (the key's own, key-cert.pub)")
-                               : QStringLiteral("Default (none: certificates are off)"),
-                           QString());
+    addInheritedItem(m_certificate, defaults.useCertificates
+                                        ? QStringLiteral("The key's own (key-cert.pub)")
+                                        : QStringLiteral("None (certificates are off)"),
+                     QString());
     m_certificate->addItem(QStringLiteral("None"), QStringLiteral("none"));
     if (!value.certificateFile.isEmpty() && value.certificateFile != QStringLiteral("none"))
         m_certificate->addItem(QDir::toNativeSeparators(value.certificateFile), value.certificateFile);
@@ -254,7 +268,7 @@ SshOptionsEditor::SshOptionsEditor(const SshOptions &value, const SshPreferences
                                              "above."));
     auto *browseCertificate = new QPushButton(QStringLiteral("Browse…"), this);
     connect(browseCertificate, &QPushButton::clicked, this, [this] {
-        const auto file = QFileDialog::getOpenFileName(
+        const auto file = FileDialogs::openFileName(
             this, QStringLiteral("Certificate"), QDir::homePath() + QStringLiteral("/.ssh"),
             QStringLiteral("Certificates (*-cert.pub);;All files (*)"));
         if (file.isEmpty())
@@ -278,8 +292,8 @@ SshOptionsEditor::SshOptionsEditor(const SshOptions &value, const SshPreferences
 
     m_kerberos = makeSwitch(QStringLiteral("Log on with Kerberos (GSSAPI)"),
                             QStringLiteral("Uses your Kerberos ticket (from logging on to the "
-                                           "domain, or kinit) instead of a password. Tried before "
-                                           "keys and passwords."),
+                                           "domain, or kinit) instead of a password. When it is "
+                                           "tried: the sequence of authentication below."),
                             value.kerberos, defaults.kerberos);
     m_kerberosDelegate = makeSwitch(QStringLiteral("Pass the ticket on to the server (ssh -K)"),
                                     QStringLiteral("The server can use your ticket to reach "
@@ -287,26 +301,39 @@ SshOptionsEditor::SshOptionsEditor(const SshOptions &value, const SshPreferences
                                                    "servers you trust."),
                                     value.kerberosDelegate, defaults.kerberosDelegate);
     m_kerberosServer = new QLineEdit(value.kerberosServer, this);
-    m_kerberosServer->setPlaceholderText(QStringLiteral("Default (the host name)"));
+    m_kerberosServer->setPlaceholderText(QStringLiteral("The host name"));
     m_kerberosServer->setToolTip(QStringLiteral("The server's name in Kerberos (host/NAME), when "
                                                 "it differs from the host you connect to, e.g. "
                                                 "behind an alias or an IP address."));
+    m_kerberosOrder = new QComboBox(this);
+    {
+        static const QList<QPair<QString, QString>> orders = {{QStringLiteral("first"), QStringLiteral("First, before keys and passwords")},
+     {QStringLiteral("after-keys"), QStringLiteral("After keys")},
+     {QStringLiteral("last"), QStringLiteral("Last, after keys and the saved password")}};
+        QString inherited;
+        for (const auto &[key, label] : orders)
+            if (key == defaults.kerberosOrder)
+                inherited = label;
+        addInheritedItem(m_kerberosOrder, QString(inherited), QString());
+        for (const auto &[key, label] : orders)
+            if (key != defaults.kerberosOrder) // listed once, as the inherited one
+                m_kerberosOrder->addItem(label, key);
+        m_kerberosOrder->setCurrentIndex(qMax(0, m_kerberosOrder->findData(value.kerberosOrder)));
+        m_kerberosOrder->setToolTip(QStringLiteral("When Kerberos is tried among the ways to log on."));
+    }
     connect(m_kerberos, &QCheckBox::toggled, this, [this](bool on) {
         m_kerberosDelegate->setEnabled(on);
         m_kerberosServer->setEnabled(on);
+        m_kerberosOrder->setEnabled(on);
     });
     m_kerberosDelegate->setEnabled(m_kerberos->isChecked());
     m_kerberosServer->setEnabled(m_kerberos->isChecked());
+    m_kerberosOrder->setEnabled(m_kerberos->isChecked());
     m_autoReconnect = makeSwitch(QStringLiteral("Reconnect automatically if the network drops"),
                                  QString(), value.autoReconnect, defaults.autoReconnect);
-    m_reconnectDelay = makeNumber(value.reconnectDelay, 1, 600,
-                                  QStringLiteral("%1 s").arg(defaults.reconnectDelay),
-                                  QStringLiteral(" s"));
-    m_reconnectAttempts = makeNumber(value.reconnectAttempts, 0, 100,
-                                     QString::number(defaults.reconnectAttempts), QString());
     m_terminalType = new QComboBox(this);
     m_terminalType->setEditable(true);
-    m_terminalType->addItem(QStringLiteral("Default (%1)").arg(defaults.terminalType), QString());
+    addInheritedItem(m_terminalType, QString(defaults.terminalType), QString());
     for (const auto *type : {"xterm-256color", "xterm", "vt100", "linux", "screen-256color"})
         m_terminalType->addItem(QString::fromLatin1(type), QString::fromLatin1(type));
     const int known = m_terminalType->findData(value.terminalType);
@@ -316,39 +343,75 @@ SshOptionsEditor::SshOptionsEditor(const SshOptions &value, const SshPreferences
         m_terminalType->setEditText(value.terminalType);
     m_terminalType->setToolTip(QStringLiteral("The TERM name sent to the server."));
     m_backspace = new QComboBox(this);
-    m_backspace->addItem(QStringLiteral("DEL (default, ^?)"), QString());
+    m_backspace->addItem(QStringLiteral("DEL (^?)"), QString());
     m_backspace->addItem(QStringLiteral("Ctrl+H (^H)"), QStringLiteral("ctrl-h"));
     m_backspace->setCurrentIndex(value.backspace == QStringLiteral("ctrl-h") ? 1 : 0);
     m_backspace->setToolTip(QStringLiteral("Match the remote system's erase character (stty -a)."));
 
-    auto *form = new QFormLayout(this);
-    form->addRow(QStringLiteral("Connect timeout:"), m_connectTimeout);
-    form->addRow(QStringLiteral("Keepalive every:"), m_keepalive);
-    form->addRow(QString(), m_compression);
-    form->addRow(QString(), m_tryPublicKeys);
-    form->addRow(QString(), m_forwardAgent);
+    // Related settings in light cards (formcard.h).
+    auto *page = new QVBoxLayout(this);
+    page->setContentsMargins(0, 0, 0, 0);
+    page->setSpacing(6);
+    // The same cards in every session type: General, Logon, then the
+    // type's own. In each: fields, the switches that stand alone, then the
+    // groups led by a switch (formcard.h).
+    auto *form = addFormCard(page, QStringLiteral("General"), this);
+    m_generalForm = form;
+    form->addRow(QStringLiteral("Timeout:"), m_connectTimeout);
+    form->addRow(QStringLiteral("Keepalive:"), m_keepalive);
     form->addRow(QStringLiteral("File transfer:"), m_fileTransfer);
-    form->addRow(QStringLiteral("Files follow terminal folder:"), m_followTerminalFolder);
+    form->addRow(QStringLiteral("Files follow folder:"), m_followTerminalFolder);
+    form->addRow(QString(), m_compression);
     form->addRow(QString(), m_forwardX11);
     // Off stays possible when there is no X server.
     form->addRow(QString(), new AvailabilityNote(&LocalResources::x11Problem, [this](bool available) {
         m_forwardX11->setEnabled(available || m_forwardX11->isChecked());
     }, this));
+    // Rows only a terminal uses (setFileOnly()); rows keep their numbers
+    // when applyInheritance() wraps their fields.
+    for (QWidget *field : {static_cast<QWidget *>(m_followTerminalFolder), static_cast<QWidget *>(m_forwardX11)}) {
+        int row = -1;
+        form->getWidgetPosition(field, &row, nullptr);
+        m_terminalRows << row;
+    }
+    m_terminalRows << m_terminalRows.last() + 1; // the X server note
+    form->addRow(QString(), m_autoReconnect);
+    // The session type's wait and tries, inherited until set here.
+    m_reconnectDelay = reconnectDelayBox(value.reconnectDelay, m_defaults.reconnectDelay);
+    m_reconnectAttempts = reconnectAttemptsBox(value.reconnectAttempts, m_defaults.reconnectAttempts);
+    form->addRow(QStringLiteral("Wait:"), m_reconnectDelay);
+    form->addRow(QStringLiteral("Tries:"), m_reconnectAttempts);
+    for (QWidget *box : {static_cast<QWidget *>(m_reconnectDelay), static_cast<QWidget *>(m_reconnectAttempts)}) {
+        box->setEnabled(m_autoReconnect->isChecked());
+        connect(m_autoReconnect, &QCheckBox::toggled, box, &QWidget::setEnabled);
+    }
+    form = addFormCard(page, QStringLiteral("Logon"), this);
     form->addRow(QStringLiteral("Private key:"), identityRow);
     form->addRow(QStringLiteral("Certificate:"), certificateRow);
     form->addRow(QString(), m_certificateInfo);
+    form->addRow(QString(), m_tryPublicKeys);
+    form->addRow(QString(), m_forwardAgent);
     form->addRow(QString(), m_kerberos);
     form->addRow(QString(), new AvailabilityNote(&kerberosProblem, [this](bool available) {
         m_kerberos->setEnabled(available || m_kerberos->isChecked());
     }, this));
     form->addRow(QString(), m_kerberosDelegate);
-    form->addRow(QStringLiteral("Kerberos server name:"), m_kerberosServer);
-    form->addRow(QString(), m_autoReconnect);
-    form->addRow(QStringLiteral("Reconnect after:"), m_reconnectDelay);
-    form->addRow(QStringLiteral("Reconnect attempts:"), m_reconnectAttempts);
-    form->addRow(QStringLiteral("Terminal type:"), m_terminalType);
+    form->addRow(QStringLiteral("Kerberos server:"), m_kerberosServer);
+    form->addRow(QStringLiteral("Kerberos order:"), m_kerberosOrder);
+    form = addFormCard(page, QStringLiteral("Terminal"), this);
+    m_terminalCard = form->parentWidget();
+    form->addRow(QStringLiteral("Type:"), m_terminalType);
     form->addRow(QStringLiteral("Backspace sends:"), m_backspace);
+    page->addStretch();
+    alignFormLabels(this);
     showCertificate();
+}
+
+void SshOptionsEditor::setFileOnly(bool fileOnly)
+{
+    for (int row : std::as_const(m_terminalRows))
+        m_generalForm->setRowVisible(row, !fileOnly);
+    m_terminalCard->setVisible(!fileOnly);
 }
 
 // Who the chosen certificate is for and until when; hidden without one.
@@ -383,8 +446,6 @@ SshOptions SshOptionsEditor::value() const
     };
     options.connectTimeout = number(m_connectTimeout);
     options.keepaliveSeconds = number(m_keepalive);
-    options.reconnectDelay = number(m_reconnectDelay);
-    options.reconnectAttempts = number(m_reconnectAttempts);
     // A switch is stored only when it differs from the default.
     const auto flag = [](const QCheckBox *box, bool fallback) {
         return box->isChecked() == fallback ? -1 : (box->isChecked() ? 1 : 0);
@@ -395,11 +456,14 @@ SshOptions SshOptionsEditor::value() const
     options.followTerminalFolder = m_followTerminalFolder->currentData().toInt();
     options.forwardX11 = flag(m_forwardX11, m_defaults.forwardX11);
     options.autoReconnect = flag(m_autoReconnect, m_defaults.autoReconnect);
+    options.reconnectDelay = m_reconnectDelay->value();
+    options.reconnectAttempts = m_reconnectAttempts->value();
     options.identityFile = m_identityFile->text().trimmed();
     options.certificateFile = m_certificate->currentData().toString();
     options.kerberos = flag(m_kerberos, m_defaults.kerberos);
     options.kerberosDelegate = flag(m_kerberosDelegate, m_defaults.kerberosDelegate);
     options.kerberosServer = m_kerberosServer->text().trimmed();
+    options.kerberosOrder = m_kerberosOrder->currentData().toString();
     options.fileTransfer = m_fileTransfer->currentData().toString();
     options.backspace = m_backspace->currentData().toString();
     const int index = m_terminalType->currentIndex();

@@ -67,6 +67,7 @@ struct SshConnectionSettings
     bool securityKeys = true;
     // Kerberos (GSSAPI): tried first when on; delegation passes the ticket on.
     bool kerberos = false;
+    QString kerberosOrder = QStringLiteral("first"); // see SshPreferences
     bool kerberosDelegate = false;
     QString kerberosServer;
     int columns = 80;
@@ -144,6 +145,9 @@ public:
     QString fileProtocol() const override { return m_fileProtocol; }
     void listDirectory(const QString &path) override;
     void queryShellFolder() override;
+    // The program in front of this tab's shell, for dropped files: answered
+    // by dropFolder() (see SshWorker::dropFolder for the lines).
+    void queryDropFolder();
     void makeDirectory(const QString &path) override;
     void renamePath(const QString &from, const QString &to) override;
     void removePaths(const QStringList &paths) override;
@@ -175,6 +179,7 @@ signals:
     void forwardStats(int index, int connections, qint64 received, qint64 sent);
     void probeFinished(int id, bool reachable, const QString &message, int milliseconds);
     // exitStatus: -1 when unknown (error says why).
+    void dropFolder(const QString &answer);
     void commandFinished(int id, int exitStatus, const QByteArray &output, bool truncated,
                          const QString &error, int milliseconds);
     void dataReceived(const QByteArray &data);

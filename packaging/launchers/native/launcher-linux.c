@@ -29,6 +29,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -37,6 +38,32 @@
 #define TAIL_SIZE 1500
 
 static char here[PATH_MAX];
+
+// Every message says this: what is wrong never touches the user's data.
+#define SAFE "Your sessions and settings are unaffected by this."
+
+// The package itself lacks what the program is unpacked from: only getting
+// it again helps (the runtime copy is rebuilt by the launcher on its own).
+#define PACKAGE_DAMAGED                                                                        \
+    "Some of OpsRemote's own files are missing or damaged: %s.\n\n"                           \
+    "OpsRemote unpacks its program from these files whenever it needs to, so without them it " \
+    "cannot. This happens when a download was cut short or only part of the archive was "      \
+    "extracted.\n\n" SAFE " They are in the \"settings\" folder, which is not touched.\n\n"    \
+    "To fix it, download OpsRemote again and extract the whole archive in the same place, so " \
+    "that it replaces the files of this OpsRemote folder. The download contains no settings, " \
+    "so yours stay as they are."
+
+// The package's folder must be writable: the program is unpacked next to it.
+#define NOT_WRITABLE                                                                           \
+    "OpsRemote cannot write to its own folder:\n%s\n\n"                                       \
+    "OpsRemote is portable and unpacks its program files next to itself, so its folder must "  \
+    "be writable. A read-only place, such as a system folder or a write-protected USB stick, " \
+    "does not work.\n\n" SAFE "\n\nMove the whole OpsRemote folder to a place you can write " \
+    "to, for example your home folder, and start it from there."
+
+#define PATH_TOO_LONG                                                                          \
+    "The path of the OpsRemote folder is too long:\n%s\n\n" SAFE "\n\nMove the whole "        \
+    "OpsRemote folder to a shorter path, for example ~/OpsRemote, and start it from there."
 static volatile pid_t program = 0;
 
 static int has_display(void)
@@ -93,14 +120,14 @@ static void join(char *out, size_t size, const char *a, const char *b)
 {
     int written = snprintf(out, size, "%s/%s", a, b);
     if (written < 0 || (size_t)written >= size)
-        fail("the folder path is too long:\n%s", a);
+        fail(PATH_TOO_LONG, a);
 }
 
 static void copy(char *out, size_t size, const char *text)
 {
     int written = snprintf(out, size, "%s", text);
     if (written < 0 || (size_t)written >= size)
-        fail("the folder path is too long:\n%s", text);
+        fail(PATH_TOO_LONG, text);
 }
 
 static int is_executable(const char *path)
@@ -134,6 +161,76 @@ static void read_line(const char *path, char *out, size_t size)
         out[0] = '\0';
     out[strcspn(out, "\r\n")] = '\0';
     fclose(file);
+}
+
+// The marker, unpacked.ok, is written last after unpacking and lists every
+// file and link with its size ("f<size>" or "l<size>", a tab, the relative
+// path). A start checks the copy against it, so a copy that lost files
+// (removing it was cut short, a cleaner) is found and rebuilt instead of
+// failing.
+static FILE *listing;
+static size_t listing_root;
+
+static int list_entry(const char *path, const struct stat *info, int type, struct FTW *walk)
+{
+    (void)walk;
+    if ((type != FTW_F && type != FTW_SL) || strlen(path) <= listing_root)
+        return 0;
+    const char *relative = path + listing_root + 1;
+    if (strcmp(relative, "unpacked.ok") != 0 && strcmp(relative, "remove-on-exit") != 0)
+        fprintf(listing, "%c%lld\t%s\n", type == FTW_SL ? 'l' : 'f', (long long)info->st_size,
+                relative);
+    return 0;
+}
+
+static void write_marker(const char *folder)
+{
+    char marker[PATH_MAX];
+    if (snprintf(marker, sizeof marker, "%s/unpacked.ok", folder) >= (int)sizeof marker)
+        return;
+    listing = fopen(marker, "w");
+    if (!listing)
+        return;
+    listing_root = strlen(folder);
+    nftw(folder, list_entry, 16, FTW_PHYS);
+    fclose(listing);
+    listing = NULL;
+}
+
+// True when every file and link the marker lists is there with its size.
+// A copy without a marker (from earlier launchers) counts as not checked.
+static int copy_complete(const char *folder)
+{
+    char marker[PATH_MAX];
+    if (snprintf(marker, sizeof marker, "%s/unpacked.ok", folder) >= (int)sizeof marker)
+        return 0;
+    FILE *file = fopen(marker, "r");
+    if (!file)
+        return 0;
+    char line[PATH_MAX + 64];
+    int complete = 1, entries = 0;
+    while (complete && fgets(line, sizeof line, file)) {
+        line[strcspn(line, "\n")] = '\0';
+        char *tab = strchr(line, '\t');
+        char path[PATH_MAX];
+        struct stat info;
+        complete = tab && (line[0] == 'f' || line[0] == 'l')
+                   && snprintf(path, sizeof path, "%s/%s", folder, tab + 1) < (int)sizeof path
+                   && lstat(path, &info) == 0
+                   && (line[0] == 'l' ? S_ISLNK(info.st_mode) : S_ISREG(info.st_mode))
+                   && info.st_size == strtoll(line + 1, NULL, 10);
+        ++entries;
+    }
+    fclose(file);
+    return complete && entries > 0;
+}
+
+// Less free space than unpacking needs (with some room to spare).
+static int disk_nearly_full(void)
+{
+    struct statvfs disk;
+    return statvfs(here, &disk) == 0
+           && (unsigned long long)disk.f_bavail * disk.f_frsize < 300ull * 1024 * 1024;
 }
 
 // A version id is a short hex hash: nothing that could leave runtime/.
@@ -227,7 +324,8 @@ static int run_and_watch(char *script, char **arguments)
     const int capture = pipe(output) == 0;
     pid_t child = fork();
     if (child < 0)
-        fail("cannot start %s: %s", script, strerror(errno));
+        fail("Linux could not start OpsRemote's program (%s: %s).\n\n" SAFE
+             "\n\nClose some programs and start OpsRemote again.", script, strerror(errno));
     if (child == 0) {
         if (capture) {
             dup2(output[1], STDERR_FILENO);
@@ -323,11 +421,12 @@ int main(int argc, char **argv)
     char self[PATH_MAX];
     const ssize_t length = readlink("/proc/self/exe", self, sizeof self - 1);
     if (length <= 0)
-        fail("cannot find where this launcher is (/proc is not available).");
+        fail("Linux did not say where this launcher is (/proc is not available).\n\n" SAFE);
     self[length] = '\0';
     char *slash = strrchr(self, '/');
     if (!slash)
-        fail("cannot find where this launcher is.");
+        fail("Linux did not say where this launcher is.\n\n" SAFE
+             "\n\nStart OpsRemote again from its folder.");
     *slash = '\0';
     copy(here, sizeof here, self[0] ? self : "/");
 
@@ -335,25 +434,35 @@ int main(int argc, char **argv)
     join(data, sizeof data, here, "data");
     struct stat info;
     if (stat(data, &info) != 0 || !S_ISDIR(info.st_mode))
-        fail("this copy of OpsRemote is incomplete (the data folder is missing). Extract the whole "
-             "archive again.");
+        fail(PACKAGE_DAMAGED, "the \"data\" folder");
     join(archive, sizeof archive, here, "compressed/" PLATFORM ".tar.zst");
     if (access(archive, R_OK) == 0) {
         char id_file[PATH_MAX], id[128];
         join(id_file, sizeof id_file, here, "compressed/" PLATFORM ".id");
         read_line(id_file, id, sizeof id);
         if (!is_safe_id(id))
-            fail("compressed/" PLATFORM ".id is missing or damaged. Extract the whole archive again.");
+            fail(PACKAGE_DAMAGED, "compressed/" PLATFORM ".id");
 
         char runtime_root[PATH_MAX], name[96], runtime[PATH_MAX];
         join(runtime_root, sizeof runtime_root, here, "runtime");
         snprintf(name, sizeof name, PLATFORM "-%s", id);
         join(runtime, sizeof runtime, runtime_root, name);
         join(script, sizeof script, runtime, "opsremote.sh");
+        // A copy that is not complete is rebuilt: it holds only program
+        // files, the user's data is in settings/. Renamed away first; a
+        // copy still running from it keeps its open files on Linux.
+        struct stat folder_info;
+        if (lstat(runtime, &folder_info) == 0 && !(is_executable(script) && copy_complete(runtime))) {
+            char broken[PATH_MAX];
+            const int length = snprintf(broken, sizeof broken, "%s.removing.%d", runtime, (int)getpid());
+            if (length < 0 || (size_t)length >= sizeof broken)
+                fail(PATH_TOO_LONG, here);
+            if (rename(runtime, broken) == 0)
+                remove_tree(broken);
+        }
         if (!is_executable(script)) {
             if (mkdir(runtime_root, 0755) != 0 && errno != EEXIST)
-                fail("cannot write to %s. OpsRemote unpacks itself next to this launcher, so the "
-                     "folder must be writable.", here);
+                fail(NOT_WRITABLE, here);
             char zstd[PATH_MAX];
             join(zstd, sizeof zstd, here, "tools/zstd-" PLATFORM);
             if (!is_executable(zstd)) {
@@ -363,28 +472,34 @@ int main(int argc, char **argv)
                 else if (is_executable("/bin/zstd"))
                     copy(zstd, sizeof zstd, "/bin/zstd");
                 else
-                    fail("tools/zstd-" PLATFORM " is missing or not executable, and the system has "
-                         "no zstd. Extract the whole archive again.");
+                    fail(PACKAGE_DAMAGED, "tools/zstd-" PLATFORM " (and the system has no zstd)");
             }
             fprintf(stderr, "OpsRemote: preparing this version (first start only)...\n");
             char partial[PATH_MAX];
             const int written = snprintf(partial, sizeof partial, "%s.partial.%d", runtime, (int)getpid());
             if (written < 0 || (size_t)written >= sizeof partial)
-                fail("the folder path is too long:\n%s", here);
+                fail(PATH_TOO_LONG, here);
             remove_tree(partial);
             if (mkdir(partial, 0755) != 0)
-                fail("cannot create %s: %s.", partial, strerror(errno));
-            if (!unpack(zstd, archive, partial)) {
+                fail(NOT_WRITABLE, here);
+            char check[PATH_MAX];
+            join(check, sizeof check, partial, "opsremote.sh");
+            if (!unpack(zstd, archive, partial) || !is_executable(check)) {
                 remove_tree(partial);
-                fail("could not unpack compressed/" PLATFORM ".tar.zst. Is the disk full, or is tar "
-                     "missing?");
+                if (disk_nearly_full())
+                    fail("OpsRemote could not unpack its program files (about 100 MB) into the "
+                         "\"runtime\" folder next to it: the disk is nearly full.\n\n" SAFE
+                         "\n\nFree some space on this drive and start OpsRemote again.");
+                fail(PACKAGE_DAMAGED, "compressed/" PLATFORM ".tar.zst cannot be unpacked (or "
+                     "the system has no tar)");
             }
+            write_marker(partial);
             // Another start may have finished first; either copy is complete.
             if (rename(partial, runtime) != 0)
                 remove_tree(partial);
             if (!is_executable(script))
-                fail("unpacking compressed/" PLATFORM ".tar.zst gave no program. Extract the whole "
-                     "archive again.");
+                fail("OpsRemote's program files were unpacked again, but its start script is "
+                     "still missing (%s). Something may be removing the files.\n\n" SAFE, script);
         }
         remove_other_versions(runtime_root, name);
         // Earlier packages unpacked into a hidden .runtime folder.
@@ -398,15 +513,14 @@ int main(int argc, char **argv)
         join(app, sizeof app, here, PLATFORM);
         join(script, sizeof script, app, "opsremote.sh");
         if (!is_executable(script))
-            fail("the Linux program (compressed/" PLATFORM ".tar.zst) is missing. Extract the "
-                 "whole archive again.");
+            fail(PACKAGE_DAMAGED, "compressed/" PLATFORM ".tar.zst");
     }
 
     if (setenv("OPSREMOTE_HOME", here, 1) != 0)
-        fail("cannot set OPSREMOTE_HOME.");
+        fail("OpsRemote could not prepare its environment (OPSREMOTE_HOME).\n\n" SAFE);
     char **arguments = calloc((size_t)argc + 1, sizeof *arguments);
     if (!arguments)
-        fail("out of memory.");
+        fail("There is not enough memory to start OpsRemote.\n\n" SAFE);
     arguments[0] = script;
     for (int i = 1; i < argc; ++i)
         arguments[i] = argv[i];

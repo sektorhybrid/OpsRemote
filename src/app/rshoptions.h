@@ -43,7 +43,7 @@ RshOptions loadRshDefaults();
 void saveRshDefaults(const RshOptions &options);
 
 // Edits RshOptions for a session (the Connection tab of an Rlogin or RSH
-// session): the fields start at "Default (…)"; the command row is shown
+// session): the fields start at the inherited value; the command row is shown
 // for RSH only.
 class RshOptionsEditor final : public QWidget
 {

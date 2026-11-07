@@ -2,7 +2,12 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "appdirs.h"
+#include "filedialogs.h"
+#include "clipboard.h"
+#include "formcard.h"
+#include "inheritance.h"
 #include "terminalappearance.h"
+#include "preferences.h"
 
 #include <QApplication>
 #include <QCheckBox>
@@ -20,6 +25,7 @@
 #include <QRegularExpression>
 #include <QSettings>
 #include <QSpinBox>
+#include <QVBoxLayout>
 
 #include <qtermwidget.h>
 
@@ -78,6 +84,10 @@ TerminalAppearance TerminalAppearance::overriddenBy(const TerminalAppearance &ov
         result.fontSize = override.fontSize;
     if (override.linksEnabled >= 0)
         result.linksEnabled = override.linksEnabled;
+    if (override.confirmMultilinePaste >= 0)
+        result.confirmMultilinePaste = override.confirmMultilinePaste;
+    if (override.uploadDroppedFiles >= 0)
+        result.uploadDroppedFiles = override.uploadDroppedFiles;
     return result;
 }
 
@@ -203,12 +213,22 @@ TerminalAppearanceEditor::TerminalAppearanceEditor(const TerminalAppearance &val
                                                    QWidget *parent)
     : QWidget(parent), m_overrideMode(overrideMode), m_defaults(defaults)
 {
-    auto *form = new QFormLayout(this);
-    form->setContentsMargins(0, 0, 0, 0);
+    // A session's window: light cards (formcard.h); Preferences: one form.
+    QVBoxLayout *cards = nullptr;
+    QFormLayout *form = nullptr;
+    if (overrideMode) {
+        cards = new QVBoxLayout(this);
+        cards->setContentsMargins(0, 0, 0, 0);
+        cards->setSpacing(6);
+        form = addFormCard(cards, QStringLiteral("General"), this);
+    } else {
+        form = new QFormLayout(this);
+        form->setContentsMargins(0, 0, 0, 0);
+    }
 
     m_schemeCombo = new QComboBox(this);
     if (overrideMode)
-        m_schemeCombo->addItem(QStringLiteral("Default (%1)").arg(schemeLabel(defaults.colorScheme)),
+        addInheritedItem(m_schemeCombo, QString(schemeLabel(defaults.colorScheme)),
                                QString());
     else
         m_schemeCombo->addItem(schemeLabel(QString()), QString());
@@ -240,7 +260,7 @@ TerminalAppearanceEditor::TerminalAppearanceEditor(const TerminalAppearance &val
     schemeRow->addWidget(importButton);
     form->addRow(QStringLiteral("Color scheme:"), schemeRow);
     connect(importButton, &QPushButton::clicked, this, [this] {
-        const auto path = QFileDialog::getOpenFileName(
+        const auto path = FileDialogs::openFileName(
             this, QStringLiteral("Import Color Scheme"), QDir::homePath(),
             QStringLiteral("Konsole color schemes (*.colorscheme)"));
         if (path.isEmpty())
@@ -281,15 +301,6 @@ TerminalAppearanceEditor::TerminalAppearanceEditor(const TerminalAppearance &val
     m_sizeSpin->setValue(shownFont.pointSize());
     fontRow->addWidget(m_sizeSpin);
     form->addRow(QStringLiteral("Font:"), fontRow);
-    if (overrideMode) {
-        m_linksCombo = new QComboBox(this);
-        m_linksCombo->addItem(QStringLiteral("Use global setting"), -1);
-        m_linksCombo->addItem(QStringLiteral("Enabled"), 1);
-        m_linksCombo->addItem(QStringLiteral("Disabled"), 0);
-        m_linksCombo->setCurrentIndex(qMax(0, m_linksCombo->findData(value.linksEnabled)));
-        m_linksCombo->setToolTip(QStringLiteral("Controls detected URLs and application-provided links."));
-        form->addRow(QStringLiteral("Terminal links:"), m_linksCombo);
-    }
 
     m_preview = new QTermWidget(0, this);
     registerTerminalResources(m_preview);
@@ -303,6 +314,33 @@ TerminalAppearanceEditor::TerminalAppearanceEditor(const TerminalAppearance &val
         child->setFocusPolicy(Qt::NoFocus);
     m_preview->startTerminalTeletype();
     form->addRow(QStringLiteral("Preview:"), m_preview);
+    if (overrideMode) {
+        // On or off for this session; the inherited choice first, then only
+        // the other one (inheritance.h).
+        const auto &mouse = Clipboard::preferences();
+        const auto onOff = [this](bool inherited, int value) {
+            auto *box = new QComboBox(this);
+            addInheritedItem(box, inherited ? QStringLiteral("On") : QStringLiteral("Off"), -1);
+            box->addItem(inherited ? QStringLiteral("Off") : QStringLiteral("On"), inherited ? 0 : 1);
+            box->setCurrentIndex(qMax(0, box->findData(value)));
+            return box;
+        };
+        auto *copyPaste = addFormCard(cards, QStringLiteral("Copy & paste"), this);
+        m_linksCombo = onOff(mouse.links != QStringLiteral("off"), value.linksEnabled);
+        m_linksCombo->setToolTip(QStringLiteral("Detected web addresses and links sent by programs."));
+        copyPaste->addRow(QStringLiteral("Links:"), m_linksCombo);
+        m_confirmCombo = onOff(mouse.confirmMultilinePaste, value.confirmMultilinePaste);
+        m_confirmCombo->setToolTip(QStringLiteral("Ask before pasting several lines into this session, "
+                                                  "e.g. always on for production servers."));
+        copyPaste->addRow(QStringLiteral("Confirm multi-line paste:"), m_confirmCombo);
+        m_dropCombo = onOff(loadTerminalBehaviour().uploadDroppedFiles, value.uploadDroppedFiles);
+        m_dropCombo->setToolTip(QStringLiteral("On: files dropped on the terminal are uploaded into the "
+                                               "folder of the program in it (asking first). Off: their "
+                                               "paths are typed."));
+        copyPaste->addRow(QStringLiteral("Upload dropped files:"), m_dropCombo);
+        cards->addStretch();
+        alignFormLabels(this);
+    }
 
     auto refresh = [this] {
         const bool fontEnabled = !m_overrideFont || m_overrideFont->isChecked();
@@ -313,8 +351,9 @@ TerminalAppearanceEditor::TerminalAppearanceEditor(const TerminalAppearance &val
             changed();
     };
     connect(m_schemeCombo, &QComboBox::currentIndexChanged, this, refresh);
-    if (m_linksCombo)
-        connect(m_linksCombo, &QComboBox::currentIndexChanged, this, refresh);
+    for (auto *box : {m_linksCombo, m_confirmCombo, m_dropCombo})
+        if (box)
+            connect(box, &QComboBox::currentIndexChanged, this, refresh);
     connect(m_fontCombo, &QFontComboBox::currentFontChanged, this, refresh);
     connect(m_sizeSpin, &QSpinBox::valueChanged, this, refresh);
     if (m_overrideFont)
@@ -335,6 +374,10 @@ TerminalAppearance TerminalAppearanceEditor::value() const
     result.colorScheme = m_schemeCombo->currentData().toString();
     if (m_linksCombo)
         result.linksEnabled = m_linksCombo->currentData().toInt();
+    if (m_confirmCombo)
+        result.confirmMultilinePaste = m_confirmCombo->currentData().toInt();
+    if (m_dropCombo)
+        result.uploadDroppedFiles = m_dropCombo->currentData().toInt();
     if (!m_overrideFont || m_overrideFont->isChecked()) {
         result.fontFamily = m_fontCombo->currentFont().family();
         result.fontSize = m_sizeSpin->value();

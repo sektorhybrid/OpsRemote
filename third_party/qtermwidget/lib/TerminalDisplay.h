@@ -211,6 +211,9 @@ public:
     uint lineSpacing() const;
 
     void emitSelection(bool useXselection,bool appendReturn);
+    // OpsRemote addition: pastes text as emitSelection() pastes the clipboard
+    // (line breaks, bracketed paste, the multi-line confirmation).
+    void pasteText(QString text, bool appendReturn);
 
     /** change and wrap text corresponding to paste mode **/
     void bracketText(QString& text) const;
@@ -431,6 +434,9 @@ public:
     void setMotionAfterPasting(MotionAfterPasting action);
     int motionAfterPasting();
     void setConfirmMultilinePaste(bool confirmMultilinePaste);
+    // OpsRemote addition: the multi-line paste window opens with its text
+    // editable (it can always be turned on there).
+    void setEditMultilinePaste(bool edit) { _editMultilinePaste = edit; }
     void setTrimPastedTrailingNewlines(bool trimPastedTrailingNewlines);
 
     /** Show destination URL tooltips when hovering link hotspots. */
@@ -595,6 +601,9 @@ signals:
 
    // qtermwidget signals
 	void copyAvailable(bool);
+	// OpsRemote addition: a selection was finished (mouse released, or a
+	// word or line chosen by double- or triple-click), with its text.
+	void selectionFinished(const QString &text);
 	void termGetFocus();
 	void termLostFocus();
 
@@ -730,7 +739,8 @@ private:
     void scrollImage(int lines , const QRect& region);
 
     // shows the multiline prompt
-    bool multilineConfirmation(const QString& text);
+    // OpsRemote addition: the text may be edited in the window; returns it.
+    bool multilineConfirmation(QString& text);
 
     void calcGeometry();
     void propagateSize();
@@ -884,6 +894,7 @@ private:
 
     MotionAfterPasting mMotionAfterPasting;
     bool _confirmMultilinePaste;
+    bool _editMultilinePaste = false; // OpsRemote addition
     bool _trimPastedTrailingNewlines;
     bool _linkTooltipsEnabled;
     QTimer* _linkTooltipTimer;

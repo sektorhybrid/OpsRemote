@@ -140,3 +140,7 @@ RUN dnf -y remove libssh-devel && dnf -y install krb5-devel libfido2-devel && dn
     && cmake --install /tmp/libssh/build \
     && ldconfig \
     && rm -rf /tmp/libssh /tmp/libssh.tar.xz
+
+# libsecret for the system keyring (opened at run time), bundled so that it
+# matches the bundle's GLib: a newer system's libsecret cannot load next to it.
+RUN dnf -y install libsecret && dnf clean all

@@ -401,111 +401,15 @@ index 734673e..5a9d666 100644
  
       if ( result == 0 )
       {
-diff --git a/lib/qtermwidget.cpp b/lib/qtermwidget.cpp
-index bd5ed5d..abbd0a1 100644
---- a/lib/qtermwidget.cpp
-+++ b/lib/qtermwidget.cpp
-@@ -1,3 +1,4 @@
-+// Modified for OpsRemote by Thanos Athanasopoulos, 2026 (see OPSREMOTE-CHANGES.md).
- /*  Copyright (C) 2008 e_k (e_k@users.sourceforge.net)
- 
-     This library is free software; you can redistribute it and/or
-@@ -384,6 +385,9 @@ void QTermWidget::init(int startnow)
-     m_impl->m_session->addView(m_impl->m_terminalDisplay);
- 
-     connect(m_impl->m_session, SIGNAL(resizeRequest(QSize)), this, SLOT(setSize(QSize)));
-+    // OpsRemote addition: report screen size changes (terminalSizeChanged).
-+    connect(m_impl->m_session->emulation(), &Emulation::imageSizeChanged,
-+            this, &QTermWidget::terminalSizeChanged);
-     connect(m_impl->m_session, SIGNAL(finished()), this, SLOT(sessionFinished()));
-     connect(m_impl->m_session, &Session::titleChanged, this, &QTermWidget::titleChanged);
-     connect(m_impl->m_session, &Session::currentDirectoryChanged, this, &QTermWidget::currentDirectoryChanged);
-@@ -764,6 +768,12 @@ int QTermWidget::getPtySlaveFd() const
-     return m_impl->m_session->getPtySlaveFd();
- }
- 
-+// OpsRemote addition: output from an external transport such as SSH.
-+void QTermWidget::receiveData(const char *data, int size)
-+{
-+    m_impl->m_session->emulation()->receiveData(data, size);
-+}
-+
- QString QTermWidget::getPtyName() const
- {
-     return m_impl->m_session->getPtyName();
-diff --git a/lib/qtermwidget.h b/lib/qtermwidget.h
-index f9b9979..957d16e 100644
---- a/lib/qtermwidget.h
-+++ b/lib/qtermwidget.h
-@@ -1,3 +1,4 @@
-+// Modified for OpsRemote by Thanos Athanasopoulos, 2026 (see OPSREMOTE-CHANGES.md).
- /*  Copyright (C) 2008 e_k (e_k@users.sourceforge.net)
- 
-     This library is free software; you can redistribute it and/or
-@@ -66,6 +67,14 @@ public:
-      */
-     void startTerminalTeletype() override;
- 
-+    /**
-+     * OpsRemote addition: feed output from an external transport
-+     * (for example an SSH channel) directly into the emulation. Use with
-+     * startTerminalTeletype(); unlike writing to getPtySlaveFd(), this never
-+     * blocks and does not pass through the local PTY line discipline.
-+     */
-+    void receiveData(const char *data, int size);
-+
-     int getShellPID() override;
- 
-     /**
-@@ -316,6 +325,13 @@ signals:
-      */
-     void receivedData(const QString &text);
- 
-+    /**
-+     * OpsRemote addition: emitted when the emulation's screen size
-+     * changes (widget resize or font zoom), so an external transport can
-+     * forward the new window size to the remote side.
-+     */
-+    void terminalSizeChanged(int lines, int columns);
-+
- public slots:
-     // Copy selection to clipboard
-     void copyClipboard();
---- a/lib/qtermwidget.h
-+++ b/lib/qtermwidget.h
-@@ -309,6 +309,13 @@
-      */
-     void sendData(const char *,int);
- 
-+    /**
-+     * OpsRemote addition: emitted for everything typed or pasted into the
-+     * terminal, also when it runs a local program in a pseudo-terminal
-+     * (where sendData() is not emitted).
-+     */
-+    void userTyped(const char *,int);
-+
-     void profileChanged(const QString & profile);
- 
-     void titleChanged();
---- a/lib/qtermwidget.cpp
-+++ b/lib/qtermwidget.cpp
-@@ -327,6 +327,9 @@
-     connect(m_impl->m_session, SIGNAL(silence()), this, SIGNAL(silence()));
-     connect(m_impl->m_session, &Session::profileChangeCommandReceived, this, &QTermWidget::profileChanged);
-     connect(m_impl->m_session, &Session::receivedData, this, &QTermWidget::receivedData);
-+    // OpsRemote addition: typing, whatever the session's input goes to.
-+    connect(m_impl->m_session->emulation(), SIGNAL(sendData(const char *,int)),
-+            this, SIGNAL(userTyped(const char *,int)));
- 
-     // That's OK, FilterChain's dtor takes care of filters.
-     // OSC-8 hyperlinks take priority over regex URL detection when both match.
 diff --git a/lib/TerminalDisplay.cpp b/lib/TerminalDisplay.cpp
-index c29b3ff..b08562a 100644
+index c29b3ff..6f4aad7 100644
 --- a/lib/TerminalDisplay.cpp
 +++ b/lib/TerminalDisplay.cpp
-@@ -28,6 +28,10 @@
+@@ -27,7 +27,12 @@
+ #include <QAbstractButton>
  #include <QApplication>
  #include <QBoxLayout>
++#include <QCheckBox>
  #include <QClipboard>
 +#include <QDialog>
 +#include <QDialogButtonBox>
@@ -514,14 +418,46 @@ index c29b3ff..b08562a 100644
  #include <QKeyEvent>
  #include <QEvent>
  #include <QTime>
-@@ -3228,25 +3232,32 @@ void TerminalDisplay::bracketText(QString& text) const
+@@ -3166,6 +3171,13 @@ void TerminalDisplay::emitSelection(bool useXselection,bool appendReturn)
+       useXselection = false;
+   QString text = QApplication::clipboard()->text(useXselection ? QClipboard::Selection :
+                                                                  QClipboard::Clipboard);
++  pasteText(text, appendReturn);
++}
++
++void TerminalDisplay::pasteText(QString text, bool appendReturn)
++{
++  if ( !_screenWindow )
++      return;
+   if ( ! text.isEmpty() )
+   {
+     text.replace(QLatin1String("\r\n"), QLatin1String("\n"));
+@@ -3180,6 +3192,13 @@ void TerminalDisplay::emitSelection(bool useXselection,bool appendReturn)
+         if (!multilineConfirmation(text)) {
+             return;
+         }
++        // OpsRemote addition: the text may have been edited.
++        if (_trimPastedTrailingNewlines) {
++            static const QRegularExpression edited{u"\\r+$"_s};
++            text.replace(edited, QString());
++        }
++        if (text.isEmpty())
++            return;
+     }
  
- bool TerminalDisplay::multilineConfirmation(const QString& text)
+     bracketText(text);
+@@ -3226,27 +3245,58 @@ void TerminalDisplay::bracketText(QString& text) const
+     }
+ }
+ 
+-bool TerminalDisplay::multilineConfirmation(const QString& text)
++bool TerminalDisplay::multilineConfirmation(QString& text)
  {
 -    QMessageBox confirmation(this);
 +    // OpsRemote addition: a resizable window that shows the whole text, in
-+    // place of a fixed-size message box with collapsed details. Its size is
-+    // kept for the rest of the session.
++    // place of a fixed-size message box with collapsed details, where it can
++    // also be edited before pasting. Its size is kept for the rest of the
++    // session.
 +    static QSize lastSize(640, 420);
 +    const QString shown = QString(text).replace(QLatin1Char('\r'), QLatin1Char('\n'));
 +    QDialog confirmation(this);
@@ -545,23 +481,254 @@ index c29b3ff..b08562a 100644
 -    return true;
 +    confirmation.setSizeGripEnabled(true);
 +    auto *layout = new QVBoxLayout(&confirmation);
-+    layout->addWidget(new QLabel(tr("Are you sure you want to paste these %1 lines?")
-+                                     .arg(shown.count(QLatin1Char('\n')) + 1), &confirmation));
++    auto *question = new QLabel(&confirmation);
++    layout->addWidget(question);
 +    auto *view = new QPlainTextEdit(shown, &confirmation);
-+    view->setReadOnly(true);
 +    view->setLineWrapMode(QPlainTextEdit::NoWrap);
 +    view->setFont(getVTFont());
 +    layout->addWidget(view, 1);
++    const auto count = [view, question] {
++        question->setText(tr("Are you sure you want to paste these %1 lines?")
++                              .arg(view->toPlainText().count(QLatin1Char('\n')) + 1));
++    };
++    count();
++    connect(view, &QPlainTextEdit::textChanged, &confirmation, count);
++    auto *row = new QHBoxLayout;
++    auto *editable = new QCheckBox(tr("Edit the text"), &confirmation);
++    editable->setToolTip(tr("Change the text before it is pasted"));
++    row->addWidget(editable);
++    row->addStretch();
 +    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Yes | QDialogButtonBox::No, &confirmation);
++    row->addWidget(buttons);
++    layout->addLayout(row);
 +    connect(buttons, &QDialogButtonBox::accepted, &confirmation, &QDialog::accept);
 +    connect(buttons, &QDialogButtonBox::rejected, &confirmation, &QDialog::reject);
-+    layout->addWidget(buttons);
++    connect(editable, &QCheckBox::toggled, &confirmation, [view](bool on) {
++        view->setReadOnly(!on);
++        if (on)
++            view->setFocus();
++    });
++    view->setReadOnly(!_editMultilinePaste);
++    editable->setChecked(_editMultilinePaste);
 +    buttons->button(QDialogButtonBox::Yes)->setDefault(true);
-+    buttons->button(QDialogButtonBox::Yes)->setFocus();
++    if (_editMultilinePaste)
++        view->setFocus();
++    else
++        buttons->button(QDialogButtonBox::Yes)->setFocus();
 +    confirmation.resize(lastSize);
 +    const bool accepted = confirmation.exec() == QDialog::Accepted;
 +    lastSize = confirmation.size();
++    if (accepted)
++        text = view->toPlainText().replace(QLatin1Char('\n'), QLatin1Char('\r'));
 +    return accepted;
  }
  
  void TerminalDisplay::setSelection(const QString& t)
+@@ -3255,6 +3305,10 @@ void TerminalDisplay::setSelection(const QString& t)
+     {
+         QApplication::clipboard()->setText(t, QClipboard::Selection);
+     }
++    // OpsRemote addition: called when a selection is finished; copy on
++    // select and Windows' middle-click use it (Windows has no selection).
++    if (!t.isEmpty())
++        emit selectionFinished(t);
+ }
+ 
+ void TerminalDisplay::copyClipboard()
+diff --git a/lib/TerminalDisplay.h b/lib/TerminalDisplay.h
+index 0c881b8..206aca9 100644
+--- a/lib/TerminalDisplay.h
++++ b/lib/TerminalDisplay.h
+@@ -211,6 +211,9 @@ public:
+     uint lineSpacing() const;
+ 
+     void emitSelection(bool useXselection,bool appendReturn);
++    // OpsRemote addition: pastes text as emitSelection() pastes the clipboard
++    // (line breaks, bracketed paste, the multi-line confirmation).
++    void pasteText(QString text, bool appendReturn);
+ 
+     /** change and wrap text corresponding to paste mode **/
+     void bracketText(QString& text) const;
+@@ -431,6 +434,9 @@ public:
+     void setMotionAfterPasting(MotionAfterPasting action);
+     int motionAfterPasting();
+     void setConfirmMultilinePaste(bool confirmMultilinePaste);
++    // OpsRemote addition: the multi-line paste window opens with its text
++    // editable (it can always be turned on there).
++    void setEditMultilinePaste(bool edit) { _editMultilinePaste = edit; }
+     void setTrimPastedTrailingNewlines(bool trimPastedTrailingNewlines);
+ 
+     /** Show destination URL tooltips when hovering link hotspots. */
+@@ -595,6 +601,9 @@ signals:
+ 
+    // qtermwidget signals
+ 	void copyAvailable(bool);
++	// OpsRemote addition: a selection was finished (mouse released, or a
++	// word or line chosen by double- or triple-click), with its text.
++	void selectionFinished(const QString &text);
+ 	void termGetFocus();
+ 	void termLostFocus();
+ 
+@@ -730,7 +739,8 @@ private:
+     void scrollImage(int lines , const QRect& region);
+ 
+     // shows the multiline prompt
+-    bool multilineConfirmation(const QString& text);
++    // OpsRemote addition: the text may be edited in the window; returns it.
++    bool multilineConfirmation(QString& text);
+ 
+     void calcGeometry();
+     void propagateSize();
+@@ -884,6 +894,7 @@ private:
+ 
+     MotionAfterPasting mMotionAfterPasting;
+     bool _confirmMultilinePaste;
++    bool _editMultilinePaste = false; // OpsRemote addition
+     bool _trimPastedTrailingNewlines;
+     bool _linkTooltipsEnabled;
+     QTimer* _linkTooltipTimer;
+diff --git a/lib/qtermwidget.cpp b/lib/qtermwidget.cpp
+index 9705e8f..701de32 100644
+--- a/lib/qtermwidget.cpp
++++ b/lib/qtermwidget.cpp
+@@ -1,3 +1,4 @@
++// Modified for OpsRemote by Thanos Athanasopoulos, 2026 (see OPSREMOTE-CHANGES.md).
+ /*  Copyright (C) 2008 e_k (e_k@users.sourceforge.net)
+ 
+     This library is free software; you can redistribute it and/or
+@@ -326,6 +327,9 @@ void QTermWidget::init(int startnow)
+     connect(m_impl->m_session, SIGNAL(silence()), this, SIGNAL(silence()));
+     connect(m_impl->m_session, &Session::profileChangeCommandReceived, this, &QTermWidget::profileChanged);
+     connect(m_impl->m_session, &Session::receivedData, this, &QTermWidget::receivedData);
++    // OpsRemote addition: typing, whatever the session's input goes to.
++    connect(m_impl->m_session->emulation(), SIGNAL(sendData(const char *,int)),
++            this, SIGNAL(userTyped(const char *,int)));
+ 
+     // That's OK, FilterChain's dtor takes care of filters.
+     // OSC-8 hyperlinks take priority over regex URL detection when both match.
+@@ -363,6 +367,9 @@ void QTermWidget::init(int startnow)
+     this->setFocusProxy(m_impl->m_terminalDisplay);
+     connect(m_impl->m_terminalDisplay, SIGNAL(copyAvailable(bool)),
+             this, SLOT(selectionChanged(bool)));
++    // OpsRemote addition.
++    connect(m_impl->m_terminalDisplay, &Konsole::TerminalDisplay::selectionFinished,
++            this, &QTermWidget::selectionFinished);
+     connect(m_impl->m_terminalDisplay, SIGNAL(termGetFocus()),
+             this, SIGNAL(termGetFocus()));
+     connect(m_impl->m_terminalDisplay, SIGNAL(termLostFocus()),
+@@ -384,6 +391,9 @@ void QTermWidget::init(int startnow)
+     m_impl->m_session->addView(m_impl->m_terminalDisplay);
+ 
+     connect(m_impl->m_session, SIGNAL(resizeRequest(QSize)), this, SLOT(setSize(QSize)));
++    // OpsRemote addition: report screen size changes (terminalSizeChanged).
++    connect(m_impl->m_session->emulation(), &Emulation::imageSizeChanged,
++            this, &QTermWidget::terminalSizeChanged);
+     connect(m_impl->m_session, SIGNAL(finished()), this, SLOT(sessionFinished()));
+     connect(m_impl->m_session, &Session::titleChanged, this, &QTermWidget::titleChanged);
+     connect(m_impl->m_session, &Session::currentDirectoryChanged, this, &QTermWidget::currentDirectoryChanged);
+@@ -604,6 +614,18 @@ void QTermWidget::pasteSelection()
+     m_impl->m_terminalDisplay->pasteSelection();
+ }
+ 
++// OpsRemote addition.
++void QTermWidget::setEditMultilinePaste(bool edit)
++{
++    m_impl->m_terminalDisplay->setEditMultilinePaste(edit);
++}
++
++// OpsRemote addition.
++void QTermWidget::pasteText(const QString &text)
++{
++    m_impl->m_terminalDisplay->pasteText(text, false);
++}
++
+ bool QTermWidget::terminalUsesMouse() const
+ {
+     return m_impl->m_terminalDisplay->usesMouse();
+@@ -769,6 +791,12 @@ int QTermWidget::getPtySlaveFd() const
+     return m_impl->m_session->getPtySlaveFd();
+ }
+ 
++// OpsRemote addition: output from an external transport such as SSH.
++void QTermWidget::receiveData(const char *data, int size)
++{
++    m_impl->m_session->emulation()->receiveData(data, size);
++}
++
+ QString QTermWidget::getPtyName() const
+ {
+     return m_impl->m_session->getPtyName();
+diff --git a/lib/qtermwidget.h b/lib/qtermwidget.h
+index 3d4e834..1129799 100644
+--- a/lib/qtermwidget.h
++++ b/lib/qtermwidget.h
+@@ -1,3 +1,4 @@
++// Modified for OpsRemote by Thanos Athanasopoulos, 2026 (see OPSREMOTE-CHANGES.md).
+ /*  Copyright (C) 2008 e_k (e_k@users.sourceforge.net)
+ 
+     This library is free software; you can redistribute it and/or
+@@ -66,6 +67,14 @@ public:
+      */
+     void startTerminalTeletype() override;
+ 
++    /**
++     * OpsRemote addition: feed output from an external transport
++     * (for example an SSH channel) directly into the emulation. Use with
++     * startTerminalTeletype(); unlike writing to getPtySlaveFd(), this never
++     * blocks and does not pass through the local PTY line discipline.
++     */
++    void receiveData(const char *data, int size);
++
+     int getShellPID() override;
+ 
+     /**
+@@ -282,6 +291,8 @@ public:
+ signals:
+     void finished();
+     void copyAvailable(bool);
++    // OpsRemote addition: a selection was finished, with its text.
++    void selectionFinished(const QString &text);
+ 
+     void termGetFocus();
+     void termLostFocus();
+@@ -302,6 +313,13 @@ signals:
+      */
+     void sendData(const char *,int);
+ 
++    /**
++     * OpsRemote addition: emitted for everything typed or pasted into the
++     * terminal, also when it runs a local program in a pseudo-terminal
++     * (where sendData() is not emitted).
++     */
++    void userTyped(const char *,int);
++
+     void profileChanged(const QString & profile);
+ 
+     void titleChanged();
+@@ -318,6 +336,13 @@ signals:
+      */
+     void receivedData(const QString &text);
+ 
++    /**
++     * OpsRemote addition: emitted when the emulation's screen size
++     * changes (widget resize or font zoom), so an external transport can
++     * forward the new window size to the remote side.
++     */
++    void terminalSizeChanged(int lines, int columns);
++
+ public slots:
+     // Copy selection to clipboard
+     void copyClipboard();
+@@ -328,6 +353,12 @@ public slots:
+     // Paste selection to terminal
+     void pasteSelection();
+ 
++    // OpsRemote addition: paste this text as the clipboard would be pasted.
++    void pasteText(const QString &text);
++    // OpsRemote addition: the multi-line paste window opens with its text
++    // editable.
++    void setEditMultilinePaste(bool edit);
++
+     // True while the program in the terminal has asked for mouse events.
+     bool terminalUsesMouse() const;
+ 

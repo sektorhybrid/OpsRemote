@@ -899,3 +899,58 @@ int runFollowTest(const QString &spec)
     delete page;
     return 0;
 }
+
+int runSshDropTest(const QString &spec)
+{
+    const QUrl url(spec);
+    SshConnectionSettings settings;
+    settings.host = url.host();
+    settings.port = quint16(url.port(22));
+    settings.username = url.userName();
+    settings.password = url.password();
+    settings.tryPublicKeys = false;
+    settings.knownHostsPath = QUrlQuery(url).queryItemValue(QStringLiteral("known_hosts"));
+    auto *page = new TerminalPage(settings, TerminalAppearance());
+    page->resize(900, 600);
+    page->show();
+    const auto wait = [](int ms) {
+        QElapsedTimer clock;
+        clock.start();
+        while (clock.elapsed() < ms)
+            QCoreApplication::processEvents(QEventLoop::WaitForMoreEvents, 50);
+    };
+    // Answers the asking window: prints its text, clicks the button.
+    const auto answer = [](const QString &button) {
+        QTimer::singleShot(3000, qApp, [button] {
+            auto *dialog = QApplication::activeModalWidget();
+            if (!dialog) {
+                say(QStringLiteral("no asking window"));
+                return;
+            }
+            for (auto *label : dialog->findChildren<QLabel *>())
+                if (!label->text().isEmpty())
+                    say(QStringLiteral("asks: %1").arg(label->text()));
+            for (auto *push : dialog->findChildren<QPushButton *>())
+                if (push->text().remove(QLatin1Char('&')).startsWith(button)) {
+                    say(QStringLiteral("clicks %1").arg(button));
+                    push->click();
+                    return;
+                }
+        });
+    };
+    const auto files = QUrlQuery(url).queryItemValue(QStringLiteral("files")).split(QLatin1Char(';'));
+    wait(6000); // log on, then the file connection
+    page->typeText(QStringLiteral("cd '%1'\r").arg(url.path()));
+    wait(1500);
+    answer(QStringLiteral("Upload"));
+    say(QStringLiteral("drop handled: %1").arg(page->dropFiles(files, false)));
+    wait(8000);
+    const auto program = QUrlQuery(url).queryItemValue(QStringLiteral("program"));
+    page->typeText((program.isEmpty() ? QStringLiteral("sleep 20") : program) + QStringLiteral("\r"));
+    wait(1500);
+    answer(QStringLiteral("Cancel"));
+    page->dropFiles(files, false);
+    wait(5000);
+    delete page;
+    return 0;
+}

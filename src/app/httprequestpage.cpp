@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "httprequestpage.h"
+#include "filedialogs.h"
 #include "appdirs.h"
 #include "preferences.h"
 
@@ -464,7 +465,7 @@ HttpRequestPage::HttpRequestPage(QWidget *parent) : QWidget(parent)
     m_certificate = new QPlainTextEdit(m_responseTabs);
     m_certificate->setReadOnly(true);
     m_certificate->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
-    m_responseTabs->addTab(m_certificate, QStringLiteral("Connection and certificate"));
+    m_responseTabs->addTab(m_certificate, QStringLiteral("Connection && certificate"));
     m_raw = new QPlainTextEdit(m_responseTabs);
     m_raw->setReadOnly(true);
     m_raw->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
@@ -501,7 +502,7 @@ HttpRequestPage::HttpRequestPage(QWidget *parent) : QWidget(parent)
     });
     connect(m_bodyType, &QComboBox::currentIndexChanged, this, &HttpRequestPage::updateBodyType);
     connect(m_bodyBrowse, &QPushButton::clicked, this, [this] {
-        const QString path = QFileDialog::getOpenFileName(this, QStringLiteral("File to Send"));
+        const QString path = FileDialogs::openFileName(this, QStringLiteral("File to Send"));
         if (!path.isEmpty())
             m_bodyFile->setText(path);
     });
@@ -514,7 +515,7 @@ HttpRequestPage::HttpRequestPage(QWidget *parent) : QWidget(parent)
         QString name = QUrl(m_last.url).fileName();
         if (name.isEmpty())
             name = QStringLiteral("response");
-        const QString path = QFileDialog::getSaveFileName(this, QStringLiteral("Save Body"), name);
+        const QString path = FileDialogs::saveFileName(this, QStringLiteral("Save Body"), name);
         if (path.isEmpty())
             return;
         QSaveFile file(path);

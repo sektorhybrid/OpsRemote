@@ -39,7 +39,7 @@ void ftpOptionsToYaml(const FtpOptions &options, YAML::Node &node);
 FtpOptions loadFtpDefaults();
 void saveFtpDefaults(const FtpOptions &options);
 
-// Edits FtpOptions for a session: every field starts at "Default (…)".
+// Edits FtpOptions for a session: every field starts at the inherited value.
 class FtpOptionsEditor final : public QWidget
 {
     Q_OBJECT

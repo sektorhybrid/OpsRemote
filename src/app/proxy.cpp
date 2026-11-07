@@ -2,6 +2,10 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "proxy.h"
+#include "inheritance.h"
+
+#include "fieldcheck.h"
+#include "statusline.h"
 
 #include <QComboBox>
 #include <QFormLayout>
@@ -43,7 +47,7 @@ QString ProxySettings::label(const QString &value)
 {
     const auto proxy = ProxySettings::parse(value);
     if (!proxy.isSet())
-        return QStringLiteral("none");
+        return QStringLiteral("None (connect directly)");
     return QStringLiteral("%1 %2:%3")
         .arg(proxy.type == ProxySettings::Type::Http ? QStringLiteral("HTTP") : QStringLiteral("SOCKS5"),
              proxy.host)
@@ -58,8 +62,9 @@ ProxyEditor::ProxyEditor(const QString &value, const QString &password, const QS
     auto *form = new QFormLayout(this);
     m_type = new QComboBox(this);
     if (!inherited.isEmpty())
-        m_type->addItem(QStringLiteral("Inherit (%1)").arg(inherited), QStringLiteral("inherit"));
-    m_type->addItem(QStringLiteral("None (connect directly)"), ProxySettings::Direct);
+        addInheritedItem(m_type, inherited, QStringLiteral("inherit"));
+    if (inherited != QStringLiteral("None (connect directly)")) // listed once, as the inherited one
+        m_type->addItem(QStringLiteral("None (connect directly)"), ProxySettings::Direct);
     m_type->addItem(QStringLiteral("HTTP proxy (CONNECT)"), QStringLiteral("http"));
     m_type->addItem(QStringLiteral("SOCKS5 proxy"), QStringLiteral("socks5"));
     const QString current = value.isEmpty() && !inherited.isEmpty() ? QStringLiteral("inherit")
@@ -78,19 +83,18 @@ ProxyEditor::ProxyEditor(const QString &value, const QString &password, const QS
     m_password->setEchoMode(QLineEdit::Password);
     m_password->setPlaceholderText(QStringLiteral("Kept in the credential vault"));
 
-    form->addRow(QStringLiteral("Proxy:"), m_type);
+    form->addRow(QStringLiteral("Type:"), m_type);
     form->addRow(QStringLiteral("Host:"), m_host);
     form->addRow(QStringLiteral("Port:"), m_port);
     form->addRow(QStringLiteral("User name:"), m_user);
     form->addRow(QStringLiteral("Password:"), m_password);
-    auto *help = new QLabel(QStringLiteral(
-        "SSH connections go out through this proxy, for networks that only allow web traffic "
-        "out. With jump hosts, only the first one is reached through it. The proxy's own "
-        "password is sent unencrypted (as every HTTP and SOCKS5 proxy expects), so the network "
-        "up to the proxy can see it; the SSH connection inside stays encrypted."), this);
-    help->setWordWrap(true);
-    help->setForegroundRole(QPalette::PlaceholderText);
-    form->addRow(help);
+    m_status = new StatusLine(this);
+    form->addRow(QString(), m_status);
+    m_help = new QLabel(this);
+    m_help->setWordWrap(true);
+    m_help->setForegroundRole(QPalette::PlaceholderText);
+    form->addRow(m_help);
+    setProtocol(QStringLiteral("SSH"));
 
     connect(m_type, &QComboBox::currentIndexChanged, this, [this] {
         // Typical ports when switching type with the other type's default in place.
@@ -104,6 +108,8 @@ ProxyEditor::ProxyEditor(const QString &value, const QString &password, const QS
     });
     for (auto *edit : {m_host, m_user})
         connect(edit, &QLineEdit::textChanged, this, &ProxyEditor::changed);
+    // The marks follow every change.
+    connect(this, &ProxyEditor::changed, this, &ProxyEditor::updateFields);
     connect(m_password, &QLineEdit::editingFinished, this, [this] {
         if (m_password->isModified())
             emit passwordEntered();
@@ -120,6 +126,42 @@ void ProxyEditor::updateFields()
     for (QWidget *widget : {static_cast<QWidget *>(m_host), static_cast<QWidget *>(m_port),
                             static_cast<QWidget *>(m_user), static_cast<QWidget *>(m_password)})
         widget->setEnabled(own);
+    markInvalid(m_host, own && m_host->text().trimmed().isEmpty());
+    markInvalid(m_port, own && m_port->value() <= 0);
+    const auto problem = this->problem();
+    m_status->setStatus(problem, !problem.isEmpty());
+}
+
+QString ProxyEditor::problem() const
+{
+    const auto type = m_type->currentData().toString();
+    if (type != QStringLiteral("http") && type != QStringLiteral("socks5"))
+        return QString();
+    const bool noHost = m_host->text().trimmed().isEmpty();
+    const bool noPort = m_port->value() <= 0;
+    if (!noHost && !noPort)
+        return QString();
+    const auto what = noHost && noPort ? QStringLiteral("Host and port are")
+                      : noHost         ? QStringLiteral("The host is")
+                                       : QStringLiteral("The port is");
+    return QStringLiteral("%1 needed for %2 proxy (or choose None).")
+        .arg(what, type == QStringLiteral("http") ? QStringLiteral("an HTTP") : QStringLiteral("a SOCKS5"));
+}
+
+void ProxyEditor::setProtocol(const QString &protocol)
+{
+    const bool ssh = protocol == QStringLiteral("SSH") || protocol == QStringLiteral("SFTP")
+                     || protocol == QStringLiteral("SCP");
+    // FTP has no jump hosts.
+    const bool jumps = protocol != QStringLiteral("FTP");
+    auto text = QStringLiteral("%1 connections go out through this proxy, for networks that only "
+                               "allow web traffic out.").arg(protocol);
+    if (jumps)
+        text += QStringLiteral(" With jump hosts, only the first one is reached through it.");
+    text += QStringLiteral(" The proxy's own password is sent unencrypted (as every HTTP and SOCKS5 "
+                           "proxy expects), so the network up to the proxy can see it");
+    text += ssh ? QStringLiteral("; the SSH connection inside stays encrypted.") : QStringLiteral(".");
+    m_help->setText(text);
 }
 
 QString ProxyEditor::value() const

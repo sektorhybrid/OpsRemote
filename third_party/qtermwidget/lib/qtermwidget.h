@@ -291,6 +291,8 @@ public:
 signals:
     void finished();
     void copyAvailable(bool);
+    // OpsRemote addition: a selection was finished, with its text.
+    void selectionFinished(const QString &text);
 
     void termGetFocus();
     void termLostFocus();
@@ -350,6 +352,12 @@ public slots:
 
     // Paste selection to terminal
     void pasteSelection();
+
+    // OpsRemote addition: paste this text as the clipboard would be pasted.
+    void pasteText(const QString &text);
+    // OpsRemote addition: the multi-line paste window opens with its text
+    // editable.
+    void setEditMultilinePaste(bool edit);
 
     // True while the program in the terminal has asked for mouse events.
     bool terminalUsesMouse() const;

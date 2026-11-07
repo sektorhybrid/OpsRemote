@@ -2,7 +2,9 @@
 
 A portable terminal and remote-access workspace for Linux and Windows. Local terminals, SSH with file transfer, remote desktop (RDP), VNC, tunnels and network tools in one program, run straight from a folder or a USB stick. There is nothing to install and no administrator rights are needed.
 
-Created by **Thanos Athanasopoulos** ([@sektorhybrid](https://github.com/sektorhybrid)). Free software under the [GNU GPL, version 3 or later](LICENSE).
+Created by **Thanos Athanasopoulos** ([@sektorhybrid](https://github.com/sektorhybrid)). Free software under the [GNU GPL, version 3 or later](LICENSE). 
+
+I started OpsRemote nearly eight years ago to put my own ideas for remote-access tools into practice and bring together features I needed in my daily work as an engineer. Its design reflects that experience, with room to rethink familiar workflows and explore less conventional approaches where they make everyday tasks easier. Development progressed around limited spare time and the challenges of building a secure and portable application with a flexible interface, custom remote sessions and integrated file transfer. More recently, substantial development and refactoring have been carried out with assistance from Claude and Codex, guided by that original vision.
 
 ![OpsRemote in WhiteSur Dark: session tree with status dots and an SSH terminal running htop](docs/screenshots/00-main-ssh-dark.png)
 

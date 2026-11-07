@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "httprequestpage.h"
+#include "filedialogs.h"
 #include "networktools.h"
 #include "ftpclient.h"
 #include "ftpoptions.h"
@@ -285,7 +286,7 @@ QWidget *NetworkToolsWindow::buildDownloadTab()
     connect(m_downloadFolder, &QComboBox::currentIndexChanged, page, updateFolder);
     updateFolder();
     connect(browse, &QPushButton::clicked, this, [this] {
-        const QString folder = QFileDialog::getExistingDirectory(this, QStringLiteral("Save Downloads In"),
+        const QString folder = FileDialogs::existingDirectory(this, QStringLiteral("Save Downloads In"),
                                                                  m_downloadCustom->text());
         if (!folder.isEmpty())
             m_downloadCustom->setText(folder);

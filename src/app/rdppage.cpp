@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "rdppage.h"
+#include "filedialogs.h"
 #include "jumphost.h"
 #include "sessionendedpanel.h"
 
@@ -151,7 +152,7 @@ RdpPage::RdpPage(const RdpConnectionSettings &settings, QWidget *parent)
     connect(m_barAction, &QPushButton::clicked, this, [this] {
         switch (m_barActionKind) {
         case BarAction::Save: {
-            const auto folder = QFileDialog::getExistingDirectory(
+            const auto folder = FileDialogs::existingDirectory(
                 this, QStringLiteral("Save Copied Files To"),
                 QStandardPaths::writableLocation(QStandardPaths::DownloadLocation));
             if (folder.isEmpty())
@@ -782,6 +783,15 @@ void RdpPage::updateCursor()
     setCursor(QCursor(pixmap, int(m_pointerHotSpot.x() * scale), int(m_pointerHotSpot.y() * scale)));
 }
 
+// What a clipboard holds, to tell a real new copy from a repeated notice.
+static QString clipboardSignature(const QMimeData *mime)
+{
+    QStringList parts{mime->text()};
+    for (const auto &url : mime->urls())
+        parts.append(url.toString());
+    return parts.join(QLatin1Char('\n'));
+}
+
 // Offers what this computer's clipboard holds to the remote computer:
 // local files (if files are shared), otherwise text.
 void RdpPage::offerLocalClipboard()
@@ -795,6 +805,16 @@ void RdpPage::offerLocalClipboard()
     const auto *mime = QApplication::clipboard()->mimeData();
     if (!mime)
         return;
+    if (m_dropOffered) {
+        const auto now = clipboardSignature(mime);
+        if (!m_dropNoticeSeen || now == m_clipboardAtDrop) {
+            // Not a new copy: the dropped files stay offered.
+            m_dropNoticeSeen = true;
+            m_clipboardAtDrop = now;
+            return;
+        }
+        m_dropOffered = false;
+    }
     QStringList files;
     if (m_settings.options.clipboardFiles == 1 && mime->hasUrls()) {
         for (const auto &url : mime->urls()) {
@@ -830,6 +850,11 @@ void RdpPage::dropEvent(QDropEvent *event)
         return;
     event->acceptProposedAction();
     m_session->setLocalClipboard(QString(), files);
+    if (const auto *mime = QApplication::clipboard()->mimeData()) {
+        m_clipboardAtDrop = clipboardSignature(mime);
+        m_dropOffered = true;
+        m_dropNoticeSeen = false;
+    }
     setFocus();
     showBar(QStringLiteral("%1 on the remote clipboard: press Ctrl+V in a remote folder to paste.")
                 .arg(files.size() == 1 ? QStringLiteral("\"%1\" is").arg(QFileInfo(files.first()).fileName())

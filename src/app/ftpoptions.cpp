@@ -2,13 +2,15 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "ftpoptions.h"
+#include "formcard.h"
+#include "inheritance.h"
+#include "preferences.h"
 #include "appdirs.h"
 
 #include <QComboBox>
 #include <QDir>
 #include <QFileInfo>
 #include <QFormLayout>
-#include <QSaveFile>
 #include <QSpinBox>
 #include <QTabWidget>
 #include <QVBoxLayout>
@@ -16,10 +18,6 @@
 #include <yaml-cpp/yaml.h>
 
 namespace {
-QString settingsPath()
-{
-    return portableFilePath(QStringLiteral("settings/settings.yaml"));
-}
 
 QString labelFor(const RdpChoices &choices, const QString &value)
 {
@@ -125,7 +123,7 @@ FtpOptions loadFtpDefaults()
 {
     try {
         return FtpOptions::builtIn().overriddenBy(
-            ftpOptionsFromYaml(YAML::LoadFile(settingsPath().toStdString())["ftp"]));
+            ftpOptionsFromYaml(loadPreferencesSection("ftp")));
     } catch (const YAML::Exception &) {
         return FtpOptions::builtIn();
     }
@@ -133,30 +131,9 @@ FtpOptions loadFtpDefaults()
 
 void saveFtpDefaults(const FtpOptions &options)
 {
-    const auto path = settingsPath();
-    if (!QDir().mkpath(QFileInfo(path).absolutePath()))
-        return;
-    YAML::Node settings;
-    try {
-        settings = YAML::LoadFile(path.toStdString());
-    } catch (const YAML::Exception &) {
-    }
-    if (!settings.IsMap())
-        settings = YAML::Node(YAML::NodeType::Map);
     YAML::Node node(YAML::NodeType::Map);
     ftpOptionsToYaml(options, node);
-    settings["ftp"] = node;
-    YAML::Emitter emitter;
-    emitter << settings;
-    QSaveFile file(path);
-    if (!file.open(QIODevice::WriteOnly))
-        return;
-    QByteArray contents(emitter.c_str());
-    contents.append('\n');
-    if (file.write(contents) == contents.size())
-        file.commit();
-    else
-        file.cancelWriting();
+    savePreferencesSection("ftp", node);
 }
 
 FtpOptionsEditor::FtpOptionsEditor(const FtpOptions &value, const FtpOptions &defaults,
@@ -167,16 +144,18 @@ FtpOptionsEditor::FtpOptionsEditor(const FtpOptions &value, const FtpOptions &de
     const auto makeBox = [this](const RdpChoices &choices, const QString &current,
                                 const QString &defaultValue) {
         auto *box = new QComboBox(this);
-        box->addItem(QStringLiteral("Default (%1)").arg(labelFor(choices, defaultValue)), QString());
+        addInheritedItem(box, QString(labelFor(choices, defaultValue)), QString());
         for (const auto &choice : choices)
-            box->addItem(choice.second, choice.first);
+            if (choice.first != defaultValue) // listed once, as the inherited one
+                box->addItem(choice.second, choice.first);
         box->setCurrentIndex(qMax(0, box->findData(current)));
         return box;
     };
     const auto makeNumber = [this](int own, int low, int high, const QString &defaultText) {
         auto *box = new QSpinBox(this);
         box->setRange(low - 1, high);
-        box->setSpecialValueText(QStringLiteral("Default (%1)").arg(defaultText));
+        box->setSpecialValueText(defaultText);
+        box->setProperty("inherits", true); // applyInheritance()
         box->setSuffix(QStringLiteral(" s"));
         box->setValue(own >= low ? own : low - 1);
         return box;
@@ -206,12 +185,18 @@ FtpOptionsEditor::FtpOptionsEditor(const FtpOptions &value, const FtpOptions &de
     layout->addWidget(tabs);
     auto *page = new QWidget(tabs);
     tabs->addTab(page, QStringLiteral("Connection"));
-    auto *form = new QFormLayout(page);
-    form->addRow(QStringLiteral("Security:"), m_security);
+    // Light cards (formcard.h).
+    auto *cards = new QVBoxLayout(page);
+    // The same cards as every session type: General, then Logon.
+    auto *form = addFormCard(cards, QStringLiteral("General"), page);
+    form->addRow(QStringLiteral("Timeout:"), m_connectTimeout);
+    form->addRow(QStringLiteral("Keepalive:"), m_keepalive);
     form->addRow(QStringLiteral("Data connections:"), m_mode);
     form->addRow(QStringLiteral("Folder listings:"), m_listing);
-    form->addRow(QStringLiteral("Connect timeout:"), m_connectTimeout);
-    form->addRow(QStringLiteral("Keepalive every:"), m_keepalive);
+    form = addFormCard(cards, QStringLiteral("Logon"), page);
+    form->addRow(QStringLiteral("Security:"), m_security);
+    cards->addStretch();
+    alignFormLabels(this);
 }
 
 FtpOptions FtpOptionsEditor::value() const

@@ -1,0 +1,17 @@
+# Cases that belong to no version and are never retired: a file already in
+# the current shape, and one from a newer OpsRemote.
+
+current:
+  # Already in the current shape: nothing to do ("current" is replaced by the
+  # test with CurrentSettingsVersion).
+  settings_version: current
+  mouse_clipboard:
+    copy_on_select: false
+    paste: clipboard
+
+newer:
+  # From a newer OpsRemote: left as it is.
+  settings_version: 99
+  behaviour:
+    copy_on_select: true
+    something_new: 1

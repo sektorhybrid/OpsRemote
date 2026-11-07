@@ -135,6 +135,7 @@ struct Library
     FreeFunction free = nullptr;
     ErrorFreeFunction errorFree = nullptr;
     bool loaded() const { return store && lookup && clear && free && errorFree; }
+    QString problem; // why it could not be loaded (dlerror), if so
 };
 
 const Library &library()
@@ -142,7 +143,11 @@ const Library &library()
     static const Library loaded = [] {
         Library result;
         void *secret = dlopen("libsecret-1.so.0", RTLD_NOW | RTLD_LOCAL);
+        if (!secret)
+            result.problem = QString::fromLocal8Bit(dlerror());
         void *glib = dlopen("libglib-2.0.so.0", RTLD_NOW | RTLD_LOCAL);
+        if (!glib && result.problem.isEmpty())
+            result.problem = QString::fromLocal8Bit(dlerror());
         if (!secret || !glib)
             return result;
         result.store = reinterpret_cast<StoreFunction>(dlsym(secret, "secret_password_store_sync"));
@@ -182,8 +187,13 @@ bool isAvailable(QString *why)
 {
     if (library().loaded())
         return true;
-    fail(why, QStringLiteral("libsecret is not installed (the package libsecret, with GNOME Keyring, "
-                             "KWallet, or KeePassXC as the keyring)."));
+    // Not found at all, or found but not loadable (the reason, e.g. a
+    // library version mismatch, helps more than "not installed").
+    const auto &problem = library().problem;
+    fail(why, problem.contains(QStringLiteral("cannot open shared object file"))
+                  ? QStringLiteral("libsecret is not installed (the package libsecret, with GNOME "
+                                   "Keyring, KWallet, or KeePassXC as the keyring).")
+                  : QStringLiteral("libsecret could not be loaded: %1").arg(problem));
     return false;
 }
 

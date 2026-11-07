@@ -2,23 +2,22 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "rshoptions.h"
+#include "formcard.h"
+#include "inheritance.h"
+#include "preferences.h"
 #include "appdirs.h"
 
 #include <QComboBox>
 #include <QDir>
 #include <QFileInfo>
 #include <QFormLayout>
+#include <QVBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
-#include <QSaveFile>
 
 #include <yaml-cpp/yaml.h>
 
 namespace {
-QString settingsPath()
-{
-    return portableFilePath(QStringLiteral("settings/settings.yaml"));
-}
 
 QString labelFor(const RdpChoices &choices, const QString &value)
 {
@@ -103,7 +102,7 @@ void rshOptionsToYaml(const RshOptions &options, YAML::Node &node)
 RshOptions loadRshDefaults()
 {
     try {
-        auto defaults = rshOptionsFromYaml(YAML::LoadFile(settingsPath().toStdString())["rlogin"]);
+        auto defaults = rshOptionsFromYaml(loadPreferencesSection("rlogin"));
         defaults.command.clear(); // a session's own
         return RshOptions::builtIn().overriddenBy(defaults);
     } catch (const YAML::Exception &) {
@@ -113,32 +112,11 @@ RshOptions loadRshDefaults()
 
 void saveRshDefaults(const RshOptions &options)
 {
-    const auto path = settingsPath();
-    if (!QDir().mkpath(QFileInfo(path).absolutePath()))
-        return;
-    YAML::Node settings;
-    try {
-        settings = YAML::LoadFile(path.toStdString());
-    } catch (const YAML::Exception &) {
-    }
-    if (!settings.IsMap())
-        settings = YAML::Node(YAML::NodeType::Map);
     auto defaults = options;
     defaults.command.clear();
     YAML::Node node(YAML::NodeType::Map);
     rshOptionsToYaml(defaults, node);
-    settings["rlogin"] = node;
-    YAML::Emitter emitter;
-    emitter << settings;
-    QSaveFile file(path);
-    if (!file.open(QIODevice::WriteOnly))
-        return;
-    QByteArray contents(emitter.c_str());
-    contents.append('\n');
-    if (file.write(contents) == contents.size())
-        file.commit();
-    else
-        file.cancelWriting();
+    savePreferencesSection("rlogin", node);
 }
 
 RshOptionsEditor::RshOptionsEditor(const RshOptions &value, const RshOptions &defaults, QWidget *parent)
@@ -146,16 +124,16 @@ RshOptionsEditor::RshOptionsEditor(const RshOptions &value, const RshOptions &de
 {
     const RshOptions fallback = RshOptions::builtIn().overriddenBy(defaults);
     m_localUser = new QLineEdit(value.localUser, this);
-    m_localUser->setPlaceholderText(QStringLiteral("Default (%1)").arg(
-        fallback.localUser.isEmpty() ? currentUserName() : fallback.localUser));
+    m_localUser->setPlaceholderText(fallback.localUser.isEmpty() ? currentUserName() : fallback.localUser);
     m_localUser->setToolTip(QStringLiteral(
         "Sent as your user name on this computer. The server lets you in without a password when "
         "its .rhosts or hosts.equiv trusts this name from this computer; otherwise it asks."));
     m_sourcePort = new QComboBox(this);
-    m_sourcePort->addItem(QStringLiteral("Default (%1)").arg(labelFor(rshSourcePortChoices(), fallback.sourcePort)),
+    addInheritedItem(m_sourcePort, QString(labelFor(rshSourcePortChoices(), fallback.sourcePort)),
                           QString());
     for (const auto &choice : rshSourcePortChoices())
-        m_sourcePort->addItem(choice.second, choice.first);
+        if (choice.first != fallback.sourcePort) // listed once, as the inherited one
+            m_sourcePort->addItem(choice.second, choice.first);
     m_sourcePort->setCurrentIndex(qMax(0, m_sourcePort->findData(value.sourcePort)));
     m_sourcePort->setToolTip(QStringLiteral(
         "Most rlogin and rsh servers accept only connections from a reserved port (below 1024), "
@@ -167,7 +145,10 @@ RshOptionsEditor::RshOptionsEditor(const RshOptions &value, const RshOptions &de
 
     // A page of the session window's terminal tabs ("Connection").
     auto *page = this;
-    auto *form = new QFormLayout(page);
+    // Light cards (formcard.h).
+    auto *cards = new QVBoxLayout(page);
+    cards->setContentsMargins(0, 0, 0, 0);
+    auto *form = addFormCard(cards, QStringLiteral("General"), page);
     m_commandLabel = new QLabel(QStringLiteral("Command:"), page);
     form->addRow(m_commandLabel, m_command);
     form->addRow(QStringLiteral("Local user name:"), m_localUser);
@@ -178,6 +159,8 @@ RshOptionsEditor::RshOptionsEditor(const RshOptions &value, const RshOptions &de
     note->setWordWrap(true);
     note->setForegroundRole(QPalette::PlaceholderText);
     form->addRow(note);
+    cards->addStretch();
+    alignFormLabels(this);
 }
 
 void RshOptionsEditor::setCommandShown(bool shown)

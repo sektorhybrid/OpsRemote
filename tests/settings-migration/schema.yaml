@@ -1,0 +1,248 @@
+settings_version: 5
+ui:
+  style: system
+  color_theme: system
+  icon_theme: ""
+  font_family: ""
+  font_size: 0
+  window_border: true
+session_tree:
+  folder_expansion:
+    {}
+terminal:
+  color_scheme: ""
+  font_family: ""
+  font_size: 0
+  dark_color_scheme: ""
+startup:
+  on_startup: nothing
+  confirm_close_connected: true
+  confirm_exit: true
+  new_tab_next_to_current: false
+  allow_duplicate_session_tabs: false
+  tab_title: name
+  remember_window: true
+  single_instance: true
+  wayland_activation: false
+  open_sessions:
+    []
+  window_geometry: ""
+behaviour:
+  scrollback_lines: 10000
+  cursor_shape: block
+  cursor_blinks: false
+  scroll_bar: right
+  padding: 2
+  bell: visual
+  upload_dropped_files: true
+  mark_activity: true
+  activity_style: pulse
+  activity_color: ""
+  activity_pulse_color: ""
+mouse_clipboard:
+  copy_on_select: true
+  double_click: word-characters
+  word_characters: ":@-./_~?&=%+#"
+  paste: newest
+  other_programs_selection: false
+  right_click: menu
+  middle_click: paste
+  middle_click_closes_tab: true
+  wheel_on_fields: focused
+  confirm_multiline_paste: true
+  edit_multiline_paste: false
+  trim_pasted_newlines: false
+  links: ctrl-click
+ssh:
+  connect_timeout: 15
+  keepalive_seconds: 60
+  compression: false
+  try_public_keys: true
+  forward_agent: false
+  follow_terminal_folder: false
+  forward_x11: false
+  file_transfer: auto
+  agent: auto
+  proxy: none
+  identity_file: ""
+  use_certificates: true
+  security_keys: true
+  kerberos: false
+  kerberos_delegate: false
+  kerberos_order: first
+  auto_reconnect: false
+  reconnect_delay: 5
+  reconnect_attempts: 5
+  terminal_type: xterm-256color
+sftp:
+  show_hidden: true
+  show_places: true
+  ask_download_folder: true
+  download_folder: ""
+  conflict: ask
+  confirm_delete: true
+  temporary_upload: above
+  temporary_upload_kb: 100
+  open_folder_after_download: false
+  editor: ""
+security:
+  auto_lock_minutes: 0
+  lock_on_minimize: false
+  unlock_at_startup: false
+  password_store: vault
+logging:
+  enabled: false
+  folder: ""
+  timestamps: true
+  plain_text: true
+  record: false
+local_servers:
+  tftp:
+    port: 69
+    folder: shared
+    custom_folder: ""
+    uploads: false
+    listen: all
+    max_upload_mb: 4096
+  http:
+    port: 80
+    folder: shared
+    custom_folder: ""
+    uploads: false
+    listen: all
+    max_upload_mb: 4096
+local_shell:
+  use_sudo: true
+  linux_elevation: sudo
+session_list:
+  show_pinned: true
+  show_recent: true
+  recent_count: 5
+  show_host: true
+  show_protocol: false
+  check_status: true
+  check_seconds: 60
+  folder_summary: name
+  show_search: true
+  fit_panel: true
+  indentation: 12
+  folder_gap: 4
+  folders_at_start: remember
+  show_revert_buttons: true
+presentation:
+  zoom_steps: 4
+  full_screen: true
+  hide_panels: true
+backup:
+  backup_on_start: true
+  keep: 10
+  remove_runtime_on_exit: false
+run_command:
+  parallel: 5
+  timeout_seconds: 60
+  terminal: false
+  output_kb: 1024
+  keep_recent: 15
+  recent:
+    []
+http_request:
+  timeout_seconds: 30
+  follow_redirects: true
+  max_redirects: 10
+  verify_certificates: true
+  user_agent: OpsRemote
+  max_body_mb: 50
+commands:
+  show_files: true
+  show_commands: true
+  show_scripts: true
+snippets:
+  []
+highlights:
+  - pattern: \b(error|failed|failure|fatal|denied)\b
+    color: "#e04f4f"
+    bold: true
+    case_sensitive: false
+    enabled: true
+  - pattern: \b(warning|warn|deprecated)\b
+    color: "#e5a50a"
+    bold: false
+    case_sensitive: false
+    enabled: true
+  - pattern: \b(ok|success|succeeded|passed|done)\b
+    color: "#4cb050"
+    bold: false
+    case_sensitive: false
+    enabled: false
+shortcuts:
+  {}
+automation:
+  login_scripts: true
+  triggers: true
+  step_timeout: 20
+  stop_on_timeout: true
+  triggers_may_send_password: false
+  global_triggers:
+    []
+scripts:
+  enabled: true
+  interpreter: sh
+  confirm_above: 10
+containers:
+  docker_enabled: true
+  kubernetes_enabled: true
+  wsl_enabled: true
+  docker: ""
+  docker_shell: ""
+  podman: ""
+  kubectl: ""
+  kubernetes_shell: ""
+  wsl_distribution: ""
+  docker_list_timeout: 15
+  kubernetes_list_timeout: 15
+  wsl_list_timeout: 15
+ftp:
+  security: auto
+  mode: passive
+  listing: auto
+  connect_timeout: 15
+  keepalive_seconds: 60
+rlogin:
+  source_port: auto
+vnc:
+  resolution: follow
+  color_depth: 32
+  quality: good
+  encryption: prefer
+  remote_cursor: true
+  clipboard: true
+  auto_reconnect: true
+  reconnect_delay: 5
+  reconnect_attempts: 5
+  high_dpi: true
+  all_monitors: false
+rdp:
+  resolution: follow
+  color_depth: 32
+  quality: lan
+  security: auto
+  admin_session: false
+  clipboard_text: true
+  clipboard_files: true
+  graphics_pipeline: true
+  high_dpi: true
+  all_monitors: false
+  keyboard_layout: auto
+  auto_reconnect: true
+  reconnect_delay: 5
+  reconnect_attempts: 5
+  ask_credentials: true
+  audio: off
+  microphone: false
+  drives: none
+  printers: false
+  smart_cards: false
+xdmcp:
+  mode: query
+  program: auto
+  size: 1280x800

@@ -16,8 +16,9 @@
 /private/
 # Design notes and reviews: kept locally, not published.
 /design/
-# The release helper (commit, tag, push): kept locally, not published.
+# The release helpers (commit, tag, push; GitHub release): kept locally, not published.
 /scripts/bump-version.sh
+/scripts/github-publish-release.sh
 # What OpsRemote writes next to itself: sessions, preferences, the
 # encrypted vault, trusted host keys and certificates, backups, and the
 # unpacked program.
@@ -71,3 +72,4 @@ CMakeFiles/
 
 # Qt DLLs rebuilt with packaging/qt/patches (build-and-run.sh build-qt-windows)
 /third_party/qt-windows/
+/scripts/release.sh

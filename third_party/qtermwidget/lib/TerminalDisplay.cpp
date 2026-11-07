@@ -27,6 +27,7 @@
 #include <QAbstractButton>
 #include <QApplication>
 #include <QBoxLayout>
+#include <QCheckBox>
 #include <QClipboard>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -3170,6 +3171,13 @@ void TerminalDisplay::emitSelection(bool useXselection,bool appendReturn)
       useXselection = false;
   QString text = QApplication::clipboard()->text(useXselection ? QClipboard::Selection :
                                                                  QClipboard::Clipboard);
+  pasteText(text, appendReturn);
+}
+
+void TerminalDisplay::pasteText(QString text, bool appendReturn)
+{
+  if ( !_screenWindow )
+      return;
   if ( ! text.isEmpty() )
   {
     text.replace(QLatin1String("\r\n"), QLatin1String("\n"));
@@ -3184,6 +3192,13 @@ void TerminalDisplay::emitSelection(bool useXselection,bool appendReturn)
         if (!multilineConfirmation(text)) {
             return;
         }
+        // OpsRemote addition: the text may have been edited.
+        if (_trimPastedTrailingNewlines) {
+            static const QRegularExpression edited{u"\\r+$"_s};
+            text.replace(edited, QString());
+        }
+        if (text.isEmpty())
+            return;
     }
 
     bracketText(text);
@@ -3230,33 +3245,57 @@ void TerminalDisplay::bracketText(QString& text) const
     }
 }
 
-bool TerminalDisplay::multilineConfirmation(const QString& text)
+bool TerminalDisplay::multilineConfirmation(QString& text)
 {
     // OpsRemote addition: a resizable window that shows the whole text, in
-    // place of a fixed-size message box with collapsed details. Its size is
-    // kept for the rest of the session.
+    // place of a fixed-size message box with collapsed details, where it can
+    // also be edited before pasting. Its size is kept for the rest of the
+    // session.
     static QSize lastSize(640, 420);
     const QString shown = QString(text).replace(QLatin1Char('\r'), QLatin1Char('\n'));
     QDialog confirmation(this);
     confirmation.setWindowTitle(tr("Paste multiline text"));
     confirmation.setSizeGripEnabled(true);
     auto *layout = new QVBoxLayout(&confirmation);
-    layout->addWidget(new QLabel(tr("Are you sure you want to paste these %1 lines?")
-                                     .arg(shown.count(QLatin1Char('\n')) + 1), &confirmation));
+    auto *question = new QLabel(&confirmation);
+    layout->addWidget(question);
     auto *view = new QPlainTextEdit(shown, &confirmation);
-    view->setReadOnly(true);
     view->setLineWrapMode(QPlainTextEdit::NoWrap);
     view->setFont(getVTFont());
     layout->addWidget(view, 1);
+    const auto count = [view, question] {
+        question->setText(tr("Are you sure you want to paste these %1 lines?")
+                              .arg(view->toPlainText().count(QLatin1Char('\n')) + 1));
+    };
+    count();
+    connect(view, &QPlainTextEdit::textChanged, &confirmation, count);
+    auto *row = new QHBoxLayout;
+    auto *editable = new QCheckBox(tr("Edit the text"), &confirmation);
+    editable->setToolTip(tr("Change the text before it is pasted"));
+    row->addWidget(editable);
+    row->addStretch();
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Yes | QDialogButtonBox::No, &confirmation);
+    row->addWidget(buttons);
+    layout->addLayout(row);
     connect(buttons, &QDialogButtonBox::accepted, &confirmation, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, &confirmation, &QDialog::reject);
-    layout->addWidget(buttons);
+    connect(editable, &QCheckBox::toggled, &confirmation, [view](bool on) {
+        view->setReadOnly(!on);
+        if (on)
+            view->setFocus();
+    });
+    view->setReadOnly(!_editMultilinePaste);
+    editable->setChecked(_editMultilinePaste);
     buttons->button(QDialogButtonBox::Yes)->setDefault(true);
-    buttons->button(QDialogButtonBox::Yes)->setFocus();
+    if (_editMultilinePaste)
+        view->setFocus();
+    else
+        buttons->button(QDialogButtonBox::Yes)->setFocus();
     confirmation.resize(lastSize);
     const bool accepted = confirmation.exec() == QDialog::Accepted;
     lastSize = confirmation.size();
+    if (accepted)
+        text = view->toPlainText().replace(QLatin1Char('\n'), QLatin1Char('\r'));
     return accepted;
 }
 
@@ -3266,6 +3305,10 @@ void TerminalDisplay::setSelection(const QString& t)
     {
         QApplication::clipboard()->setText(t, QClipboard::Selection);
     }
+    // OpsRemote addition: called when a selection is finished; copy on
+    // select and Windows' middle-click use it (Windows has no selection).
+    if (!t.isEmpty())
+        emit selectionFinished(t);
 }
 
 void TerminalDisplay::copyClipboard()
@@ -3787,8 +3830,15 @@ int TerminalDisplay::margin() const
 
 void TerminalDisplay::setMargin(int i)
 {
+    // OpsRemote addition: laid out again at once (columns, lines and the
+    // program's terminal size), as on a resize; before, a new padding showed
+    // only in new terminals.
+    if (i == _topBaseMargin && i == _leftBaseMargin)
+        return;
     _topBaseMargin = i;
     _leftBaseMargin = i;
+    propagateSize();
+    update();
 }
 
 AutoScrollHandler::AutoScrollHandler(QWidget* parent)

@@ -2,9 +2,11 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "serialoptions.h"
+#include "formcard.h"
 
 #include <QComboBox>
 #include <QFormLayout>
+#include <QVBoxLayout>
 #include <QIntValidator>
 #include <QLineEdit>
 #include <QSerialPortInfo>
@@ -104,12 +106,16 @@ SerialOptionsEditor::SerialOptionsEditor(const SerialOptions &value, QWidget *pa
                              {QStringLiteral("hardware"), QStringLiteral("Hardware (RTS/CTS)")},
                              {QStringLiteral("software"), QStringLiteral("Software (XON/XOFF)")}},
                             value.flowControl, this);
-    auto *form = new QFormLayout(this);
+    // One light card (formcard.h), as every session type's Connection tab.
+    auto *cards = new QVBoxLayout(this);
+    auto *form = addFormCard(cards, QStringLiteral("General"), this);
     form->addRow(QStringLiteral("Speed (baud):"), m_baudRate);
     form->addRow(QStringLiteral("Data bits:"), m_dataBits);
     form->addRow(QStringLiteral("Parity:"), m_parity);
     form->addRow(QStringLiteral("Stop bits:"), m_stopBits);
     form->addRow(QStringLiteral("Flow control:"), m_flowControl);
+    cards->addStretch();
+    alignFormLabels(this);
 }
 
 SerialOptions SerialOptionsEditor::value() const

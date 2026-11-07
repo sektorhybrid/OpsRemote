@@ -281,6 +281,10 @@ public:
     void cancelPrompts();
 
     void queryShellFolder();
+    // The program in front of the shell's terminal, for dropped files:
+    // answered by dropFolder() (filedrop.h).
+    void queryDropFolder();
+    void startFolderPoll();
     void pumpShellFolder();
     void finishShellFolder(bool report);
     void addForwards(const QList<PortForward> &forwards, int firstIndex);
@@ -311,12 +315,19 @@ signals:
     void sftpReady(const QString &homePath, const QString &protocol);
     void sftpUnavailable(const QString &error);
     void shellFolder(const QString &path);
+    // Lines: "tag" (the server took the tag) or "untagged", then the pid,
+    // name, user and folder of the program in front, whether it is the
+    // shell itself, our user, and its command line; or one line "none".
+    void dropFolder(const QString &answer);
 
 private:
     enum class AuthStage { Kerberos, PublicKey, AgentKeys, StoredPassword, KeyboardInteractive,
                            PasswordPrompt, Failed };
     enum class PendingInput { None, KeyboardInteractive, Password, KeyPassphrase,
                               SecurityKeyPin };
+    // The step after current in the sequence of authentication (Kerberos's
+    // place: SshConnectionSettings::kerberosOrder).
+    AuthStage nextStage(AuthStage current) const;
     void initializeFiles();
     // Files over SFTP; false if the server does not offer it (reason in error).
     bool startSftp(QString *error);
@@ -376,6 +387,9 @@ private:
     FolderStage m_folderStage = FolderStage::Opening;
     QByteArray m_folderCommand;
     QByteArray m_folderOutput;
+    // What the query under way is for, and a drop query waiting for it.
+    bool m_folderForDrop = false;
+    bool m_dropQueued = false;
     QSocketNotifier *m_notifier = nullptr;
     // One SSH channel per forwarded connection. A SOCKS connection has no
     // channel until its request has been read.
@@ -817,8 +831,24 @@ void SshWorker::beginAuthentication()
         ssh_string_free_char(banner);
     }
     m_authMethods = ssh_userauth_list(m_session, nullptr);
-    m_stage = AuthStage::Kerberos;
+    m_stage = nextStage(AuthStage::Failed);
     continueAuthentication();
+}
+
+SshWorker::AuthStage SshWorker::nextStage(AuthStage current) const
+{
+    using S = AuthStage;
+    // Kerberos never after the prompts: asking for a password and then
+    // trying the ticket would make no sense.
+    const QList<S> order = m_settings.kerberosOrder == QStringLiteral("after-keys")
+        ? QList<S>{S::PublicKey, S::AgentKeys, S::Kerberos, S::StoredPassword, S::KeyboardInteractive, S::PasswordPrompt}
+        : m_settings.kerberosOrder == QStringLiteral("last")
+        ? QList<S>{S::PublicKey, S::AgentKeys, S::StoredPassword, S::Kerberos, S::KeyboardInteractive, S::PasswordPrompt}
+        : QList<S>{S::Kerberos, S::PublicKey, S::AgentKeys, S::StoredPassword, S::KeyboardInteractive, S::PasswordPrompt};
+    if (current == S::Failed)
+        return order.first(); // the start
+    const auto at = order.indexOf(current);
+    return at >= 0 && at + 1 < order.size() ? order.at(at + 1) : S::Failed;
 }
 
 // Tries each authentication method in turn. Returns early while waiting for
@@ -836,7 +866,7 @@ bool SshWorker::tryIdentityFile(const QByteArray &passphrase)
         if (securityKey && !m_settings.securityKeys) {
             ssh_key_free(key);
             emit statusMessage(QStringLiteral("%1 is a security key; security keys are turned off "
-                                              "(Preferences → Security and vault → Keys and certificates).")
+                                              "(Preferences → Security & vault → Keys & certificates).")
                                    .arg(QFileInfo(m_settings.identityFile).fileName()));
             return false;
         }
@@ -947,7 +977,7 @@ void SshWorker::continueAuthentication()
     for (;;) {
         switch (m_stage) {
         case AuthStage::Kerberos: {
-            m_stage = AuthStage::PublicKey;
+            m_stage = nextStage(AuthStage::Kerberos);
             if (!m_settings.kerberos || !(m_authMethods & SSH_AUTH_METHOD_GSSAPI_MIC))
                 break;
             emit statusMessage(QStringLiteral("Logging on with Kerberos…"));
@@ -968,7 +998,7 @@ void SshWorker::continueAuthentication()
             break;
         }
         case AuthStage::PublicKey: {
-            m_stage = AuthStage::AgentKeys;
+            m_stage = nextStage(AuthStage::PublicKey);
             if (!(m_authMethods & SSH_AUTH_METHOD_PUBLICKEY) || m_settings.identityFile.isEmpty())
                 break;
             auto passphrase = m_settings.keyPassphrase.toUtf8();
@@ -981,13 +1011,13 @@ void SshWorker::continueAuthentication()
             break;
         }
         case AuthStage::AgentKeys:
-            m_stage = AuthStage::StoredPassword;
+            m_stage = nextStage(AuthStage::AgentKeys);
             if ((m_authMethods & SSH_AUTH_METHOD_PUBLICKEY) && m_settings.tryPublicKeys
                 && handleAuthResult(ssh_userauth_publickey_auto(m_session, nullptr, nullptr)))
                 return;
             break;
         case AuthStage::StoredPassword: {
-            m_stage = AuthStage::KeyboardInteractive;
+            m_stage = nextStage(AuthStage::StoredPassword);
             if (m_settings.password.isEmpty() || !(m_authMethods & SSH_AUTH_METHOD_PASSWORD))
                 break;
             m_storedPasswordTried = true;
@@ -1003,7 +1033,7 @@ void SshWorker::continueAuthentication()
         case AuthStage::KeyboardInteractive:
             if ((m_authMethods & SSH_AUTH_METHOD_INTERACTIVE) && runKeyboardInteractive())
                 return;
-            m_stage = AuthStage::PasswordPrompt;
+            m_stage = nextStage(AuthStage::KeyboardInteractive);
             break;
         case AuthStage::PasswordPrompt:
             if (!(m_authMethods & SSH_AUTH_METHOD_PASSWORD)
@@ -1112,7 +1142,7 @@ void SshWorker::answerPrompts(QStringList answers)
             wipe(answer);
         if (runKeyboardInteractive())
             return;
-        m_stage = AuthStage::PasswordPrompt;
+        m_stage = nextStage(AuthStage::KeyboardInteractive);
         continueAuthentication();
     } else if (pending == PendingInput::SecurityKeyPin) {
         m_securityKeyPin = answers.value(0).toUtf8();
@@ -2456,22 +2486,49 @@ void SshWorker::schedulePump()
 // nested bash, su to the same user...), from /proc on the server. Runs in
 // its own channel, so nothing shows in the terminal. Servers without /proc
 // or without the tag report nothing.
-void SshWorker::queryShellFolder()
+void SshWorker::queryDropFolder()
 {
-    // Coalesce requests while one lookup is already in flight.
-    if (m_shellTag.isEmpty() || !m_session || m_finished || m_folderChannel)
+    if (!m_session || m_finished) {
+        emit dropFolder(QStringLiteral("none"));
         return;
+    }
+    if (m_shellTag.isEmpty()) {
+        emit dropFolder(QStringLiteral("untagged"));
+        return;
+    }
+    if (m_folderChannel) {
+        m_dropQueued = true; // after the query under way
+        return;
+    }
     m_folderChannel = ssh_channel_new(m_session);
-    if (!m_folderChannel)
+    if (!m_folderChannel) {
+        emit dropFolder(QStringLiteral("none"));
         return;
+    }
+    m_folderForDrop = true;
+    // The tagged shells of this tab; the first is the login shell, whose
+    // terminal says which process group is in front (field 8 of stat,
+    // counted after the name in parentheses). Of that program: its name,
+    // user, folder, whether it is one of the tagged shells, and its command.
     m_folderCommand =
-        "for f in $(grep -lzx 'LC_OPSREMOTE_TAG=" + m_shellTag
+        "s=$(for f in $(grep -lzx 'LC_OPSREMOTE_TAG=" + m_shellTag
         + "' /proc/[0-9]*/environ 2>/dev/null); do d=${f%/environ}; "
           "case $(cat \"$d/comm\" 2>/dev/null) in bash|zsh|sh|fish|dash|ksh|mksh|tcsh|csh|ash) "
-          "echo \"${d#/proc/} $(readlink \"$d/cwd\")\";; esac; done | sort -n | tail -n 1";
+          "echo \"${d#/proc/}\";; esac; done | sort -n); "
+          "first=$(echo \"$s\" | head -n 1); [ -n \"$first\" ] || { echo none; exit 0; }; "
+          "t=$(sed 's/.*) //' \"/proc/$first/stat\" | cut -d' ' -f6); "
+          "echo tag; echo \"$t\"; cat \"/proc/$t/comm\" 2>/dev/null || echo; "
+          "stat -c %U \"/proc/$t\" 2>/dev/null || echo; readlink \"/proc/$t/cwd\" 2>/dev/null || echo; "
+          "if echo \"$s\" | grep -qx \"$t\"; then echo shell; else echo program; fi; "
+          "id -un; tr '\\0' ' ' < \"/proc/$t/cmdline\" 2>/dev/null; echo";
     m_folderOutput.clear();
     m_folderStage = FolderStage::Opening;
     m_folderElapsed.start();
+    startFolderPoll();
+}
+
+void SshWorker::startFolderPoll()
+{
     if (!m_folderPoll) {
         m_folderPoll = new QTimer(this);
         m_folderPoll->setInterval(20);
@@ -2485,6 +2542,26 @@ void SshWorker::queryShellFolder()
     }
     m_folderPoll->start();
     pumpShellFolder();
+}
+
+void SshWorker::queryShellFolder()
+{
+    // Coalesce requests while one lookup is already in flight.
+    if (m_shellTag.isEmpty() || !m_session || m_finished || m_folderChannel)
+        return;
+    m_folderChannel = ssh_channel_new(m_session);
+    if (!m_folderChannel)
+        return;
+    m_folderForDrop = false;
+    m_folderCommand =
+        "for f in $(grep -lzx 'LC_OPSREMOTE_TAG=" + m_shellTag
+        + "' /proc/[0-9]*/environ 2>/dev/null); do d=${f%/environ}; "
+          "case $(cat \"$d/comm\" 2>/dev/null) in bash|zsh|sh|fish|dash|ksh|mksh|tcsh|csh|ash) "
+          "echo \"${d#/proc/} $(readlink \"$d/cwd\")\";; esac; done | sort -n | tail -n 1";
+    m_folderOutput.clear();
+    m_folderStage = FolderStage::Opening;
+    m_folderElapsed.start();
+    startFolderPoll();
 }
 
 void SshWorker::pumpShellFolder()
@@ -2554,7 +2631,9 @@ void SshWorker::finishShellFolder(bool report)
     ssh_set_blocking(m_session, blocking);
     const auto output = std::exchange(m_folderOutput, {});
     m_folderCommand.clear();
-    if (report) {
+    if (std::exchange(m_folderForDrop, false)) {
+        emit dropFolder(report ? QString::fromUtf8(output) : QStringLiteral("none"));
+    } else if (report) {
         const QString line = QString::fromUtf8(output).trimmed();
         const QString folder = line.section(QLatin1Char(' '), 1);
         if (folder.startsWith(QLatin1Char('/')))
@@ -2563,6 +2642,8 @@ void SshWorker::finishShellFolder(bool report)
     // Nonblocking channel operations may have consumed other channels' packets.
     if (!m_finished)
         schedulePump();
+    if (std::exchange(m_dropQueued, false))
+        QMetaObject::invokeMethod(this, &SshWorker::queryDropFolder, Qt::QueuedConnection);
 }
 
 SshSession::SshSession(QObject *parent)
@@ -2595,6 +2676,7 @@ SshSession::SshSession(QObject *parent)
             });
     connect(m_worker, &SshWorker::sftpUnavailable, this, &SshSession::sftpUnavailable);
     connect(m_worker, &SshWorker::shellFolder, this, &SshSession::shellFolder);
+    connect(m_worker, &SshWorker::dropFolder, this, &SshSession::dropFolder);
     relay(m_worker->files());
 }
 
@@ -2690,6 +2772,12 @@ void SshSession::probe(int id, const QString &host, quint16 port)
     QMetaObject::invokeMethod(m_worker, [worker = m_worker, id, host, port] {
         worker->probe(id, host, port);
     }, Qt::QueuedConnection);
+}
+
+void SshSession::queryDropFolder()
+{
+    QMetaObject::invokeMethod(m_worker, [worker = m_worker] { worker->queryDropFolder(); },
+                              Qt::QueuedConnection);
 }
 
 void SshSession::queryShellFolder()

@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "sftppanel.h"
+#include "filedialogs.h"
 #include "sftpsync.h"
 #include "icons.h"
 #include "preferences.h"
@@ -731,6 +732,17 @@ void SftpPanel::uploadPaths(const QStringList &localPaths, const QString &remote
     m_jobUploads.insert(jobId, true);
 }
 
+QString SftpPanel::uploadInto(const QStringList &localPaths, const QString &remoteDirectory)
+{
+    if (!m_session)
+        return QStringLiteral("This tab is not connected.");
+    if (!m_ready)
+        return QStringLiteral("The file connection to the server is not ready yet (it opens after "
+                              "logging on; a server without SFTP or SCP has none).");
+    uploadPaths(localPaths, remoteDirectory);
+    return QString();
+}
+
 void SftpPanel::pasteInto(const QString &remoteDirectory)
 {
     const auto paths = localPathsFromMime(QApplication::clipboard()->mimeData());
@@ -744,14 +756,14 @@ void SftpPanel::pasteInto(const QString &remoteDirectory)
 
 void SftpPanel::uploadFilesDialog()
 {
-    const auto files = QFileDialog::getOpenFileNames(
+    const auto files = FileDialogs::openFileNames(
         this, QStringLiteral("Upload Files to %1").arg(m_currentPath), QDir::homePath());
     uploadPaths(files, m_currentPath);
 }
 
 void SftpPanel::uploadFolderDialog()
 {
-    const auto folder = QFileDialog::getExistingDirectory(
+    const auto folder = FileDialogs::existingDirectory(
         this, QStringLiteral("Upload Folder to %1").arg(m_currentPath), QDir::homePath());
     if (!folder.isEmpty())
         uploadPaths({folder}, m_currentPath);
@@ -878,14 +890,14 @@ void SftpPanel::openEditor(const QString &localPath)
         if (!couldRun(localPath)) {
             if (!QDesktopServices::openUrl(QUrl::fromLocalFile(localPath)))
                 showMessage(QStringLiteral("No program is set to open this kind of file. Choose an "
-                                           "editor in Preferences → Files and transfers."), true);
+                                           "editor in Preferences → Files & transfers."), true);
             return;
         }
         arguments = plainTextEditor();
         if (arguments.isEmpty()) {
             showMessage(QStringLiteral("%1 could run if opened with its usual program, so it is "
                                        "only opened in a text editor. Choose one in Preferences "
-                                       "→ Files and transfers.").arg(QFileInfo(localPath).fileName()), true);
+                                       "→ Files & transfers.").arg(QFileInfo(localPath).fileName()), true);
             return;
         }
     }
@@ -923,7 +935,7 @@ void SftpPanel::downloadSelected()
     if (m_lastDownloadDirectory.isEmpty())
         m_lastDownloadDirectory = defaultFolder;
     const auto directory = preferences.askDownloadFolder
-                               ? QFileDialog::getExistingDirectory(this, QStringLiteral("Download To"),
+                               ? FileDialogs::existingDirectory(this, QStringLiteral("Download To"),
                                                                    m_lastDownloadDirectory)
                                : defaultFolder;
     if (directory.isEmpty() || !m_session)

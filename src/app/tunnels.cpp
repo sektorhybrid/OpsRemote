@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "tunnels.h"
+#include "filedialogs.h"
 #include "appdirs.h"
 #include "jumphost.h"
 #include "tunneleditor.h"
@@ -1067,7 +1068,7 @@ void TunnelsWindow::importSshConfig()
 {
     QString path = QDir::home().filePath(QStringLiteral(".ssh/config"));
     if (!QFileInfo::exists(path)) {
-        path = QFileDialog::getOpenFileName(this, QStringLiteral("SSH Config File"), QDir::homePath());
+        path = FileDialogs::openFileName(this, QStringLiteral("SSH Config File"), QDir::homePath());
         if (path.isEmpty())
             return;
     }

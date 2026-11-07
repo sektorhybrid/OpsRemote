@@ -4,6 +4,7 @@
 #include "stallwatch.h"
 #include "workerthreads.h"
 #include "mainwindow.h"
+#include "settingsmigrations.h"
 #include "localsessions.h"
 #ifdef Q_OS_WIN
 #include "conpty.h"
@@ -41,6 +42,15 @@
 #include <QStandardPaths>
 #include <QMenu>
 #include <QScrollBar>
+#include <QCheckBox>
+#include <QSpinBox>
+#include <QFrame>
+#include <QLabel>
+#include <QFormLayout>
+#include <QAbstractSpinBox>
+#include <QMimeData>
+#include <QDropEvent>
+#include <QUrl>
 #include <QTimer>
 #include <QThread>
 #include <QToolButton>
@@ -212,6 +222,12 @@ int main(int argc, char *argv[])
         qputenv("QT_WAYLAND_DISABLED_INTERFACES", "xdg_activation_v1");
 #endif
     QApplication application(argc, argv);
+    // For tests: every setting with its defaults (tests/settings-migration/
+    // schema.yaml), without reading or writing the real settings.
+    if (const auto snapshot = qEnvironmentVariable("OPSREMOTE_TEST_SETTINGS_SNAPSHOT"); !snapshot.isEmpty()) {
+        QFile file(snapshot);
+        return file.open(QIODevice::WriteOnly) && file.write(settingsSnapshot()) > 0 ? 0 : 1;
+    }
     // Each diagnostic can be left out (=0), to tell whether one of them
     // changes what it is looking for.
 #ifdef Q_OS_WIN
@@ -271,6 +287,8 @@ int main(int argc, char *argv[])
         return runHttpTest();
     if (const auto spec = qEnvironmentVariable("OPSREMOTE_TEST_FOLLOW"); !spec.isEmpty())
         return runFollowTest(spec);
+    if (const auto spec = qEnvironmentVariable("OPSREMOTE_TEST_SSHDROP"); !spec.isEmpty())
+        return runSshDropTest(spec);
     QApplication::setApplicationName("OpsRemote");
     QApplication::setOrganizationName("OpsRemote");
     QIcon icon;
@@ -332,6 +350,13 @@ int main(int argc, char *argv[])
         }
     }
 
+    // Older settings brought to the current shape, now that this is the
+    // only copy running and before anything reads them (except the startup
+    // keys read above: startup.single_instance and wayland_activation, which
+    // a migration must therefore never move).
+    for (const auto &line : migrateSettings())
+        qInfo("settings migration: %s", qUtf8Printable(line));
+
     int result = 0;
     {
         MainWindow window;
@@ -371,6 +396,63 @@ int main(int argc, char *argv[])
         // OPSREMOTE_TEST_ADMIN=1 an administrator terminal, on Windows,
         // OPSREMOTE_TEST_TYPE=command typed into the first terminal after 3 s,
         // OPSREMOTE_TEST_MULTIEXEC=1 with SPLIT: all of them chosen for multi-exec).
+        // OPSREMOTE_TEST_DROP=path[;path]: opens a local terminal, cds it to
+        // OPSREMOTE_TEST_DROP_FOLDER (if set) and drops these files on it after 2 s.
+        if (const auto drop = qEnvironmentVariable("OPSREMOTE_TEST_DROP"); !drop.isEmpty()) {
+            QTimer::singleShot(300, &window, [&window, drop] {
+                window.openLocalTerminal();
+                const auto folder = qEnvironmentVariable("OPSREMOTE_TEST_DROP_FOLDER");
+                QTimer::singleShot(800, &window, [folder] {
+                    for (auto *widget : QApplication::allWidgets())
+                        if (widget->inherits("Konsole::TerminalDisplay") && widget->isVisible() && !folder.isEmpty()) {
+                            QKeyEvent key(QEvent::KeyPress, 0, Qt::NoModifier,
+                                          QStringLiteral("cd '%1'\r").arg(folder));
+                            QCoreApplication::sendEvent(widget, &key);
+                            break;
+                        }
+                });
+                QTimer::singleShot(2000, &window, [&window, drop] {
+                    // As a drop on the terminal does (real drag events are
+                    // delivered only during a real drag).
+                    if (auto *page = window.findChild<TerminalPage *>())
+                        page->dropFiles(drop.split(QLatin1Char(';')), false);
+                    else
+                        std::fprintf(stderr, "test drop: no terminal\n");
+                });
+            });
+        }
+        // OPSREMOTE_TEST_CLICK=text[;text…]: clicks the shown button whose text
+        // starts with each, one after the other (OPSREMOTE_TEST_CLICK_MS
+        // apart, 800 by default; the first after that long too).
+        if (const auto texts = qEnvironmentVariable("OPSREMOTE_TEST_CLICK"); !texts.isEmpty()) {
+            const int gap = qEnvironmentVariableIntValue("OPSREMOTE_TEST_CLICK_MS") > 0
+                                ? qEnvironmentVariableIntValue("OPSREMOTE_TEST_CLICK_MS")
+                                : 800;
+            int at = 0;
+            for (const auto &text : texts.split(QLatin1Char(';'))) {
+                at += gap;
+                QTimer::singleShot(at, &window, [text] {
+                    for (auto *button : QApplication::allWidgets()) {
+                        auto *push = qobject_cast<QAbstractButton *>(button);
+                        if (push && push->isVisible() && push->text().remove(QLatin1Char('&')).startsWith(text)) {
+                            push->click();
+                            return;
+                        }
+                    }
+                    std::fprintf(stderr, "test click: no button \"%s\"\n", qPrintable(text));
+                });
+            }
+        }
+        // OPSREMOTE_TEST_FONT_SIZE=pt: the interface font changes to it after 500 ms
+        // (not saved), to picture how open windows follow.
+        if (const int size = qEnvironmentVariableIntValue("OPSREMOTE_TEST_FONT_SIZE"); size > 0) {
+            QTimer::singleShot(500, &window, [size] {
+                auto font = QApplication::font();
+                font.setPointSize(size);
+                QApplication::setFont(font);
+                refreshWidgetFonts();
+            });
+        }
         if (const auto page = qEnvironmentVariable("OPSREMOTE_TEST_PREFERENCES"); !page.isEmpty()) {
             // "main" pictures the main window instead, "modal" the open dialog,
             // "tunnels" the SSH Tunnels window.
@@ -573,7 +655,8 @@ int main(int argc, char *argv[])
                 }
                 // OPSREMOTE_TEST_NEWSESSION=protocol: the New Session window with
                 // that protocol, its visible tabs printed and pictured to
-                // OPSREMOTE_TEST_NEWSESSION_PICTURE, then closed.
+                // OPSREMOTE_TEST_NEWSESSION_PICTURE, then closed (OPSREMOTE_TEST_NEWSESSION_TABS:
+                // tab names to open first).
                 if (const auto protocol = qEnvironmentVariable("OPSREMOTE_TEST_NEWSESSION"); !protocol.isEmpty()) {
                     QTimer::singleShot(200, &window, [protocol] {
                         auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
@@ -582,6 +665,26 @@ int main(int argc, char *argv[])
                         for (auto *box : dialog->findChildren<QComboBox *>())
                             if (box->findText(QStringLiteral("XDMCP")) >= 0 && box->findText(QStringLiteral("SSH")) >= 0)
                                 box->setCurrentText(protocol);
+                        // OPSREMOTE_TEST_NEWSESSION_TABS=a,b: these tabs opened first.
+                        for (const auto &name : qEnvironmentVariable("OPSREMOTE_TEST_NEWSESSION_TABS").split(QLatin1Char(','), Qt::SkipEmptyParts))
+                            for (auto *tabWidget : dialog->findChildren<QTabWidget *>())
+                                for (int i = 0; i < tabWidget->count(); ++i)
+                                    if (tabWidget->tabText(i).contains(name.trimmed(), Qt::CaseInsensitive))
+                                        tabWidget->setCurrentIndex(i);
+                        // OPSREMOTE_TEST_NEWSESSION_FILL=1: every second drop-down, number and
+                        // switch given its own value, so pictures show both kinds of row.
+                        if (qEnvironmentVariableIntValue("OPSREMOTE_TEST_NEWSESSION_FILL")) {
+                            int n = 0;
+                            for (auto *box : dialog->findChildren<QComboBox *>())
+                                if (!box->isEditable() && box->count() > 1 && n++ % 2)
+                                    box->setCurrentIndex(1);
+                            for (auto *box : dialog->findChildren<QSpinBox *>())
+                                if (n++ % 2)
+                                    box->setValue(box->minimum() + 3);
+                            for (auto *box : dialog->findChildren<QCheckBox *>())
+                                if (n++ % 2)
+                                    box->toggle();
+                        }
                         QTimer::singleShot(600, dialog, [dialog] {
                             QStringList tabs;
                             for (auto *tabWidget : dialog->findChildren<QTabWidget *>()) {
@@ -594,6 +697,51 @@ int main(int argc, char *argv[])
                                 tabs << QStringLiteral("%1: %2").arg(tabWidget->objectName(), names.join(QStringLiteral(" · ")));
                             }
                             std::fprintf(stderr, "session tabs: %s\n", qPrintable(tabs.join(QStringLiteral(" || "))));
+                            // OPSREMOTE_TEST_NEWSESSION_ROWS=1: every shown tab's cards and rows.
+                            if (qEnvironmentVariableIntValue("OPSREMOTE_TEST_NEWSESSION_ROWS")) {
+                                for (auto *tabWidget : dialog->findChildren<QTabWidget *>()) {
+                                    if (!tabWidget->isVisible())
+                                        continue;
+                                    for (int i = 0; i < tabWidget->count(); ++i) {
+                                        if (!tabWidget->isTabVisible(i))
+                                            continue;
+                                        std::fprintf(stderr, "TAB %s\n", qPrintable(tabWidget->tabText(i)));
+                                        for (auto *form : tabWidget->widget(i)->findChildren<QFormLayout *>()) {
+                                            if (auto *card = qobject_cast<QFrame *>(form->parentWidget());
+                                                card && card->objectName() == QStringLiteral("formCard"))
+                                                if (auto *title = card->findChild<QLabel *>())
+                                                    std::fprintf(stderr, "  CARD %s\n", qPrintable(title->text()));
+                                            for (int row = 0; row < form->rowCount(); ++row) {
+                                                QString label;
+                                                if (auto *item = form->itemAt(row, QFormLayout::LabelRole); item && item->widget())
+                                                    if (auto *text = qobject_cast<QLabel *>(item->widget()))
+                                                        label = text->text();
+                                                QString field;
+                                                for (auto role : {QFormLayout::FieldRole, QFormLayout::SpanningRole}) {
+                                                    auto *item = form->itemAt(row, role);
+                                                    QWidget *w = item ? item->widget() : nullptr;
+                                                    if (!w)
+                                                        continue;
+                                                    if (auto *box = qobject_cast<QCheckBox *>(w); box || (box = w->findChild<QCheckBox *>()))
+                                                        field = QStringLiteral("[x] ") + box->text();
+                                                    else if (auto *combo = qobject_cast<QComboBox *>(w); combo || (combo = w->findChild<QComboBox *>()))
+                                                        field = QStringLiteral("(list) ") + combo->currentText();
+                                                    else if (auto *spin = qobject_cast<QAbstractSpinBox *>(w); spin || (spin = w->findChild<QAbstractSpinBox *>()))
+                                                        field = QStringLiteral("(number) ") + spin->text();
+                                                    else if (auto *edit = qobject_cast<QLineEdit *>(w); edit || (edit = w->findChild<QLineEdit *>()))
+                                                        field = QStringLiteral("(text) ") + edit->placeholderText();
+                                                    else if (auto *text = qobject_cast<QLabel *>(w); text || (text = w->findChild<QLabel *>()))
+                                                        field = QStringLiteral("(note) ") + text->text().left(70);
+                                                    else
+                                                        field = QStringLiteral("(%1)").arg(QString::fromLatin1(w->metaObject()->className()));
+                                                }
+                                                if (!label.isEmpty() || !field.isEmpty())
+                                                    std::fprintf(stderr, "    %s %s\n", qPrintable(label), qPrintable(field));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             if (const auto file = qEnvironmentVariable("OPSREMOTE_TEST_NEWSESSION_PICTURE"); !file.isEmpty())
                                 dialog->grab().save(file);
                             dialog->reject();

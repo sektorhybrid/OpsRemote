@@ -12,6 +12,7 @@ class QLineEdit;
 class QListWidget;
 class QStackedWidget;
 class QTabWidget;
+class SettingsCard;
 class SettingsPage;
 
 // Settings window in the style of Windows 11: pages listed on the left with a
@@ -26,12 +27,18 @@ public:
 
     // Shows the window at a category or page id ("appearance", "rdp",
     // "about"), or keeps the current page when id is empty.
-    void showPage(const QString &id);
+    // targets: titles of rows or cards on that page to scroll to and mark
+    // for a moment (a link row's destination).
+    void showPage(const QString &id, const QStringList &targets = {});
 
 protected:
     void changeEvent(QEvent *event) override;
 
 private:
+    void addLinkRow(SettingsCard *card, const QString &title, const QString &description,
+                    const QString &where, const QString &pageId, const QString &keywords,
+                    const QStringList &targets = {});
+    void markTargets(QWidget *page, const QStringList &targets);
     // Pages added between beginCategory() and endCategory() become tabs of
     // one category in the navigation list; others are categories of their own.
     void beginCategory(const QString &id, const QString &title, const QString &iconName,
@@ -44,6 +51,7 @@ private:
     void buildTabActivityCard(SettingsPage *page);
     void buildLocalShellPage();
     void buildStartupPage();
+    void buildMouseClipboardPage();
     void buildShortcutsPage();
     void buildSshPage();
     void buildAutomationPage();

@@ -17,16 +17,23 @@ class QTermWidget;
 
 // Colors and font of a terminal. Empty fields mean "not set": in the default
 // appearance they select QTermWidget's built-in scheme and font; in a session
-// override they inherit the default appearance. linksEnabled is a per-session
-// behaviour override; -1 follows the global terminal behaviour setting.
+// override they inherit the default appearance. linksEnabled and
+// confirmMultilinePaste are per-session overrides of Preferences → Workspace
+// → Mouse and clipboard; -1 follows it.
 struct TerminalAppearance
 {
     QString colorScheme;
     QString fontFamily;
     int fontSize = 0;
     int linksEnabled = -1; // -1: global behaviour, 0: disabled, 1: enabled
+    int confirmMultilinePaste = -1; // -1: global behaviour, 0: off, 1: on
+    int uploadDroppedFiles = -1; // -1: Preferences → Terminals, 0: paste paths, 1: upload
 
-    bool isEmpty() const { return colorScheme.isEmpty() && fontFamily.isEmpty() && fontSize == 0 && linksEnabled < 0; }
+    bool isEmpty() const
+    {
+        return colorScheme.isEmpty() && fontFamily.isEmpty() && fontSize == 0 && linksEnabled < 0
+               && confirmMultilinePaste < 0 && uploadDroppedFiles < 0;
+    }
     // Returns this appearance with every field set in override replacing it.
     TerminalAppearance overriddenBy(const TerminalAppearance &override) const;
     QFont font() const;
@@ -66,6 +73,8 @@ private:
     TerminalAppearance m_defaults;
     QComboBox *m_schemeCombo = nullptr;
     QComboBox *m_linksCombo = nullptr;
+    QComboBox *m_confirmCombo = nullptr;
+    QComboBox *m_dropCombo = nullptr;
     QCheckBox *m_overrideFont = nullptr;
     QFontComboBox *m_fontCombo = nullptr;
     QSpinBox *m_sizeSpin = nullptr;

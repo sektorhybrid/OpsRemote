@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "sftpsync.h"
+#include "filedialogs.h"
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -110,7 +111,7 @@ SftpSyncDialog::SftpSyncDialog(RemoteFileSession *session, const QString &remote
     connect(m_direction, &QComboBox::currentIndexChanged, this, invalidate);
     connect(m_deleteExtra, &QCheckBox::toggled, this, invalidate);
     connect(browse, &QPushButton::clicked, this, [this] {
-        const QString folder = QFileDialog::getExistingDirectory(this, QStringLiteral("Local Folder"), m_local->text());
+        const QString folder = FileDialogs::existingDirectory(this, QStringLiteral("Local Folder"), m_local->text());
         if (!folder.isEmpty())
             m_local->setText(QDir::toNativeSeparators(folder));
     });

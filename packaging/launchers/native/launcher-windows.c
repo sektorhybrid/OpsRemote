@@ -29,6 +29,28 @@
 
 static wchar_t here[MAX_PATH]; // with a trailing backslash
 
+// Every message says this: what is wrong never touches the user's data.
+#define SAFE L"Your sessions and settings are unaffected by this."
+
+// The package itself lacks what the program is unpacked from: only getting
+// it again helps (the runtime copy is rebuilt by the launcher on its own).
+// The package's folder must be writable: the program is unpacked next to it.
+#define NOT_WRITABLE                                                                           \
+    L"OpsRemote cannot write to its own folder:\n%ls\n\n"                                     \
+    L"OpsRemote is portable and unpacks its program files next to itself, so its folder must "  \
+    L"be writable. A protected folder such as Program Files, or a write-protected USB stick, "   \
+    L"does not work.\n\n" SAFE L"\n\nMove the whole OpsRemote folder to a place you can write "  \
+    L"to, for example Documents, and start it from there."
+
+#define PACKAGE_DAMAGED                                                                        \
+    L"Some of OpsRemote's own files are missing or damaged: %ls.\n\n"                        \
+    L"OpsRemote unpacks its program from these files whenever it needs to, so without them "   \
+    L"it cannot. This happens when a download was cut short or only part of the archive was "  \
+    L"extracted.\n\n" SAFE L" They are in the \"settings\" folder, which is not touched.\n\n"  \
+    L"To fix it, download OpsRemote again and extract the whole archive in the same place, "   \
+    L"so that it replaces the files of this OpsRemote folder. The download contains no "       \
+    L"settings, so yours stay as they are."
+
 static void fail(const wchar_t *format, ...)
 {
     wchar_t message[2048];
@@ -52,7 +74,9 @@ static void format_path(wchar_t *out, const wchar_t *format, ...)
     va_end(arguments);
     if (written < 0 || written >= MAX_PATH) {
         out[MAX_PATH - 1] = L'\0';
-        fail(L"The folder path is too long:\n%ls\n\nMove the OpsRemote folder to a shorter path.", here);
+        fail(L"The path of the OpsRemote folder is too long for Windows:\n%ls\n\n" SAFE
+             L"\n\nMove the whole OpsRemote folder to a shorter path, for example C:\\OpsRemote, "
+             L"and start it from there.", here);
     }
 }
 
@@ -91,13 +115,114 @@ static void read_line(const wchar_t *file, char *out, size_t size)
     out[strcspn(out, "\r\n")] = '\0';
 }
 
-// zstd -dcq <archive> | tar -xf - -C <folder>, without console windows.
-static void write_marker(const wchar_t *file)
+// The marker, unpacked.ok, is written last after unpacking and lists every
+// file with its size ("size<TAB>relative path", UTF-8). A start checks the
+// copy against it, so a copy that lost files (being removed, an antivirus)
+// is found and rebuilt instead of failing.
+static void list_files(HANDLE out, const wchar_t *root, const wchar_t *relative)
+{
+    wchar_t pattern[MAX_PATH];
+    const int written = _snwprintf(pattern, MAX_PATH, relative[0] ? L"%ls\\%ls\\*" : L"%ls\\*",
+                                   root, relative);
+    if (written < 0 || written >= MAX_PATH)
+        return;
+    WIN32_FIND_DATAW found;
+    HANDLE search = FindFirstFileW(pattern, &found);
+    if (search == INVALID_HANDLE_VALUE)
+        return;
+    do {
+        if (wcscmp(found.cFileName, L".") == 0 || wcscmp(found.cFileName, L"..") == 0)
+            continue;
+        wchar_t name[MAX_PATH];
+        const int length = _snwprintf(name, MAX_PATH, relative[0] ? L"%ls\\%ls" : L"%ls%ls",
+                                      relative, found.cFileName);
+        if (length < 0 || length >= MAX_PATH)
+            continue;
+        if (found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            list_files(out, root, name);
+            continue;
+        }
+        if (_wcsicmp(name, L"unpacked.ok") == 0 || _wcsicmp(name, L"remove-on-exit") == 0)
+            continue;
+        char utf8[3 * MAX_PATH], line[3 * MAX_PATH + 32];
+        if (!WideCharToMultiByte(CP_UTF8, 0, name, -1, utf8, sizeof utf8, NULL, NULL))
+            continue;
+        const unsigned long long size =
+            ((unsigned long long)found.nFileSizeHigh << 32) | found.nFileSizeLow;
+        const int bytes = snprintf(line, sizeof line, "%llu\t%s\n", size, utf8);
+        DWORD done = 0;
+        if (bytes > 0 && bytes < (int)sizeof line)
+            WriteFile(out, line, (DWORD)bytes, &done, NULL);
+    } while (FindNextFileW(search, &found));
+    FindClose(search);
+}
+
+static void write_marker(const wchar_t *folder, const wchar_t *file)
 {
     HANDLE handle = CreateFileW(file, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (handle != INVALID_HANDLE_VALUE)
-        CloseHandle(handle);
+    if (handle == INVALID_HANDLE_VALUE)
+        return;
+    list_files(handle, folder, L"");
+    CloseHandle(handle);
 }
+
+// TRUE when every file the marker lists is there with its size. A marker
+// without a list (from earlier launchers) counts as not checked.
+static BOOL copy_complete(const wchar_t *folder, const wchar_t *marker)
+{
+    HANDLE handle = CreateFileW(marker, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (handle == INVALID_HANDLE_VALUE)
+        return FALSE;
+    LARGE_INTEGER size;
+    if (!GetFileSizeEx(handle, &size) || size.QuadPart <= 0 || size.QuadPart > (1 << 22)) {
+        CloseHandle(handle);
+        return FALSE;
+    }
+    char *text = HeapAlloc(GetProcessHeap(), 0, (SIZE_T)size.QuadPart + 1);
+    DWORD read = 0;
+    const BOOL ok = text && ReadFile(handle, text, (DWORD)size.QuadPart, &read, NULL);
+    CloseHandle(handle);
+    if (!ok) {
+        if (text)
+            HeapFree(GetProcessHeap(), 0, text);
+        return FALSE;
+    }
+    text[read] = '\0';
+    BOOL complete = TRUE;
+    int files = 0;
+    for (char *line = text, *next; complete && line && *line; line = next) {
+        next = strchr(line, '\n');
+        if (next)
+            *next++ = '\0';
+        char *tab = strchr(line, '\t');
+        if (!tab) {
+            complete = FALSE;
+            break;
+        }
+        *tab = '\0';
+        const unsigned long long expected = _strtoui64(line, NULL, 10);
+        wchar_t name[MAX_PATH], file[MAX_PATH];
+        WIN32_FILE_ATTRIBUTE_DATA data;
+        complete = MultiByteToWideChar(CP_UTF8, 0, tab + 1, -1, name, MAX_PATH) > 0
+                   && _snwprintf(file, MAX_PATH, L"%ls\\%ls", folder, name) > 0
+                   && GetFileAttributesExW(file, GetFileExInfoStandard, &data)
+                   && !(data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+                   && (((unsigned long long)data.nFileSizeHigh << 32) | data.nFileSizeLow) == expected;
+        ++files;
+    }
+    HeapFree(GetProcessHeap(), 0, text);
+    return complete && files > 0;
+}
+
+// Less free space than unpacking needs (with some room to spare).
+static BOOL disk_nearly_full(void)
+{
+    ULARGE_INTEGER available;
+    return GetDiskFreeSpaceExW(here, &available, NULL, NULL)
+           && available.QuadPart < 300ull * 1024 * 1024;
+}
+
+// zstd -dcq <archive> | tar -xf - -C <folder>, without console windows.
 
 // keep: leave files that are already there (filling in a copy that lost
 // some of its files, while others are in use).
@@ -169,11 +294,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR arguments, int
     const DWORD length = GetModuleFileNameW(NULL, here, MAX_PATH);
     if (length == 0 || length >= MAX_PATH) {
         here[0] = L'\0';
-        fail(L"Cannot find where this launcher is, or its folder path is too long.");
+        fail(L"Windows did not say where OpsRemote.exe is, or the path of its folder is too long."
+             L"\n\n" SAFE L"\n\nMove the whole OpsRemote folder to a shorter path, for example "
+             L"C:\\OpsRemote, and start it from there.");
     }
     wchar_t *slash = wcsrchr(here, L'\\');
     if (!slash)
-        fail(L"Cannot find where this launcher is.");
+        fail(L"Windows did not say where OpsRemote.exe is.\n\n" SAFE
+             L"\n\nStart OpsRemote again from its folder.");
     slash[1] = L'\0';
 
     // Windows 10 version 1809 (build 17763) or newer: tar.exe and the
@@ -187,12 +315,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR arguments, int
     if (getVersion && getVersion(&version) == 0
         && (version.dwMajorVersion < 10 || version.dwBuildNumber < 17763))
         fail(L"OpsRemote needs Windows 10 version 1809 or newer, or Windows 11. This is Windows "
-             L"%lu build %lu.", version.dwMajorVersion, version.dwBuildNumber);
+             L"%lu build %lu.\n\n" SAFE, version.dwMajorVersion, version.dwBuildNumber);
 
     wchar_t data[MAX_PATH], archive[MAX_PATH], app[MAX_PATH], runtime[MAX_PATH];
     path(data, L"data");
     if (!exists(data))
-        fail(L"This copy of OpsRemote is incomplete. Extract the whole archive again.");
+        fail(PACKAGE_DAMAGED, L"the \"data\" folder");
     path(archive, L"compressed\\" PLATFORM L".tar.zst");
     if (exists(archive)) {
         wchar_t id_file[MAX_PATH];
@@ -203,53 +331,64 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR arguments, int
         for (const char *c = id; safe && *c; ++c)
             safe = (*c >= '0' && *c <= '9') || (*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z');
         if (!safe)
-            fail(L"This copy of OpsRemote is incomplete. Extract the whole archive again.");
+            fail(PACKAGE_DAMAGED, L"compressed\\" PLATFORM L".id");
+        wchar_t zstd[MAX_PATH];
+        path(zstd, L"tools\\zstd-" PLATFORM L".exe");
         format_path(runtime, L"%lsruntime\\" PLATFORM L"-%hs", here, id);
         format_path(app, L"%ls\\OpsRemote.exe", runtime);
-        // Written last after unpacking. Missing while the program is there:
-        // an older launcher's copy, or one that lost files (it was being
-        // removed when this start reused it); the missing files are put back.
         wchar_t marker[MAX_PATH];
         format_path(marker, L"%ls\\unpacked.ok", runtime);
-        if (exists(app) && !exists(marker)) {
-            wchar_t zstd[MAX_PATH];
-            path(zstd, L"tools\\zstd-" PLATFORM L".exe");
-            if (exists(zstd) && unpack(zstd, archive, runtime, TRUE))
-                write_marker(marker);
+        // A copy that is not complete (unpacking or removing it was cut
+        // short, an antivirus took files) is rebuilt: it holds only program
+        // files, the user's data is in settings\. Renamed away first, which
+        // Windows refuses while an OpsRemote still runs from it; then the
+        // missing files are filled in instead.
+        if (exists(runtime) && !(exists(app) && copy_complete(runtime, marker))) {
+            wchar_t broken[MAX_PATH];
+            format_path(broken, L"%ls.removing%lu", runtime, GetCurrentProcessId());
+            if (MoveFileW(runtime, broken)) {
+                remove_tree(broken);
+            } else if (exists(zstd) && unpack(zstd, archive, runtime, TRUE)) {
+                write_marker(runtime, marker);
+            }
         }
         if (!exists(app)) {
-            wchar_t zstd[MAX_PATH], runtime_root[MAX_PATH], tar[MAX_PATH];
-            path(zstd, L"tools\\zstd-" PLATFORM L".exe");
+            wchar_t runtime_root[MAX_PATH], tar[MAX_PATH];
             if (!exists(zstd))
-                fail(L"This copy of OpsRemote is incomplete. Extract the whole archive again.");
+                fail(PACKAGE_DAMAGED, L"tools\\zstd-" PLATFORM L".exe");
             const UINT system = GetSystemDirectoryW(tar, MAX_PATH - 16);
             if (system == 0 || system >= MAX_PATH - 16)
-                fail(L"Cannot find the Windows system folder.");
+                fail(L"Windows did not say where its system folder is, and OpsRemote needs its tar "
+                     L"program from there to unpack itself.\n\n" SAFE L"\n\nRestart Windows and "
+                     L"try again.");
             wcscat(tar, L"\\tar.exe");
             if (!exists(tar))
-                fail(L"The Windows tar program is missing; OpsRemote needs Windows 10 version 1809 "
-                     L"or newer.");
+                fail(L"Windows' own tar program (%ls) is missing. OpsRemote uses it to unpack its "
+                     L"program files; it comes with Windows 10 version 1809 and newer.\n\n" SAFE,
+                     tar);
             path(runtime_root, L"runtime");
             if (!CreateDirectoryW(runtime_root, NULL) && GetLastError() != ERROR_ALREADY_EXISTS)
-                fail(L"Cannot write to %ls. OpsRemote unpacks itself next to this file, so the "
-                     L"folder must be writable.", here);
+                fail(NOT_WRITABLE, here);
             wchar_t partial[MAX_PATH];
             format_path(partial, L"%ls.partial%lu", runtime, GetCurrentProcessId());
             remove_tree(partial);
             if (!CreateDirectoryW(partial, NULL))
-                fail(L"Cannot write to %ls. OpsRemote unpacks itself next to this file, so the "
-                     L"folder must be writable.", here);
+                fail(NOT_WRITABLE, here);
             // Silently: a window appears only if something goes wrong.
             const BOOL unpacked = unpack(zstd, archive, partial, FALSE);
             wchar_t check[MAX_PATH];
             format_path(check, L"%ls\\OpsRemote.exe", partial);
             if (!unpacked || !exists(check)) {
                 remove_tree(partial);
-                fail(L"Could not unpack compressed\\" PLATFORM L".tar.zst. Is the disk full?");
+                if (disk_nearly_full())
+                    fail(L"OpsRemote could not unpack its program files (about 100 MB) into the "
+                         L"\"runtime\" folder next to it: the disk is nearly full.\n\n" SAFE
+                         L"\n\nFree some space on this drive and start OpsRemote again.");
+                fail(PACKAGE_DAMAGED, L"compressed\\" PLATFORM L".tar.zst cannot be unpacked");
             }
             wchar_t partial_marker[MAX_PATH];
             format_path(partial_marker, L"%ls\\unpacked.ok", partial);
-            write_marker(partial_marker);
+            write_marker(partial, partial_marker);
             // Another start may have finished first; either copy is complete.
             if (!MoveFileW(partial, runtime))
                 remove_tree(partial);
@@ -289,8 +428,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR arguments, int
     if (last)
         *last = L'\0';
     format_path(qt, L"%ls\\Qt6Core.dll", folder);
+    // Still incomplete after rebuilding: something removes the files as they
+    // are unpacked (an antivirus), or the uncompressed package lacks them.
     if (!exists(app) || !exists(qt))
-        fail(L"This copy of OpsRemote is incomplete. Extract the whole archive again.");
+        fail(exists(archive)
+                 ? L"OpsRemote's program files were unpacked again, but some are still missing "
+                   L"(OpsRemote.exe or Qt6Core.dll in %ls). An antivirus program may be removing "
+                   L"them.\n\n" SAFE L"\n\nCheck your antivirus program's quarantine, allow "
+                   L"OpsRemote, and start it again."
+                 : PACKAGE_DAMAGED,
+             exists(archive) ? folder : L"the \"" PLATFORM L"\" program folder");
 
     // Written by the program as it ends when it should be removed (Preferences:
     // remove the unpacked program on exit); one left by an earlier start that
@@ -312,7 +459,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR arguments, int
     start.cb = sizeof start;
     PROCESS_INFORMATION process;
     if (!CreateProcessW(app, command, NULL, NULL, FALSE, 0, NULL, folder, &start, &process))
-        fail(L"Cannot start %ls (error %lu).", app, GetLastError());
+        fail(L"Windows could not start OpsRemote's program (%ls, error %lu). An antivirus "
+             L"program may be blocking it.\n\n" SAFE L"\n\nCheck your antivirus program's "
+             L"quarantine, allow OpsRemote, and start it again.", app, GetLastError());
     CloseHandle(process.hThread);
 
     // Stay (without a window) and watch it: a crash gets explained instead of

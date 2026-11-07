@@ -9,6 +9,7 @@
 #include "sessionimport.h"
 #include "credentialvault.h"
 #include "terminalappearance.h"
+#include "clipboard.h"
 #include "preferences.h"
 #include "runcommand.h"
 #include "sshsession.h"
@@ -64,6 +65,13 @@ class QActionGroup;
 class QCloseEvent;
 namespace YAML { class Node; }
 
+// See mainwindow.cpp.
+QByteArray settingsSnapshot();
+
+// Polishes open widgets again after the application font changed, so those
+// under a style sheet follow too (mainwindow.cpp).
+void refreshWidgetFonts();
+
 class MainWindow final : public QMainWindow
 {
     Q_OBJECT
@@ -82,9 +90,10 @@ public:
     QString jumpHostLabel(const QString &jumpHost) const;
     void addProtocolTab(QComboBox *protocolCombo, TerminalAppearanceEditor *sshTabsMember,
                         QWidget *rdpEditor, QWidget *vncEditor, QWidget *page, const QString &title);
-    ProxyEditor *addProxyTab(QComboBox *protocolCombo, TerminalAppearanceEditor *sshTabsMember,
-                             QWidget *rdpEditor, QWidget *vncEditor, const QString &value,
-                             const QTreeWidgetItem *folder);
+    void addNetworkTab(QComboBox *protocolCombo, TerminalAppearanceEditor *sshTabsMember,
+                       QWidget *rdpEditor, QWidget *vncEditor, JumpHostEditor *jumpHost,
+                       PortForwardListEditor *forwards, ProxyEditor *proxy, QWidget *wakeOnLan);
+    ProxyEditor *newProxyEditor(const QString &value, const QTreeWidgetItem *folder);
     QString inheritedProxy(const QTreeWidgetItem *folder) const;
     bool inheritedKerberos(const QTreeWidgetItem *folder) const;
     SshOptions sessionSshOptions(const SessionDefinition &session) const;
@@ -97,12 +106,9 @@ public:
     void applyProxy(const SessionDefinition &session, SshConnectionSettings *server,
                     std::vector<SshConnectionSettings> &jumps) const;
     void saveProxyPassword(const QString &value, QString password);
-    JumpHostEditor *addJumpHostTab(QComboBox *protocolCombo, TerminalAppearanceEditor *sshTabsMember,
-                                   QWidget *rdpEditor, QWidget *vncEditor, const QString &value,
-                                   const QTreeWidgetItem *folder, const QString &sessionId);
+    JumpHostEditor *newJumpHostEditor(const QString &value, const QTreeWidgetItem *folder,
+                                      const QString &sessionId);
     void editFolderSettings(QTreeWidgetItem *folder);
-    PortForwardListEditor *addPortForwardingTab(TerminalAppearanceEditor *sshTabsMember,
-                                                const QList<PortForward> &value);
     bool resolveTunnelServer(const QString &server, SshConnectionSettings *settings);
     bool resolveTunnel(const SavedTunnel &tunnel, SshConnectionSettings *settings);
     TunnelServerInfo describeTunnelServer(const QString &server, const QStringList &via) const;
@@ -157,6 +163,7 @@ public:
     // The look the current appearance started from (applied, saved or
     // overwritten last), also once it was changed by hand; empty if none.
     QString baseLookId() const;
+    void rememberStartLook();
     // Your own look id gets the current appearance (name and id stay).
     void overwriteLook(const QString &id);
     // Adds a copy (a duplicate, an imported file) as one of your own looks
@@ -187,6 +194,9 @@ public:
     void setTerminalBehaviour(const TerminalBehaviour &behaviour);
     StartupPreferences startupPreferences() const { return m_startup; }
     void setStartupPreferences(const StartupPreferences &preferences);
+    // Preferences → Workspace → Mouse and clipboard (clipboard.h).
+    MouseClipboardPreferences mouseClipboardPreferences() const { return Clipboard::preferences(); }
+    void setMouseClipboardPreferences(const MouseClipboardPreferences &preferences);
     QHash<QString, QKeySequence> shortcuts() const { return m_shortcuts; }
     void setShortcuts(const QHash<QString, QKeySequence> &shortcuts);
     SshPreferences sshPreferences() const { return loadSshPreferences(); }
@@ -271,6 +281,7 @@ private:
     void applyUiStyle(const QString &styleKey);
     void applyColorTheme(const QString &themeKey);
 public:
+    static QPalette withFadedDisabledButtons(QPalette palette);
     QPalette paletteFor(const QString &themeKey, const QHash<QString, QColor> &customColors) const;
 private:
     void syncMenuChecks();
@@ -367,6 +378,7 @@ private:
     QHash<QString, QColor> m_customColors;
     QList<Look> m_userLooks;
     QString m_baseLookId; // see baseLookId()
+    void setBaseLook(const QString &id);
     QPalette m_systemPalette;
     QFont m_systemFont;
     QString m_iconTheme;

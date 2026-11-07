@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "jumphost.h"
+#include "inheritance.h"
 
 #include <QComboBox>
 #include <QFormLayout>
@@ -172,8 +173,9 @@ JumpHostEditor::JumpHostEditor(const QString &value, const QString &inherited,
     auto *form = new QFormLayout(this);
     m_choice = new QComboBox(this);
     m_choice->setEditable(true);
-    m_choice->addItem(QStringLiteral("Inherit (%1)").arg(inherited), QString());
-    m_choice->addItem(QStringLiteral("None (connect directly)"), JumpHost::Direct);
+    addInheritedItem(m_choice, inherited, QString());
+    if (inherited != QStringLiteral("None (connect directly)")) // listed once, as the inherited one
+        m_choice->addItem(QStringLiteral("None (connect directly)"), JumpHost::Direct);
     for (const auto &[id, label] : sshSessions) {
         if (id != exclude)
             m_choice->addItem(label, JumpHost::SessionPrefix + id);
@@ -183,7 +185,7 @@ JumpHostEditor::JumpHostEditor(const QString &value, const QString &inherited,
         m_choice->setCurrentIndex(known);
     else
         m_choice->setEditText(value);
-    form->addRow(QStringLiteral("Jump host:"), m_choice);
+    form->addRow(QStringLiteral("Connect through:"), m_choice);
     auto *help = new QLabel(QStringLiteral(
         "Connect through an SSH server first: one of your saved SSH sessions (which can have a "
         "jump host of its own, for several hops), or type user@host[:port]. The host of the "

@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "vncpage.h"
+#include "reconnect.h"
 #include "jumphost.h"
 #include "sessionendedpanel.h"
 
@@ -209,15 +210,17 @@ VncPage::VncPage(const VncPageSettings &settings, QWidget *parent)
                                    "after too many failed log-ons. Wait a few minutes, then reconnect "
                                    "(with the right password).");
         emit statusMessage(QStringLiteral("%1: %2").arg(host(), shown));
-        constexpr int attempts = 6;
-        if (error && !blocked && m_wasConnected && m_settings.connection.options.autoReconnect == 1
-            && m_reconnectAttempts < attempts) {
+        // The session type's wait and tries (reconnect.h); 0 keeps trying.
+        const auto &options = m_settings.connection.options;
+        const int attempts = options.reconnectAttempts < 0 ? DefaultReconnectAttempts : options.reconnectAttempts;
+        const int delay = options.reconnectDelay > 0 ? options.reconnectDelay : DefaultReconnectDelay;
+        if (error && !blocked && m_wasConnected && options.autoReconnect == 1
+            && mayReconnect(m_reconnectAttempts, attempts)) {
             ++m_reconnectAttempts;
-            showOverlay(QStringLiteral("Connection lost. Reconnecting (attempt %1 of %2)…")
-                            .arg(m_reconnectAttempts)
-                            .arg(attempts),
+            showOverlay(QStringLiteral("Connection lost. Reconnecting (%1)…")
+                            .arg(reconnectAttemptText(m_reconnectAttempts, attempts)),
                         false);
-            QTimer::singleShot(5000, this, [this] {
+            QTimer::singleShot(delay * 1000, this, [this] {
                 if (!m_connected)
                     start();
             });

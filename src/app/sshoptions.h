@@ -30,6 +30,7 @@ struct SshOptions
     QString certificateFile;
     int kerberos = -1;
     int kerberosDelegate = -1;
+    QString kerberosOrder; // empty: the Preferences'
     // The server's Kerberos name when it differs from the host name.
     QString kerberosServer;
     int autoReconnect = -1;
@@ -49,7 +50,7 @@ struct SshOptions
 SshOptions sshOptionsFromYaml(const YAML::Node &node);
 void sshOptionsToYaml(const SshOptions &options, YAML::Node &node);
 
-// Edits a session's SshOptions; every field starts at "Default (…)".
+// Edits a session's SshOptions; every field starts at the inherited value.
 class SshOptionsEditor final : public QWidget
 {
     Q_OBJECT
@@ -59,8 +60,13 @@ public:
                      QWidget *parent = nullptr);
 
     SshOptions value() const;
+    // SFTP and SCP sessions have no terminal: its settings are hidden.
+    void setFileOnly(bool fileOnly);
 
 private:
+    class QFormLayout *m_generalForm = nullptr;
+    QList<int> m_terminalRows; // rows of m_generalForm only a terminal uses
+    QWidget *m_terminalCard = nullptr;
     SshPreferences m_defaults;
     QSpinBox *m_connectTimeout = nullptr;
     QSpinBox *m_keepalive = nullptr;
@@ -75,13 +81,14 @@ private:
     QLineEdit *m_kerberosServer = nullptr;
     void showCertificate();
     QCheckBox *m_autoReconnect = nullptr;
-    QSpinBox *m_reconnectDelay = nullptr;
+    QSpinBox *m_reconnectDelay = nullptr; // reconnect.h
     QSpinBox *m_reconnectAttempts = nullptr;
     QComboBox *m_terminalType = nullptr;
     QComboBox *m_backspace = nullptr;
     QComboBox *m_followTerminalFolder = nullptr;
     QCheckBox *m_forwardX11 = nullptr;
     QComboBox *m_fileTransfer = nullptr;
+    QComboBox *m_kerberosOrder = nullptr;
 };
 
 // The file browser's protocols for SSH: value and label.

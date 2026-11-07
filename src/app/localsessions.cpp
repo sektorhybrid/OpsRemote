@@ -2,6 +2,10 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "localsessions.h"
+#include "filedialogs.h"
+#include "formcard.h"
+#include "inheritance.h"
+#include "jumphost.h"
 #include "availabilitynote.h"
 #include "preferences.h"
 #include "sshsession.h"
@@ -107,7 +111,7 @@ QWidget *pathField(QLineEdit **edit, const QString &value, const QString &placeh
     row->addWidget(*edit, 1);
     row->addWidget(browse);
     QObject::connect(browse, &QPushButton::clicked, widget, [edit = *edit] {
-        const auto file = QFileDialog::getOpenFileName(edit->window(), QString(),
+        const auto file = FileDialogs::openFileName(edit->window(), QString(),
                                                        edit->text().isEmpty() ? QDir::homePath() : edit->text());
         if (!file.isEmpty())
             edit->setText(QDir::toNativeSeparators(file));
@@ -615,7 +619,19 @@ LocalSessionEditor::LocalSessionEditor(const LocalSessionOptions &value, Session
                                        Resolver resolver, QWidget *parent)
     : QWidget(parent), m_resolver(std::move(resolver))
 {
-    auto *layout = new QVBoxLayout(this);
+    auto *page = new QVBoxLayout(this);
+    page->setSpacing(6);
+    // The rows of each card, in groups shown by type (setProtocol()); the
+    // cards as in every session type: General, Logon, then Start.
+    auto *general = new QWidget(this);
+    auto *logOn = new QWidget(this);
+    auto *start = new QWidget(this);
+    for (auto *group : {general, logOn, start}) {
+        auto *inside = new QVBoxLayout(group);
+        inside->setContentsMargins(0, 0, 0, 0);
+        inside->setSpacing(4);
+    }
+    auto *layout = qobject_cast<QVBoxLayout *>(general->layout());
     QFormLayout *form = nullptr;
     // The line under a list, kept in its form (see StatusLine).
     const auto addStatus = [this](QFormLayout *rowsForm, QComboBox *combo) {
@@ -644,7 +660,7 @@ LocalSessionEditor::LocalSessionEditor(const LocalSessionOptions &value, Session
     m_administrator->setChecked(value.administrator);
     form->addRow(QString(), m_administrator);
     m_elevation = new QComboBox(m_localRows);
-    m_elevation->addItem(QStringLiteral("Default (Preferences → Terminal → Administrator)"), QString());
+    addInheritedItem(m_elevation, QStringLiteral("As in Preferences → Terminals"), QString());
     for (const auto &[id, label] : elevationChoices())
         m_elevation->addItem(label, id);
     m_elevation->setCurrentIndex(qMax(0, m_elevation->findData(value.elevation)));
@@ -694,6 +710,7 @@ LocalSessionEditor::LocalSessionEditor(const LocalSessionOptions &value, Session
     layout->addWidget(m_containerRows);
 
     // How docker and kubectl log on.
+    layout = qobject_cast<QVBoxLayout *>(logOn->layout());
     m_logOnRows = rows(&form, this);
     m_dockerContext = editableList(m_logOnRows, value.dockerContext, QStringLiteral("Context name"));
     auto *listContexts = listAgainButton(m_logOnRows);
@@ -753,6 +770,7 @@ LocalSessionEditor::LocalSessionEditor(const LocalSessionOptions &value, Session
     connect(m_kubeAuth, &QComboBox::currentIndexChanged, this, &LocalSessionEditor::updateRows);
     connect(m_insecure, &QCheckBox::toggled, this, &LocalSessionEditor::updateRows);
 
+    layout = qobject_cast<QVBoxLayout *>(start->layout());
     m_kubernetesRows = rows(&form, this);
     m_context = editableList(m_kubernetesRows, value.context, QStringLiteral("The kubeconfig's current context"));
     m_namespace = editableList(m_kubernetesRows, value.kubeNamespace, QStringLiteral("The context's namespace"));
@@ -784,13 +802,13 @@ LocalSessionEditor::LocalSessionEditor(const LocalSessionOptions &value, Session
     form->addRow(QStringLiteral("Container:"), containerRow);
     addStatus(form, m_container);
     m_user = new QLineEdit(value.user, common);
-    m_user->setPlaceholderText(QStringLiteral("Default"));
+    m_user->setPlaceholderText(QStringLiteral("As the distribution or image sets it"));
     form->addRow(QStringLiteral("User:"), m_user);
     m_folder = new QLineEdit(value.folder, common);
-    m_folder->setPlaceholderText(QStringLiteral("Default"));
+    m_folder->setPlaceholderText(QStringLiteral("As the distribution or image sets it"));
     form->addRow(QStringLiteral("Start folder:"), m_folder);
     m_shell = new QLineEdit(value.shell, common);
-    m_shell->setPlaceholderText(QStringLiteral("Default (bash if there is one, else sh)"));
+    m_shell->setPlaceholderText(QStringLiteral("bash if there is one, else sh"));
     form->addRow(QStringLiteral("Shell:"), m_shell);
     // A list's state shows in its own box (Listing…, none found, an error).
     m_listStatus = new QLabel(common);
@@ -802,8 +820,12 @@ LocalSessionEditor::LocalSessionEditor(const LocalSessionOptions &value, Session
     m_note = new AvailabilityNote([this] {
         return overSsh() ? QString() : localSessionProblem(m_protocol, m_engine->currentData().toString());
     }, {}, this);
-    layout->addWidget(m_note);
-    layout->addStretch();
+    addWidgetCard(page, QStringLiteral("General"), general);
+    m_logOnCard = addWidgetCard(page, QStringLiteral("Logon"), logOn);
+    addWidgetCard(page, QStringLiteral("Start"), start);
+    page->addWidget(m_note);
+    page->addStretch();
+    alignFormLabels(this);
     connect(m_via, &QComboBox::currentIndexChanged, m_note, &AvailabilityNote::check);
     connect(m_engine, &QComboBox::currentIndexChanged, m_note, &AvailabilityNote::check);
 
@@ -924,7 +946,7 @@ void LocalSessionEditor::setProtocol(const QString &protocol)
     form->setRowVisible(m_user, protocol == Wsl || docker);
     form->setRowVisible(m_folder, protocol != Kubernetes);
     form->setRowVisible(m_shell, docker || kubernetes);
-    m_container->lineEdit()->setPlaceholderText(kubernetes ? QStringLiteral("Default (the pod's first)")
+    m_container->lineEdit()->setPlaceholderText(kubernetes ? QStringLiteral("The pod's first")
                                                            : QStringLiteral("Container name or ID"));
     updateRows();
     scheduleLists();
@@ -974,6 +996,8 @@ void LocalSessionEditor::updateRows()
     form->setRowVisible(m_clientCertificate->parentWidget(), client);
     form->setRowVisible(m_clientKey->parentWidget(), client);
     m_logOnRows->setVisible(docker || kubernetes);
+    // Docker on this computer or over SSH logs on by itself: no card then.
+    m_logOnCard->setVisible(kubernetes || (docker && (tcp || where == QStringLiteral("@context"))));
     // A written kubeconfig (token, certificate) has a single context.
     if (auto *kubernetesForm = qobject_cast<QFormLayout *>(m_kubernetesRows->layout())) {
         kubernetesForm->setRowVisible(0, !server); // Context and its status line
@@ -1196,7 +1220,15 @@ void LocalSessionEditor::fillFrom(QComboBox *target, const QString &program, con
         command = withRemoteKubeconfig(kubeconfig, command);
     connect(ssh, &SshSession::hostKeyVerificationRequired, ssh,
             [ssh] { ssh->answerHostKey(SshHostKeyDecision::Reject); });
-    connect(ssh, &SshSession::inputRequired, ssh, [ssh] { ssh->cancelPrompts(); });
+    // A key's passphrase or a password is asked as everywhere else.
+    const auto server = connection.username.isEmpty()
+                            ? connection.host
+                            : QStringLiteral("%1@%2").arg(connection.username, connection.host);
+    connect(ssh, &SshSession::inputRequired, this,
+            [this, ssh, server](const QString &instruction, const QStringList &prompts,
+                                const QList<bool> &echo) {
+                askSshLogOn(window(), ssh, server, instruction, prompts, echo);
+            });
     connect(ssh, &SshSession::connected, ssh, [ssh, command, timeout] { ssh->runCommand(command, false, timeout, 256 * 1024); });
     connect(ssh, &SshSession::commandFinished, this,
             [ssh, show](int, int exitStatus, const QByteArray &output, bool, const QString &error, int) {

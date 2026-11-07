@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "runcommand.h"
+#include "filedialogs.h"
 
 #include "jumphost.h"
 
@@ -185,7 +186,7 @@ RunCommandWindow::RunCommandWindow(const QString &folder, const QList<Host> &hos
         QApplication::clipboard()->setText(resultsText(QLatin1Char('\t'), false));
     });
     connect(save, &QPushButton::clicked, this, [this] {
-        const QString path = QFileDialog::getSaveFileName(this, QStringLiteral("Save Results"),
+        const QString path = FileDialogs::saveFileName(this, QStringLiteral("Save Results"),
                                                           m_folder + QStringLiteral(".csv"),
                                                           QStringLiteral("CSV files (*.csv)"));
         if (path.isEmpty())

@@ -51,6 +51,9 @@ public:
     void setFollowControl(std::function<bool()> following, std::function<void(bool)> setFollowing);
     void openSync();
     QString currentPath() const { return m_currentPath; }
+    // Uploads local files and folders into a remote folder (files dropped
+    // on the terminal); an empty answer means started, else why not.
+    QString uploadInto(const QStringList &localPaths, const QString &remoteDirectory);
 
 private:
     std::function<bool()> m_following;

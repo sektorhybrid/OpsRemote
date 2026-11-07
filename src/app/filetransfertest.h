@@ -61,3 +61,7 @@ int runHttpTest();
 // following on as the right-click menu does, and prints the Files pane's
 // folder after each step.
 int runFollowTest(const QString &spec);
+// OPSREMOTE_TEST_SSHDROP=ssh://user:password@host:port/folder?files=a;b&known_hosts=path: an SSH tab
+// cds to folder, files are dropped on it (Upload clicked), then the same with
+// "sleep 20" running in front (Cancel clicked); the asking texts are printed.
+int runSshDropTest(const QString &spec);

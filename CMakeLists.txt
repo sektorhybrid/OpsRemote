@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 cmake_minimum_required(VERSION 3.21)
 
-project(OpsRemote VERSION 0.6.1 LANGUAGES CXX)
+project(OpsRemote VERSION 0.6.2 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -46,6 +46,25 @@ list(PREPEND CMAKE_PREFIX_PATH "${CMAKE_BINARY_DIR}")
 set(lxqt2-build-tools_DIR "${CMAKE_BINARY_DIR}")
 add_subdirectory(third_party/qtermwidget EXCLUDE_FROM_ALL)
 
+# Settings from earlier versions migrated (tests/settings-migration): built
+# only when asked for, not part of the package.
+#   cmake --build build/dev --target opsremote settings-migration-test && ctest --test-dir build/dev
+enable_testing()
+add_executable(settings-migration-test EXCLUDE_FROM_ALL
+    tests/settingsmigrationtest.cpp
+    src/app/settingsmigrations.cpp
+)
+target_include_directories(settings-migration-test PRIVATE src/app)
+target_link_libraries(settings-migration-test PRIVATE Qt6::Gui yaml-cpp::yaml-cpp)
+add_test(NAME settings-migration
+         COMMAND settings-migration-test "${CMAKE_CURRENT_SOURCE_DIR}/tests/settings-migration")
+# Every saved setting with its default, against the committed snapshot.
+add_test(NAME settings-schema
+         COMMAND "${CMAKE_COMMAND}" "-DAPP=$<TARGET_FILE:opsremote>"
+                 "-DEXPECTED=${CMAKE_CURRENT_SOURCE_DIR}/tests/settings-migration/schema.yaml"
+                 "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/settings-schema.yaml"
+                 -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/settings-schema.cmake")
+
 qt_add_executable(opsremote
     src/app/main.cpp
     src/app/resources/opsremote.qrc
@@ -70,6 +89,20 @@ qt_add_executable(opsremote
     src/app/sidepanels.cpp
     src/app/kubecredentials.cpp
     src/app/statusline.cpp
+    src/app/fieldcheck.cpp
+    src/app/formcard.cpp
+    src/app/filedrop.cpp
+    src/app/filedialogs.cpp
+    src/app/clipboard.cpp
+    src/app/fieldcheck.h
+    src/app/inheritance.cpp
+    src/app/inheritance.h
+    src/app/programpicker.cpp
+    src/app/programpicker.h
+    src/app/reconnect.cpp
+    src/app/reconnect.h
+    src/app/settingsmigrations.cpp
+    src/app/settingsmigrations.h
     src/app/tabactivity.cpp
     src/app/tabactivity.h
     src/app/localsessions.cpp

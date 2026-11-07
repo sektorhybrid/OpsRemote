@@ -31,6 +31,9 @@ struct VncOptions
     int remoteCursor = -1; // the server's pointer shape, drawn locally
     int clipboard = -1; // copy and paste text both ways
     int autoReconnect = -1;
+    // Wait and tries (reconnect.h); 0 s and -1: the Preferences'.
+    int reconnectDelay = 0;
+    int reconnectAttempts = -1;
     int highDpi = -1; // one remote pixel per physical pixel
     int allMonitors = -1; // full screen spans every monitor
     // Read from older files only: a session's SSH tunnel, now its jump host
@@ -61,7 +64,7 @@ void vncOptionsToYaml(const VncOptions &options, YAML::Node &node);
 VncOptions loadVncDefaults();
 void saveVncDefaults(const VncOptions &options);
 
-// Edits VncOptions for a session: choices start with "Default (…)", on/off
+// Edits VncOptions for a session: choices start with the inherited one, on/off
 // options are checkboxes stored only when they differ from the default.
 class VncOptionsEditor final : public QWidget
 {
@@ -85,6 +88,8 @@ private:
     QCheckBox *m_remoteCursor = nullptr;
     QCheckBox *m_clipboard = nullptr;
     QCheckBox *m_autoReconnect = nullptr;
+    QSpinBox *m_reconnectDelay = nullptr; // reconnect.h
+    QSpinBox *m_reconnectAttempts = nullptr;
     QCheckBox *m_highDpi = nullptr;
     QCheckBox *m_allMonitors = nullptr;
     QCheckBox *m_listen = nullptr;

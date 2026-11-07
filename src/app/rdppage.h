@@ -93,6 +93,15 @@ private:
     QImage m_pointerShape;
     QPoint m_pointerHotSpot;
     int m_ignoreClipboardChanges = 0;
+    // After files were dropped: what the local clipboard held then. Until it
+    // really changes, the dropped files stay on the remote clipboard (on
+    // Wayland the clipboard reports a change whenever the window gets the
+    // focus back, as after a drag from the file manager).
+    QString m_clipboardAtDrop;
+    bool m_dropOffered = false;
+    // The first notice after a drop only brings the clipboard as it is
+    // (Wayland gives it with the focus): it is taken as the new reference.
+    bool m_dropNoticeSeen = false;
     QWidget *m_bar = nullptr;
     QLabel *m_barText = nullptr;
     QProgressBar *m_barProgress = nullptr;

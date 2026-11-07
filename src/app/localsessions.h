@@ -215,6 +215,7 @@ private:
     std::function<QStringList()> m_credentialNames;
     QComboBox *m_kubeCredential = nullptr;
     QWidget *m_logOnRows = nullptr;
+    QWidget *m_logOnCard = nullptr;
     QComboBox *m_kubeAuth = nullptr;
     QLineEdit *m_kubeconfig = nullptr;
     QLineEdit *m_server = nullptr;

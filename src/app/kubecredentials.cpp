@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "kubecredentials.h"
+#include "filedialogs.h"
 #include "appdirs.h"
 #include "localsessions.h"
 
@@ -62,7 +63,7 @@ QWidget *pathRow(QLineEdit *edit, QWidget *parent)
     row->addWidget(edit, 1);
     row->addWidget(browse);
     QObject::connect(browse, &QPushButton::clicked, widget, [edit] {
-        const auto file = QFileDialog::getOpenFileName(edit->window(), QString(), QDir::homePath());
+        const auto file = FileDialogs::openFileName(edit->window(), QString(), QDir::homePath());
         if (!file.isEmpty())
             edit->setText(QDir::toNativeSeparators(file));
     });
@@ -308,7 +309,7 @@ bool KubeCredentialsWindow::add(const QString &text, const QString &suggestedNam
 void KubeCredentialsWindow::importFile()
 {
     const auto start = qEnvironmentVariable("KUBECONFIG").section(QDir::listSeparator(), 0, 0);
-    const auto path = QFileDialog::getOpenFileName(
+    const auto path = FileDialogs::openFileName(
         this, QStringLiteral("Import a Kubeconfig"),
         start.isEmpty() ? QDir::home().filePath(QStringLiteral(".kube/config")) : start);
     if (path.isEmpty())

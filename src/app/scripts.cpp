@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "scripts.h"
+#include "filedialogs.h"
 #include "appdirs.h"
 #include "preferences.h"
 
@@ -538,7 +539,7 @@ void ScriptsWindow::deleteScript()
 
 void ScriptsWindow::importScript()
 {
-    const auto path = QFileDialog::getOpenFileName(this, QStringLiteral("Import a Script"), QDir::homePath(),
+    const auto path = FileDialogs::openFileName(this, QStringLiteral("Import a Script"), QDir::homePath(),
                                                    QStringLiteral("Scripts (*.sh *.bash *.py *.ps1 *.pl);;All files (*)"));
     if (path.isEmpty())
         return;

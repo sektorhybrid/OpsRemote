@@ -367,6 +367,9 @@ void QTermWidget::init(int startnow)
     this->setFocusProxy(m_impl->m_terminalDisplay);
     connect(m_impl->m_terminalDisplay, SIGNAL(copyAvailable(bool)),
             this, SLOT(selectionChanged(bool)));
+    // OpsRemote addition.
+    connect(m_impl->m_terminalDisplay, &Konsole::TerminalDisplay::selectionFinished,
+            this, &QTermWidget::selectionFinished);
     connect(m_impl->m_terminalDisplay, SIGNAL(termGetFocus()),
             this, SIGNAL(termGetFocus()));
     connect(m_impl->m_terminalDisplay, SIGNAL(termLostFocus()),
@@ -609,6 +612,18 @@ void QTermWidget::pasteClipboard()
 void QTermWidget::pasteSelection()
 {
     m_impl->m_terminalDisplay->pasteSelection();
+}
+
+// OpsRemote addition.
+void QTermWidget::setEditMultilinePaste(bool edit)
+{
+    m_impl->m_terminalDisplay->setEditMultilinePaste(edit);
+}
+
+// OpsRemote addition.
+void QTermWidget::pasteText(const QString &text)
+{
+    m_impl->m_terminalDisplay->pasteText(text, false);
 }
 
 bool QTermWidget::terminalUsesMouse() const

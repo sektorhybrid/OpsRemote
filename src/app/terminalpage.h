@@ -54,6 +54,13 @@ public:
     void setShortcuts(const QHash<QString, QKeySequence> &shortcuts);
     // Whether an SSH tab has a live connection (local shells count as connected).
     bool isConnected() const;
+    // Where files dropped on this terminal can go (filedrop.h); None types
+    // their paths. Set by MainWindow for the kinds that support it.
+    enum class FileDropKind { None, Local, Ssh, Docker, Kubernetes, Wsl };
+    void setFileDropKind(FileDropKind kind) { m_fileDropKind = kind; }
+    // Local files dropped on the terminal: true when handled (uploaded or
+    // asked about); false: their paths are to be typed.
+    bool dropFiles(const QStringList &files, bool shift);
     // A shell or program on this computer (not SSH, Telnet, serial…).
     bool isLocal() const { return !m_ssh && !m_stream && m_sshSettings.host.isEmpty(); }
     const SshConnectionSettings &sshSettings() const { return m_sshSettings; }
@@ -120,10 +127,12 @@ private:
     enum class InputMode { Idle, Prompt, Remote, Closed };
     enum class PromptPurpose { Username, Authentication };
 
-    void applyLinkSettings();
+    void applyMouseClipboard();
     void createTerminal();
     // always: open the menu even when right-click is set to paste.
     void showTerminalMenu(const QPoint &position, bool always = false);
+    void paste(bool middleClick);
+    FileDropKind m_fileDropKind = FileDropKind::None;
     void saveTerminalOutput();
 
     void startSsh();
@@ -151,6 +160,12 @@ private:
     // unless the shell reports its folder itself (OSC 7).
     QTimer *m_folderTimer = nullptr;
     bool m_folderReported = false;
+    // The folder the shell last told (OSC 7 or a folder query): used for
+    // dropped files when the server cannot be asked.
+    QString m_lastShellFolder;
+    // Files dropped on an SSH tab, waiting for the server's answer.
+    QStringList m_droppedFiles;
+    void uploadDropped(const QString &answer);
     SessionEndedPanel *m_endedBar = nullptr;
     QWidget *m_multiExecBar = nullptr;
     bool m_multiExecTarget = false;

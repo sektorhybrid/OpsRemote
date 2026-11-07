@@ -19,7 +19,7 @@ The commands say what is built and what is run:
 | `package-linux` | Builds the Linux program and updates the package (keeps the last Windows build) |
 | `package-windows` | Builds the Windows program and updates the package (keeps the last Linux build) |
 | `package-all` | Builds both programs and updates the package |
-| `package-zip` | Packs the current package as `dist/OpsRemote-<arch>-<systems>-<version>.tar.gz` (for example `OpsRemote-x86_64-linux-windows-0.6.1.tar.gz`) and `.zip` for handing out (the version is in `CMakeLists.txt`), without your settings and backups |
+| `package-zip` | Packs the current package as `dist/OpsRemote-<arch>-<systems>-<version>.tar.gz` (for example `OpsRemote-x86_64-linux-windows-0.6.2.tar.gz`) and `.zip` for handing out (the version is in `CMakeLists.txt`), without your settings and backups |
 | `run-package` | Starts the package's Linux version |
 | `package-linux-and-run` | `package-linux`, then `run-package` (the default) |
 | `package-all-and-run` | `package-all`, then `run-package` |

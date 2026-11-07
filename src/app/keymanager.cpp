@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "keymanager.h"
+#include "filedialogs.h"
 #include "appdirs.h"
 #include "jumphost.h"
 #include "sshauth.h"
@@ -519,7 +520,7 @@ void KeyManagerDialog::createKey()
 // Copies an existing private key (and its .pub) into settings/keys/.
 void KeyManagerDialog::importKey()
 {
-    const QString source = QFileDialog::getOpenFileName(
+    const QString source = FileDialogs::openFileName(
         this, QStringLiteral("Import a Private Key"), QDir::home().filePath(QStringLiteral(".ssh")));
     if (source.isEmpty())
         return;

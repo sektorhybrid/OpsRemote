@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "appdirs.h"
+#include "filedialogs.h"
 #include "mainwindow.h"
 #include "kubecredentials.h"
 #include "sidepanels.h"
@@ -28,6 +29,15 @@
 #include "splittab.h"
 #include "streamconnection.h"
 #include "xdmcp.h"
+#include "fieldcheck.h"
+#include "formcard.h"
+#include "inheritance.h"
+#include "ftpoptions.h"
+#include "localsessions.h"
+#include "rdpoptions.h"
+#include "rshoptions.h"
+#include "settingsmigrations.h"
+#include "vncoptions.h"
 #include "opsremotestyle.h"
 #include "keymanager.h"
 #include "kvantumthemes.h"
@@ -68,6 +78,7 @@
 #include <QInputDialog>
 #include <QLabel>
 #include <QHeaderView>
+#include <QTableWidget>
 #include <QKeyEvent>
 #include <QLineEdit>
 #include <QListWidget>
@@ -86,7 +97,6 @@
 #include <QPushButton>
 #include <QSaveFile>
 #include <QSet>
-#include <QTreeWidgetItemIterator>
 #include <QSpinBox>
 #include <QCheckBox>
 #include <QSplitter>
@@ -99,6 +109,7 @@
 #include <QGuiApplication>
 #include <QTabBar>
 #include <QTabWidget>
+#include <QScrollArea>
 #include <QTimer>
 #include <QToolButton>
 #include <QMouseEvent>
@@ -280,27 +291,17 @@ QString settingsFilePath()
 
 QString loadUiStylePreference()
 {
-    try {
-        const auto settings = YAML::LoadFile(settingsFilePath().toStdString());
-        const auto ui = settings["ui"];
-        if (ui && ui["style"])
-            return QString::fromStdString(ui["style"].as<std::string>());
-    } catch (const YAML::Exception &) {
-        // Missing or invalid settings use the current platform style.
-    }
+    const auto ui = loadPreferencesSection("ui");
+    if (ui["style"])
+        return QString::fromStdString(ui["style"].as<std::string>("system"));
     return QStringLiteral("system");
 }
 
 QString loadColorThemePreference()
 {
-    try {
-        const auto settings = YAML::LoadFile(settingsFilePath().toStdString());
-        const auto ui = settings["ui"];
-        if (ui && ui["color_theme"])
-            return QString::fromStdString(ui["color_theme"].as<std::string>());
-    } catch (const YAML::Exception &) {
-        // Missing or invalid settings use the platform palette.
-    }
+    const auto ui = loadPreferencesSection("ui");
+    if (ui["color_theme"])
+        return QString::fromStdString(ui["color_theme"].as<std::string>("system"));
     return QStringLiteral("system");
 }
 
@@ -325,50 +326,24 @@ void disableLocalTerminalWhereUnsupported(QAction *action)
 
 QString loadIconThemePreference()
 {
-    try {
-        const auto ui = YAML::LoadFile(settingsFilePath().toStdString())["ui"];
-        if (ui && ui["icon_theme"])
-            return QString::fromStdString(ui["icon_theme"].as<std::string>());
-    } catch (const YAML::Exception &) {
-        // Missing or invalid settings use the built-in icons.
-    }
+    const auto ui = loadPreferencesSection("ui");
+    if (ui["icon_theme"])
+        return QString::fromStdString(ui["icon_theme"].as<std::string>(""));
     return QString();
 }
 
 void saveIconThemePreference(const QString &themeName)
 {
-    const auto path = settingsFilePath();
-    if (!QDir().mkpath(QFileInfo(path).absolutePath()))
-        return;
-
-    YAML::Node settings;
-    try {
-        settings = YAML::LoadFile(path.toStdString());
-    } catch (const YAML::Exception &) {
-        // Start a fresh settings document if it does not exist or is invalid.
-    }
-    settings["ui"]["icon_theme"] = themeName.toStdString();
-
-    YAML::Emitter emitter;
-    emitter << settings;
-    QSaveFile file(path);
-    if (!file.open(QIODevice::WriteOnly))
-        return;
-    QByteArray contents(emitter.c_str());
-    contents.append('\n');
-    if (file.write(contents) != contents.size()) {
-        file.cancelWriting();
-        return;
-    }
-    file.commit();
+    auto ui = loadPreferencesSection("ui");
+    ui["icon_theme"] = themeName.toStdString();
+    savePreferencesSection("ui", ui);
 }
 
 QHash<QString, QColor> loadCustomColors()
 {
     QHash<QString, QColor> colors;
     try {
-        const auto settings = YAML::LoadFile(settingsFilePath().toStdString());
-        const auto values = settings["ui"]["custom_colors"];
+        const auto values = loadPreferencesSection("ui")["custom_colors"];
         for (const auto *key : {"window", "base", "text", "highlight"}) {
             if (values[key]) {
                 const QColor color(QString::fromStdString(values[key].as<std::string>()));
@@ -385,70 +360,26 @@ QHash<QString, QColor> loadCustomColors()
 void saveColorThemePreference(const QString &themeKey,
                               const QHash<QString, QColor> &customColors)
 {
-    const auto path = settingsFilePath();
-    if (!QDir().mkpath(QFileInfo(path).absolutePath()))
-        return;
-
-    YAML::Node settings;
-    try {
-        settings = YAML::LoadFile(path.toStdString());
-    } catch (const YAML::Exception &) {
-        // Start a fresh settings document if it does not exist or is invalid.
-    }
-    settings["ui"]["color_theme"] = themeKey.toStdString();
+    auto ui = loadPreferencesSection("ui");
+    ui["color_theme"] = themeKey.toStdString();
     for (auto iterator = customColors.cbegin(); iterator != customColors.cend(); ++iterator)
-        settings["ui"]["custom_colors"][iterator.key().toStdString()] =
+        ui["custom_colors"][iterator.key().toStdString()] =
             iterator.value().name(QColor::HexRgb).toStdString();
-
-    YAML::Emitter emitter;
-    emitter << settings;
-    QSaveFile file(path);
-    if (!file.open(QIODevice::WriteOnly))
-        return;
-    QByteArray contents(emitter.c_str());
-    contents.append('\n');
-    if (file.write(contents) != contents.size()) {
-        file.cancelWriting();
-        return;
-    }
-    file.commit();
+    savePreferencesSection("ui", ui);
 }
 
 void saveUiStylePreference(const QString &styleKey)
 {
-    const auto path = settingsFilePath();
-    const auto directory = QFileInfo(path).absolutePath();
-    if (!QDir().mkpath(directory))
-        return;
-
-    YAML::Node settings;
-    try {
-        settings = YAML::LoadFile(path.toStdString());
-    } catch (const YAML::Exception &) {
-        // Start a fresh settings document if the file does not exist or is invalid.
-    }
-    settings["ui"]["style"] = styleKey.toStdString();
-
-    YAML::Emitter emitter;
-    emitter << settings;
-    QSaveFile file(path);
-    if (!file.open(QIODevice::WriteOnly))
-        return;
-    QByteArray contents(emitter.c_str());
-    contents.append('\n');
-    if (file.write(contents) != contents.size()) {
-        file.cancelWriting();
-        return;
-    }
-    file.commit();
+    auto ui = loadPreferencesSection("ui");
+    ui["style"] = styleKey.toStdString();
+    savePreferencesSection("ui", ui);
 }
 
 QHash<QString, bool> loadFolderExpansionStates()
 {
     QHash<QString, bool> states;
     try {
-        const auto settings = YAML::LoadFile(settingsFilePath().toStdString());
-        const auto folders = settings["session_tree"]["folder_expansion"];
+        const auto folders = loadPreferencesSection("session_tree")["folder_expansion"];
         if (!folders || !folders.IsMap())
             return states;
         for (const auto &entry : folders)
@@ -462,33 +393,12 @@ QHash<QString, bool> loadFolderExpansionStates()
 
 void saveFolderExpansionStates(const QHash<QString, bool> &states)
 {
-    const auto path = settingsFilePath();
-    if (!QDir().mkpath(QFileInfo(path).absolutePath()))
-        return;
-
-    YAML::Node settings;
-    try {
-        settings = YAML::LoadFile(path.toStdString());
-    } catch (const YAML::Exception &) {
-        // Start a fresh settings document if it does not exist or is invalid.
-    }
     YAML::Node folders(YAML::NodeType::Map);
     for (auto iterator = states.cbegin(); iterator != states.cend(); ++iterator)
         folders[iterator.key().toStdString()] = iterator.value();
-    settings["session_tree"]["folder_expansion"] = folders;
-
-    YAML::Emitter emitter;
-    emitter << settings;
-    QSaveFile file(path);
-    if (!file.open(QIODevice::WriteOnly))
-        return;
-    QByteArray contents(emitter.c_str());
-    contents.append('\n');
-    if (file.write(contents) != contents.size()) {
-        file.cancelWriting();
-        return;
-    }
-    file.commit();
+    auto tree = loadPreferencesSection("session_tree");
+    tree["folder_expansion"] = folders;
+    savePreferencesSection("session_tree", tree);
 }
 
 YAML::Node sessionToYaml(const SessionDefinition &session)
@@ -522,6 +432,10 @@ YAML::Node sessionToYaml(const SessionDefinition &session)
             terminal["font_size"] = session.terminal.fontSize;
         if (session.terminal.linksEnabled >= 0)
             terminal["links_enabled"] = session.terminal.linksEnabled == 1;
+        if (session.terminal.confirmMultilinePaste >= 0)
+            terminal["confirm_multiline_paste"] = session.terminal.confirmMultilinePaste == 1;
+        if (session.terminal.uploadDroppedFiles >= 0)
+            terminal["upload_dropped_files"] = session.terminal.uploadDroppedFiles == 1;
         node["terminal"] = terminal;
     }
     if (!session.rdp.isEmpty()) {
@@ -582,6 +496,10 @@ TerminalAppearance terminalAppearanceFromYaml(const YAML::Node &node)
     appearance.fontSize = qBound(0, node["font_size"].as<int>(0), 72);
     if (node["links_enabled"])
         appearance.linksEnabled = node["links_enabled"].as<bool>() ? 1 : 0;
+    if (node["confirm_multiline_paste"])
+        appearance.confirmMultilinePaste = node["confirm_multiline_paste"].as<bool>() ? 1 : 0;
+    if (node["upload_dropped_files"])
+        appearance.uploadDroppedFiles = node["upload_dropped_files"].as<bool>() ? 1 : 0;
     return appearance;
 }
 
@@ -597,42 +515,32 @@ InterfaceFont loadInterfaceFont()
 {
     InterfaceFont font;
     try {
-        const auto ui = YAML::LoadFile(settingsFilePath().toStdString())["ui"];
+        const auto ui = loadPreferencesSection("ui");
         font.family = QString::fromStdString(ui["font_family"].as<std::string>(""));
         font.pointSize = qBound(0, ui["font_size"].as<int>(0), 48);
     } catch (const YAML::Exception &) {
-        // Missing or invalid settings keep the system font.
+        // Invalid values keep the system font.
     }
     return font;
 }
 
 void saveInterfaceFont(const InterfaceFont &font)
 {
-    const auto path = settingsFilePath();
-    if (!QDir().mkpath(QFileInfo(path).absolutePath()))
-        return;
+    auto ui = loadPreferencesSection("ui");
+    ui["font_family"] = font.family.toStdString();
+    ui["font_size"] = font.pointSize;
+    savePreferencesSection("ui", ui);
+}
 
-    YAML::Node settings;
+QString loadBaseLookId()
+{
     try {
-        settings = YAML::LoadFile(path.toStdString());
+        if (const auto ui = loadPreferencesSection("ui"); ui["base_look"])
+            return QString::fromStdString(ui["base_look"].as<std::string>());
     } catch (const YAML::Exception &) {
-        // Start a fresh settings document if it does not exist or is invalid.
+        // An invalid value: none.
     }
-    settings["ui"]["font_family"] = font.family.toStdString();
-    settings["ui"]["font_size"] = font.pointSize;
-
-    YAML::Emitter emitter;
-    emitter << settings;
-    QSaveFile file(path);
-    if (!file.open(QIODevice::WriteOnly))
-        return;
-    QByteArray contents(emitter.c_str());
-    contents.append('\n');
-    if (file.write(contents) != contents.size()) {
-        file.cancelWriting();
-        return;
-    }
-    file.commit();
+    return QString();
 }
 
 void applyInterfaceFont(const QFont &systemFont, const InterfaceFont &choice)
@@ -643,108 +551,61 @@ void applyInterfaceFont(const QFont &systemFont, const InterfaceFont &choice)
     if (choice.pointSize > 0)
         font.setPointSize(choice.pointSize);
     QApplication::setFont(font);
+    ::refreshWidgetFonts();
 }
+
 
 bool loadWindowBorderPreference()
 {
     try {
-        const auto ui = YAML::LoadFile(settingsFilePath().toStdString())["ui"];
-        if (ui && ui["window_border"])
+        if (const auto ui = loadPreferencesSection("ui"); ui["window_border"])
             return ui["window_border"].as<bool>();
     } catch (const YAML::Exception &) {
-        // Missing or invalid settings use the platform default.
+        // An invalid value uses the platform default.
     }
     return defaultWindowBorders();
 }
 
 void saveWindowBorderPreference(bool enabled)
 {
-    const auto path = settingsFilePath();
-    if (!QDir().mkpath(QFileInfo(path).absolutePath()))
-        return;
+    auto ui = loadPreferencesSection("ui");
+    ui["window_border"] = enabled;
+    savePreferencesSection("ui", ui);
+}
 
-    YAML::Node settings;
-    try {
-        settings = YAML::LoadFile(path.toStdString());
-    } catch (const YAML::Exception &) {
-        // Start a fresh settings document if it does not exist or is invalid.
-    }
-    settings["ui"]["window_border"] = enabled;
-
-    YAML::Emitter emitter;
-    emitter << settings;
-    QSaveFile file(path);
-    if (!file.open(QIODevice::WriteOnly))
-        return;
-    QByteArray contents(emitter.c_str());
-    contents.append('\n');
-    if (file.write(contents) != contents.size()) {
-        file.cancelWriting();
-        return;
-    }
-    file.commit();
+void saveDarkTerminalColorScheme(const QString &scheme)
+{
+    auto terminal = loadPreferencesSection("terminal");
+    terminal["dark_color_scheme"] = scheme.toStdString();
+    savePreferencesSection("terminal", terminal);
 }
 
 QString loadDarkTerminalColorScheme()
 {
-    try {
-        const auto terminal = YAML::LoadFile(settingsFilePath().toStdString())["terminal"];
-        if (terminal && terminal["dark_color_scheme"])
-            return QString::fromStdString(terminal["dark_color_scheme"].as<std::string>());
-    } catch (const YAML::Exception &) {
-        // Missing or invalid settings: no separate dark-mode scheme.
-    }
+    const auto terminal = loadPreferencesSection("terminal");
+    if (terminal["dark_color_scheme"])
+        return QString::fromStdString(terminal["dark_color_scheme"].as<std::string>(""));
     return QString();
 }
 
 TerminalAppearance loadTerminalAppearance()
 {
     try {
-        return terminalAppearanceFromYaml(
-            YAML::LoadFile(settingsFilePath().toStdString())["terminal"]);
+        return terminalAppearanceFromYaml(loadPreferencesSection("terminal"));
     } catch (const YAML::Exception &) {
-        // Missing or invalid settings use the built-in terminal appearance.
+        // Invalid values use the built-in terminal appearance.
     }
     return {};
 }
 
 void saveTerminalAppearance(const TerminalAppearance &appearance)
 {
-    const auto path = settingsFilePath();
-    if (!QDir().mkpath(QFileInfo(path).absolutePath()))
-        return;
-
-    YAML::Node settings;
-    try {
-        settings = YAML::LoadFile(path.toStdString());
-    } catch (const YAML::Exception &) {
-        // Start a fresh settings document if it does not exist or is invalid.
-    }
-    YAML::Node terminal(YAML::NodeType::Map);
+    // Only its own keys: others in terminal: (dark_color_scheme) stay.
+    auto terminal = loadPreferencesSection("terminal");
     terminal["color_scheme"] = appearance.colorScheme.toStdString();
     terminal["font_family"] = appearance.fontFamily.toStdString();
     terminal["font_size"] = appearance.fontSize;
-    // Keep keys other parts of the application store under terminal:.
-    try {
-        const auto existing = YAML::LoadFile(path.toStdString())["terminal"];
-        if (existing && existing["dark_color_scheme"])
-            terminal["dark_color_scheme"] = existing["dark_color_scheme"];
-    } catch (const YAML::Exception &) {
-    }
-    settings["terminal"] = terminal;
-
-    YAML::Emitter emitter;
-    emitter << settings;
-    QSaveFile file(path);
-    if (!file.open(QIODevice::WriteOnly))
-        return;
-    QByteArray contents(emitter.c_str());
-    contents.append('\n');
-    if (file.write(contents) != contents.size()) {
-        file.cancelWriting();
-        return;
-    }
-    file.commit();
+    savePreferencesSection("terminal", terminal);
 }
 
 YAML::Node folderToYaml(const QTreeWidgetItem *folder,
@@ -1301,10 +1162,13 @@ MainWindow::MainWindow(QWidget *parent)
         m_colorThemeKey = QStringLiteral("system");
     m_customColors = loadCustomColors();
     m_userLooks = loadUserLooks();
+    m_baseLookId = loadBaseLookId();
     m_terminalAppearance = loadTerminalAppearance();
     m_darkTerminalColorScheme = loadDarkTerminalColorScheme();
     m_behaviour = loadTerminalBehaviour();
     m_startup = loadStartupPreferences();
+    Clipboard::setPreferences(loadMouseClipboardPreferences());
+    Clipboard::installTextFieldBehaviour();
     m_shortcuts = loadShortcuts();
     m_security = loadSecurityPreferences();
     m_logging = loadLoggingPreferences();
@@ -1603,6 +1467,7 @@ MainWindow::MainWindow(QWidget *parent)
     // The first fit happens while building the widget tree, before the
     // splitter has its final size. Fit again after the restored window shows.
     QTimer::singleShot(0, this, &MainWindow::fitSessionPanel);
+    QTimer::singleShot(0, this, &MainWindow::rememberStartLook);
     // After the window is shown, so a vault prompt has a parent on screen.
     QTimer::singleShot(0, this, &MainWindow::restoreStartupTabs);
 
@@ -1755,7 +1620,7 @@ void MainWindow::createMenus()
     // Sessions saved in other programs, each in a folder of its own.
     auto *importFrom = sessionsMenu->addMenu(QStringLiteral("Import From"));
     importFrom->addAction(QStringLiteral("OpenSSH Config (~/.ssh/config)…"), this, [this] {
-        const auto path = QFileDialog::getOpenFileName(
+        const auto path = FileDialogs::openFileName(
             this, QStringLiteral("Import OpenSSH Config"), SessionImport::defaultOpenSshConfigPath());
         if (!path.isEmpty())
             importResult(QStringLiteral("OpenSSH"), SessionImport::fromOpenSshConfig(path));
@@ -1764,21 +1629,21 @@ void MainWindow::createMenus()
         importResult(QStringLiteral("PuTTY"), SessionImport::fromPutty());
     });
     importFrom->addAction(QStringLiteral("MobaXterm (.mxtsessions, MobaXterm.ini)…"), this, [this] {
-        const auto path = QFileDialog::getOpenFileName(
+        const auto path = FileDialogs::openFileName(
             this, QStringLiteral("Import MobaXterm Sessions"), QString(),
             QStringLiteral("MobaXterm sessions (*.mxtsessions *.ini);;All files (*)"));
         if (!path.isEmpty())
             importResult(QStringLiteral("MobaXterm"), SessionImport::fromMobaXterm(path));
     });
     importFrom->addAction(QStringLiteral("mRemoteNG (confCons.xml)…"), this, [this] {
-        const auto path = QFileDialog::getOpenFileName(
+        const auto path = FileDialogs::openFileName(
             this, QStringLiteral("Import mRemoteNG Connections"), QString(),
             QStringLiteral("mRemoteNG connections (*.xml);;All files (*)"));
         if (!path.isEmpty())
             importResult(QStringLiteral("mRemoteNG"), SessionImport::fromMRemoteNg(path));
     });
     importFrom->addAction(QStringLiteral("Remmina…"), this, [this] {
-        const auto folder = QFileDialog::getExistingDirectory(
+        const auto folder = FileDialogs::existingDirectory(
             this, QStringLiteral("Remmina Connections Folder"), SessionImport::defaultRemminaFolder());
         if (!folder.isEmpty())
             importResult(QStringLiteral("Remmina"), SessionImport::fromRemmina(folder));
@@ -1955,7 +1820,7 @@ void MainWindow::createMenus()
     setThemedIcon(playRecording, QStringLiteral("media-playback-start"), QStyle::SP_MediaPlay);
     connect(playRecording, &QAction::triggered, this, [this] {
         const auto folder = sessionLogFolder(m_logging);
-        const auto path = QFileDialog::getOpenFileName(
+        const auto path = FileDialogs::openFileName(
             this, QStringLiteral("Play Recording"), folder,
             QStringLiteral("asciinema recordings (*.cast);;All files (*)"));
         if (path.isEmpty())
@@ -2030,10 +1895,22 @@ void MainWindow::applyColorTheme(const QString &requestedKey)
 {
     // A Kvantum theme brings its own colours: "System" uses those.
     if (requestedKey == QStringLiteral("system") && KvantumThemes::isKvantumKey(m_selectedStyleKey)) {
-        QApplication::setPalette(QApplication::style()->standardPalette());
+        QApplication::setPalette(withFadedDisabledButtons(QApplication::style()->standardPalette()));
         return;
     }
-    QApplication::setPalette(paletteFor(requestedKey, m_customColors));
+    QApplication::setPalette(withFadedDisabledButtons(paletteFor(requestedKey, m_customColors)));
+}
+
+// An inactive button's text halfway between its text and its background, so
+// it looks inactive in every look (some themes barely change it).
+QPalette MainWindow::withFadedDisabledButtons(QPalette palette)
+{
+    const QColor text = palette.color(QPalette::Active, QPalette::ButtonText);
+    const QColor button = palette.color(QPalette::Active, QPalette::Button);
+    palette.setColor(QPalette::Disabled, QPalette::ButtonText,
+                     QColor((text.red() + button.red()) / 2, (text.green() + button.green()) / 2,
+                            (text.blue() + button.blue()) / 2));
+    return palette;
 }
 
 // The palette of a colour mode, without applying it (also for previews).
@@ -2306,6 +2183,61 @@ void MainWindow::addExampleSessions()
     examples->setExpanded(true);
     linuxFolder->setExpanded(true);
     servers->setExpanded(true);
+}
+
+// Every section of settings.yaml with its defaults, as OpsRemote saves
+// them: tests/settings-migration/schema.yaml holds it, so a change of any
+// key or default shows in its diff and asks whether a migration is needed.
+// Nothing is read from or written to settings.yaml meanwhile. A new settings
+// writer belongs here too.
+QByteArray settingsSnapshot()
+{
+    YAML::Node document(YAML::NodeType::Map);
+    document["settings_version"] = CurrentSettingsVersion;
+    captureSettings(&document);
+    // Appearance (this file).
+    saveUiStylePreference(loadUiStylePreference());
+    saveColorThemePreference(loadColorThemePreference(), loadCustomColors());
+    saveIconThemePreference(loadIconThemePreference());
+    saveInterfaceFont(loadInterfaceFont());
+    saveWindowBorderPreference(loadWindowBorderPreference());
+    saveFolderExpansionStates({});
+    saveTerminalAppearance(loadTerminalAppearance());
+    saveDarkTerminalColorScheme(loadDarkTerminalColorScheme());
+    // preferences.cpp
+    saveStartupPreferences(loadStartupPreferences());
+    saveOpenSessions({});
+    saveWindowGeometry({});
+    saveTerminalBehaviour(loadTerminalBehaviour());
+    saveMouseClipboardPreferences(loadMouseClipboardPreferences());
+    saveSshPreferences(loadSshPreferences());
+    saveSftpPreferences(loadSftpPreferences());
+    saveSecurityPreferences(loadSecurityPreferences());
+    saveLoggingPreferences(loadLoggingPreferences());
+    saveLocalServersPreferences(loadLocalServersPreferences());
+    saveLocalShellPreferences(loadLocalShellPreferences());
+    saveSessionListPreferences(loadSessionListPreferences());
+    savePresentationPreferences(loadPresentationPreferences());
+    saveBackupPreferences(loadBackupPreferences());
+    saveRunCommandPreferences(loadRunCommandPreferences());
+    saveHttpRequestPreferences(loadHttpRequestPreferences());
+    saveCommandsPreferences(loadCommandsPreferences());
+    saveSnippets(loadSnippets());
+    saveHighlightRules(loadHighlightRules());
+    saveShortcuts(loadShortcuts());
+    // Modules with their own section.
+    saveAutomationPreferences(loadAutomationPreferences());
+    saveScriptPreferences(loadScriptPreferences());
+    saveContainerPreferences(loadContainerPreferences());
+    saveFtpDefaults(loadFtpDefaults());
+    saveRshDefaults(loadRshDefaults());
+    saveVncDefaults(loadVncDefaults());
+    saveRdpDefaults(loadRdpDefaults());
+    saveXdmcpDefaults(loadXdmcpDefaults());
+    captureSettings(nullptr);
+    YAML::Emitter emitter;
+    emitter << document;
+    return QByteArray(emitter.c_str()) + '\n';
 }
 
 void MainWindow::loadSessions()
@@ -2623,7 +2555,7 @@ bool MainWindow::appendCompactSessionYaml(const YAML::Node &folders, QTreeWidget
 
 void MainWindow::importSessions()
 {
-    const auto filePath = QFileDialog::getOpenFileName(
+    const auto filePath = FileDialogs::openFileName(
         this, QStringLiteral("Import YAML Sessions"), QString(),
         QStringLiteral("YAML files (*.yaml *.yml);;All files (*)"));
     if (filePath.isEmpty())
@@ -2695,7 +2627,7 @@ void MainWindow::importResult(const QString &source, const SessionImport::Result
 
 void MainWindow::exportSessions()
 {
-    const auto filePath = QFileDialog::getSaveFileName(
+    const auto filePath = FileDialogs::saveFileName(
         this, QStringLiteral("Export YAML Sessions"), QStringLiteral("sessions.yaml"),
         QStringLiteral("YAML files (*.yaml *.yml)"));
     if (filePath.isEmpty())
@@ -2923,14 +2855,16 @@ void MainWindow::editFolderSettings(QTreeWidgetItem *folder)
     auto *kerberosPage = new QWidget(tabs);
     auto *kerberosForm = new QFormLayout(kerberosPage);
     auto *kerberos = new QComboBox(kerberosPage);
-    kerberos->addItem(QStringLiteral("Inherit (%1)").arg(inheritedKerberos(folder->parent())
-                                                              ? QStringLiteral("on")
-                                                              : QStringLiteral("off")),
-                      QVariant());
-    kerberos->addItem(QStringLiteral("On"), 1);
-    kerberos->addItem(QStringLiteral("Off"), 0);
+    // The inherited choice first, then only the other one (inheritance.h).
+    const bool kerberosInherited = inheritedKerberos(folder->parent());
+    addInheritedItem(kerberos, kerberosInherited ? QStringLiteral("On") : QStringLiteral("Off"), QVariant());
+    if (kerberosInherited)
+        kerberos->addItem(QStringLiteral("Off"), 0);
+    else
+        kerberos->addItem(QStringLiteral("On"), 1);
     kerberos->setCurrentIndex(qMax(0, kerberos->findData(folder->data(0, FolderKerberosRole))));
     kerberosForm->addRow(QStringLiteral("Log on with Kerberos:"), kerberos);
+    applyInheritance(kerberosPage);
     auto *kerberosNote = new QLabel(QStringLiteral("SSH sessions in this folder use your Kerberos "
                                                    "ticket (GSSAPI) unless they choose otherwise."),
                                     kerberosPage);
@@ -2954,6 +2888,10 @@ void MainWindow::editFolderSettings(QTreeWidgetItem *folder)
     note->setWordWrap(true);
     layout->addWidget(note);
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, &dialog);
+    // Save waits while the proxy lacks its host or port.
+    auto *proxyGuard = new SaveGuard(buttons->button(QDialogButtonBox::Save), &dialog);
+    proxyGuard->addCheck([proxy] { return proxy->problem(); });
+    connect(proxy, &ProxyEditor::changed, proxyGuard, &SaveGuard::recheck);
     layout->addWidget(buttons);
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
@@ -3136,16 +3074,18 @@ QString MainWindow::createSessionOver(QWidget *over, const QString &protocol)
     auto *ftpEditor = addFtpOptionsGroup(form, protocolCombo, {});
     auto *rshEditor = addRshOptionsTab(protocolCombo, appearanceEditor, {});
     auto *xdmcpEditor = addXdmcpOptionsGroup(form, protocolCombo, {});
-    auto *jumpHostEditor = addJumpHostTab(protocolCombo, appearanceEditor, rdpEditor, vncEditor,
-                                          QString(), parentFolder, QString());
-    auto *forwardsEditor = addPortForwardingTab(appearanceEditor, {});
-    auto *proxyEditor = addProxyTab(protocolCombo, appearanceEditor, rdpEditor, vncEditor,
-                                    QString(), parentFolder);
+    auto *jumpHostEditor = newJumpHostEditor(QString(), parentFolder, QString());
+    auto *forwardsEditor = new PortForwardListEditor({});
+    auto *proxyEditor = newProxyEditor(QString(), parentFolder);
     auto *wakeEditor = new WakeOnLanEditor({});
-    addProtocolTab(protocolCombo, appearanceEditor, rdpEditor, vncEditor, wakeEditor,
-                   QStringLiteral("Wake-on-LAN"));
+    addNetworkTab(protocolCombo, appearanceEditor, rdpEditor, vncEditor, jumpHostEditor, forwardsEditor,
+                  proxyEditor, wakeEditor);
 
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, &dialog);
+    // Save waits while the proxy lacks its host or port.
+    auto *proxyGuard = new SaveGuard(buttons->button(QDialogButtonBox::Save), &dialog);
+    proxyGuard->addCheck([proxyEditor] { return proxyEditor->problem(); });
+    connect(proxyEditor, &ProxyEditor::changed, proxyGuard, &SaveGuard::recheck);
     form->addRow(buttons);
     validateSessionDialog(&dialog, form, buttons, protocolCombo, nameEdit, hostEdit, portEdit,
                           wakeEditor);
@@ -3214,6 +3154,9 @@ void MainWindow::openLocalTerminal()
                              ? new TerminalPage(effectiveTerminalAppearance(), m_sessionTabs)
                              : newLocalProgramPage(shell.program, shell.arguments, shell.label,
                                                    effectiveTerminalAppearance());
+#ifdef Q_OS_LINUX
+    page->setFileDropKind(TerminalPage::FileDropKind::Local); // dropped files go to its folder
+#endif
     connectTerminalPage(page);
     applyTabSettings(page, QStringLiteral("local"));
     addSessionTab(page, shell.label, QStringLiteral("Local shell: %1").arg(shell.label));
@@ -3324,6 +3267,9 @@ TerminalPage *MainWindow::openLocalSession(const SessionDefinition &session)
         terminal = shell.program.isEmpty()
                        ? new TerminalPage(appearance, m_sessionTabs)
                        : newLocalProgramPage(shell.program, shell.arguments, shell.label, appearance, options.folder);
+#ifdef Q_OS_LINUX
+        terminal->setFileDropKind(TerminalPage::FileDropKind::Local); // dropped files go to its folder
+#endif
     } else if (session.protocol == QStringLiteral("WSL")) {
         const auto command = wslCommand(options);
         terminal = newLocalProgramPage(command.program, command.arguments, QStringLiteral("WSL"), appearance);
@@ -3449,7 +3395,7 @@ TerminalPage *MainWindow::administratorTerminal(const LocalSessionOptions &optio
         QMessageBox::information(this, QStringLiteral("Administrator Terminal"),
                                  QStringLiteral("%1 is not installed on this computer; choose the other way "
                                                 "on the session's Connection tab, or in Preferences → "
-                                                "Terminal → Administrator.").arg(method));
+                                                "Terminals → Administrator.").arg(method));
         return nullptr;
     }
     *label = QStringLiteral("root: %1").arg(shell.program.isEmpty() ? QStringLiteral("shell") : shell.label);
@@ -3563,17 +3509,19 @@ void MainWindow::editSelectedSession()
     auto *ftpEditor = addFtpOptionsGroup(form, protocolCombo, original.ftp);
     auto *rshEditor = addRshOptionsTab(protocolCombo, appearanceEditor, original.rsh);
     auto *xdmcpEditor = addXdmcpOptionsGroup(form, protocolCombo, original.xdmcp);
-    auto *jumpHostEditor = addJumpHostTab(protocolCombo, appearanceEditor, rdpEditor, vncEditor,
-                                          original.jumpHost, item->parent(), original.id);
-    auto *forwardsEditor = addPortForwardingTab(appearanceEditor, original.forwards);
-    auto *proxyEditor = addProxyTab(protocolCombo, appearanceEditor, rdpEditor, vncEditor,
-                                    original.proxy, item->parent());
+    auto *jumpHostEditor = newJumpHostEditor(original.jumpHost, item->parent(), original.id);
+    auto *forwardsEditor = new PortForwardListEditor(original.forwards);
+    auto *proxyEditor = newProxyEditor(original.proxy, item->parent());
     auto *wakeEditor = new WakeOnLanEditor(original.wakeOnLan);
-    addProtocolTab(protocolCombo, appearanceEditor, rdpEditor, vncEditor, wakeEditor,
-                   QStringLiteral("Wake-on-LAN"));
+    addNetworkTab(protocolCombo, appearanceEditor, rdpEditor, vncEditor, jumpHostEditor, forwardsEditor,
+                  proxyEditor, wakeEditor);
 
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel,
                                          &dialog);
+    // Save waits while the proxy lacks its host or port.
+    auto *proxyGuard = new SaveGuard(buttons->button(QDialogButtonBox::Save), &dialog);
+    proxyGuard->addCheck([proxyEditor] { return proxyEditor->problem(); });
+    connect(proxyEditor, &ProxyEditor::changed, proxyGuard, &SaveGuard::recheck);
     form->addRow(buttons);
     validateSessionDialog(&dialog, form, buttons, protocolCombo, nameEdit, hostEdit, portEdit,
                           wakeEditor);
@@ -3688,8 +3636,14 @@ void MainWindow::renameTreeItem(QTreeWidgetItem *item, const QString &newName)
     // Open tabs titled by session name follow.
     if (m_startup.tabTitle != QStringLiteral("userhost")) {
         for (int index = 0; index < m_sessionTabs->count(); ++index) {
-            if (m_sessionTabs->widget(index)->property("sessionId").toString() == id)
-                m_sessionTabs->setTabText(index, name);
+            if (m_sessionTabs->widget(index)->property("sessionId").toString() != id)
+                continue;
+            auto text = m_sessionTabs->tabText(index);
+            // "Name (user@host)": only the name part changes.
+            const auto open = text.lastIndexOf(QStringLiteral(" ("));
+            m_sessionTabs->setTabText(index, m_startup.tabTitle == QStringLiteral("both") && open > 0
+                                                 ? name + text.mid(open)
+                                                 : name);
         }
     }
     saveSessions();
@@ -4247,9 +4201,14 @@ void MainWindow::openSession(const SessionDefinition &session)
     }
     page->setProperty("sessionId", session.id);
     QString title = session.name;
-    if (m_startup.tabTitle == QStringLiteral("userhost") && !session.host.isEmpty())
-        title = session.username.isEmpty() ? session.host
-                                           : QStringLiteral("%1@%2").arg(session.username, session.host);
+    if (m_startup.tabTitle != QStringLiteral("name") && !session.host.isEmpty()) {
+        const auto userHost = session.username.isEmpty()
+                                  ? session.host
+                                  : QStringLiteral("%1@%2").arg(session.username, session.host);
+        title = m_startup.tabTitle == QStringLiteral("userhost")
+                    ? userHost
+                    : QStringLiteral("%1 (%2)").arg(session.name, userHost);
+    }
     addSessionTab(page, title, QStringLiteral("%1 — %2").arg(session.protocol, session.host));
     statusBar()->showMessage(QStringLiteral("Opened session tab: %1").arg(session.name), 3000);
     recordRecentSession(session.id);
@@ -4272,11 +4231,13 @@ TerminalAppearanceEditor *MainWindow::addTerminalAppearanceGroup(
     auto *tabs = new QTabWidget(form->parentWidget());
     tabs->setObjectName(QStringLiteral("sessionTabs"));
     *sshEditor = new SshOptionsEditor(ssh, loadSshPreferences(), tabs);
+    applyInheritance(*sshEditor); // ↺ per row, as in every session window
     tabs->addTab(*sshEditor, QStringLiteral("Connection"));
     *serialEditor = new SerialOptionsEditor(serial, tabs);
     (*serialEditor)->setProperty(ProtocolsProperty, QStringList{QStringLiteral("Serial")});
-    tabs->addTab(*serialEditor, QStringLiteral("Serial line"));
+    tabs->addTab(*serialEditor, QStringLiteral("Connection")); // the first tab is always Connection
     auto *editor = new TerminalAppearanceEditor(value, true, m_terminalAppearance, tabs);
+    applyInheritance(editor); // ↺ per row, as in every session window
     QStringList terminals;
     for (const auto &protocol : sessionProtocols()) {
         if (isTerminalProtocol(protocol))
@@ -4288,8 +4249,10 @@ TerminalAppearanceEditor *MainWindow::addTerminalAppearanceGroup(
     // Only the selected protocol's tabs are shown; the dialog shrinks to fit.
     // Tabs other windows' editors move here (addProtocolTab) say their
     // protocols the same way when they are not only SSH's.
-    auto updateVisible = [protocolCombo, tabs] {
+    auto *connectionEditor = *sshEditor;
+    auto updateVisible = [protocolCombo, tabs, connectionEditor] {
         const QString protocol = protocolCombo->currentText();
+        connectionEditor->setFileOnly(protocol == QStringLiteral("SFTP") || protocol == QStringLiteral("SCP"));
         bool any = false;
         for (int index = 0; index < tabs->count(); ++index) {
             const auto protocols = tabs->widget(index)->property(ProtocolsProperty);
@@ -4389,10 +4352,10 @@ QString MainWindow::effectiveJumpHost(const SessionDefinition &session) const
 QString MainWindow::jumpHostLabel(const QString &jumpHost) const
 {
     if (jumpHost.isEmpty() || jumpHost == JumpHost::Direct)
-        return QStringLiteral("none");
+        return QStringLiteral("None (connect directly)");
     if (jumpHost.startsWith(JumpHost::SessionPrefix)) {
         const auto session = m_sessions.constFind(jumpHost.mid(JumpHost::SessionPrefix.size()));
-        return session == m_sessions.cend() ? QStringLiteral("a deleted session") : session->name;
+        return session == m_sessions.cend() ? QStringLiteral("A deleted session") : session->name;
     }
     return jumpHost;
 }
@@ -4488,6 +4451,7 @@ SshConnectionSettings MainWindow::sshSettingsFor(const QString &host, quint16 po
     settings.securityKeys = ssh.securityKeys;
     settings.kerberos = ssh.kerberos;
     settings.kerberosDelegate = ssh.kerberosDelegate;
+    settings.kerberosOrder = ssh.kerberosOrder;
     settings.kerberosServer = options.kerberosServer;
     settings.terminalType = ssh.terminalType;
     if (!options.backspace.isEmpty())
@@ -4505,6 +4469,7 @@ FtpOptionsEditor *MainWindow::addFtpOptionsGroup(QFormLayout *form, QComboBox *p
     auto *layout = new QVBoxLayout(group);
     layout->setContentsMargins(0, 0, 0, 0);
     auto *editor = new FtpOptionsEditor(value, loadFtpDefaults(), group);
+    applyInheritance(editor); // ↺ per row, as in every session window
     layout->addWidget(editor);
     form->addRow(group);
     auto updateVisible = [protocolCombo, group] {
@@ -4525,6 +4490,7 @@ RshOptionsEditor *MainWindow::addRshOptionsTab(QComboBox *protocolCombo, Termina
     for (auto *widget = sshTabsMember->parentWidget(); widget && !tabs; widget = widget->parentWidget())
         tabs = qobject_cast<QTabWidget *>(widget);
     auto *editor = new RshOptionsEditor(value, loadRshDefaults(), tabs);
+    applyInheritance(editor); // ↺ per row, as in every session window
     editor->setProperty(ProtocolsProperty, QStringList{QStringLiteral("Rlogin"), QStringLiteral("RSH")});
     tabs->insertTab(0, editor, QStringLiteral("Connection"));
     auto updateCommand = [protocolCombo, editor] {
@@ -4542,6 +4508,7 @@ XdmcpOptionsEditor *MainWindow::addXdmcpOptionsGroup(QFormLayout *form, QComboBo
     auto *layout = new QVBoxLayout(group);
     layout->setContentsMargins(0, 0, 0, 0);
     auto *editor = new XdmcpOptionsEditor(value, loadXdmcpDefaults(), group);
+    applyInheritance(editor); // ↺ per row, as in every session window
     layout->addWidget(editor);
     form->addRow(group);
     auto updateVisible = [protocolCombo, group] {
@@ -4562,6 +4529,7 @@ VncOptionsEditor *MainWindow::addVncOptionsGroup(QFormLayout *form, QComboBox *p
     auto *layout = new QVBoxLayout(group);
     layout->setContentsMargins(0, 0, 0, 0);
     auto *editor = new VncOptionsEditor(value, loadVncDefaults(), group);
+    applyInheritance(editor); // ↺ per row, as in every session window
     layout->addWidget(editor);
     form->addRow(group);
     auto updateVisible = [protocolCombo, group] {
@@ -4574,20 +4542,15 @@ VncOptionsEditor *MainWindow::addVncOptionsGroup(QFormLayout *form, QComboBox *p
     return editor;
 }
 
-// The session window's "Jump host" tab, moved to the selected protocol's tabs.
+// The session window's jump host choice (a card of the Network tab).
 // folder: where the session is (for what "Inherit" means).
-JumpHostEditor *MainWindow::addJumpHostTab(QComboBox *protocolCombo,
-                                           TerminalAppearanceEditor *sshTabsMember,
-                                           QWidget *rdpEditor, QWidget *vncEditor,
-                                           const QString &value, const QTreeWidgetItem *folder,
-                                           const QString &sessionId)
+JumpHostEditor *MainWindow::newJumpHostEditor(const QString &value, const QTreeWidgetItem *folder,
+                                              const QString &sessionId)
 {
     auto *editor = new JumpHostEditor(value, jumpHostLabel(inheritedJumpHost(folder)),
                                       jumpHostChoices(), sessionId);
     editor->offerNew([this](QWidget *over) { return createSshSession(over); },
                      [this] { return jumpHostChoices(); });
-    addProtocolTab(protocolCombo, sshTabsMember, rdpEditor, vncEditor, editor,
-                   QStringLiteral("Jump host"));
     return editor;
 }
 
@@ -4689,25 +4652,20 @@ void MainWindow::addProtocolTab(QComboBox *protocolCombo, TerminalAppearanceEdit
         {QStringLiteral("SCP"), sshTabs},
         {QStringLiteral("RDP"), rdpEditor->findChild<QTabWidget *>()},
         {QStringLiteral("VNC"), vncEditor->findChild<QTabWidget *>()}};
-    // Telnet, Mosh, Rlogin, RSH and XDMCP go directly: of these tabs only
-    // Wake-on-LAN joins theirs (a serial line has no host to wake).
-    if (title == QStringLiteral("Wake-on-LAN")) {
-        QStringList protocols;
-        for (const auto &protocol : sessionProtocols()) {
-            if (protocol != QStringLiteral("Serial"))
-                protocols << protocol;
-        }
-        page->setProperty(ProtocolsProperty, protocols);
-        for (const auto *name : {"Telnet", "Mosh", "Rlogin", "RSH"})
-            tabs.insert(QLatin1String(name), sshTabs);
-        if (auto *xdmcpTabs = protocolCombo->window()->findChild<QTabWidget *>(QStringLiteral("xdmcpTabs")))
-            tabs.insert(QStringLiteral("XDMCP"), xdmcpTabs);
+    // Telnet, Mosh, Rlogin, RSH, XDMCP and FTP have it too (for Wake-on-LAN;
+    // a serial line has no host to wake, a local session no network).
+    QStringList protocols;
+    for (const auto &protocol : sessionProtocols()) {
+        if (protocol != QStringLiteral("Serial") && !localSessionProtocols().contains(protocol))
+            protocols << protocol;
     }
-    // FTP has no jump hosts: its data connections go to other ports.
-    if (title != QStringLiteral("Jump host")) {
-        if (auto *ftpTabs = protocolCombo->window()->findChild<QTabWidget *>(QStringLiteral("ftpTabs")))
-            tabs.insert(QStringLiteral("FTP"), ftpTabs);
-    }
+    page->setProperty(ProtocolsProperty, protocols);
+    for (const auto *name : {"Telnet", "Mosh", "Rlogin", "RSH"})
+        tabs.insert(QLatin1String(name), sshTabs);
+    if (auto *xdmcpTabs = protocolCombo->window()->findChild<QTabWidget *>(QStringLiteral("xdmcpTabs")))
+        tabs.insert(QStringLiteral("XDMCP"), xdmcpTabs);
+    if (auto *ftpTabs = protocolCombo->window()->findChild<QTabWidget *>(QStringLiteral("ftpTabs")))
+        tabs.insert(QStringLiteral("FTP"), ftpTabs);
     auto place = [protocolCombo, page, tabs, title] {
         auto *target = tabs.value(protocolCombo->currentText());
         for (auto *other : tabs) {
@@ -4721,15 +4679,46 @@ void MainWindow::addProtocolTab(QComboBox *protocolCombo, TerminalAppearanceEdit
     place();
 }
 
-// The session window's "Proxy" tab.
-ProxyEditor *MainWindow::addProxyTab(QComboBox *protocolCombo, TerminalAppearanceEditor *sshTabsMember,
-                                     QWidget *rdpEditor, QWidget *vncEditor, const QString &value,
-                                     const QTreeWidgetItem *folder)
+// The session window's proxy (a card of the Network tab).
+ProxyEditor *MainWindow::newProxyEditor(const QString &value, const QTreeWidgetItem *folder)
 {
-    auto *editor = new ProxyEditor(value, QString(), ProxySettings::label(inheritedProxy(folder)));
-    addProtocolTab(protocolCombo, sshTabsMember, rdpEditor, vncEditor, editor,
-                   QStringLiteral("Proxy"));
-    return editor;
+    return new ProxyEditor(value, QString(), ProxySettings::label(inheritedProxy(folder)));
+}
+
+// The session window's Network tab: jump host, port forwarding, proxy and
+// Wake-on-LAN as cards, each shown for the protocols it applies to.
+void MainWindow::addNetworkTab(QComboBox *protocolCombo, TerminalAppearanceEditor *sshTabsMember,
+                               QWidget *rdpEditor, QWidget *vncEditor, JumpHostEditor *jumpHost,
+                               PortForwardListEditor *forwards, ProxyEditor *proxy, QWidget *wakeOnLan)
+{
+    auto *page = new QWidget;
+    auto *cards = new QVBoxLayout(page);
+    cards->setSpacing(6);
+    const QStringList ssh{QStringLiteral("SSH"), QStringLiteral("SFTP"), QStringLiteral("SCP")};
+    const QList<std::pair<QWidget *, QStringList>> shown{
+        {addWidgetCard(cards, QStringLiteral("Jump host"), jumpHost),
+         ssh + QStringList{QStringLiteral("RDP"), QStringLiteral("VNC")}},
+        {addWidgetCard(cards, QStringLiteral("Proxy"), proxy),
+         ssh + QStringList{QStringLiteral("RDP"), QStringLiteral("VNC"), QStringLiteral("FTP")}},
+        {addWidgetCard(cards, QStringLiteral("Port forwarding"), forwards), ssh},
+        {addWidgetCard(cards, QStringLiteral("Wake-on-LAN"), wakeOnLan), {}}, // every one with a host
+    };
+    cards->addStretch();
+    alignFormLabels(page);
+    const auto update = [protocolCombo, proxy, shown] {
+        const auto protocol = protocolCombo->currentText();
+        for (const auto &[card, protocols] : shown)
+            card->setVisible(protocols.isEmpty() || protocols.contains(protocol));
+        proxy->setProtocol(protocol);
+    };
+    connect(protocolCombo, &QComboBox::currentTextChanged, page, update);
+    update();
+    // Four cards are more than a window's height: the tab scrolls.
+    auto *scroll = new QScrollArea;
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setWidget(page);
+    addProtocolTab(protocolCombo, sshTabsMember, rdpEditor, vncEditor, scroll, QStringLiteral("Network"));
 }
 
 // What an empty proxy means in a folder: the nearest folder (this one or
@@ -4855,19 +4844,6 @@ void MainWindow::saveProxyPassword(const QString &value, QString password)
             QMessageBox::warning(this, QStringLiteral("Could not save password"), error);
     }
     password.fill(QChar(0));
-}
-
-// The SSH settings' "Port forwarding" tab.
-PortForwardListEditor *MainWindow::addPortForwardingTab(TerminalAppearanceEditor *sshTabsMember,
-                                                        const QList<PortForward> &value)
-{
-    QTabWidget *sshTabs = nullptr;
-    for (auto *widget = sshTabsMember->parentWidget(); widget && !sshTabs;
-         widget = widget->parentWidget())
-        sshTabs = qobject_cast<QTabWidget *>(widget);
-    auto *editor = new PortForwardListEditor(value, sshTabs);
-    sshTabs->addTab(editor, QStringLiteral("Port forwarding"));
-    return editor;
 }
 
 // A saved tunnel's SSH server: a saved SSH session (with its jump hosts and
@@ -5327,6 +5303,7 @@ RdpOptionsEditor *MainWindow::addRdpOptionsGroup(QFormLayout *form, QComboBox *p
     auto *layout = new QVBoxLayout(group);
     layout->setContentsMargins(0, 0, 0, 0);
     auto *editor = new RdpOptionsEditor(value, true, loadRdpDefaults(), group);
+    applyInheritance(editor); // ↺ per row, as in every session window
     layout->addWidget(editor);
     form->addRow(group);
     auto updateVisible = [protocolCombo, group] {
@@ -5419,7 +5396,7 @@ void MainWindow::applyLook(const Look &look)
         setDefaultTerminalAppearance(terminal);
         setDarkTerminalColorScheme(look.darkTerminalScheme);
     }
-    m_baseLookId = look.id;
+    setBaseLook(look.id);
     statusBar()->showMessage(QStringLiteral("Look: %1").arg(look.name), 3000);
     emit appearanceChanged();
     emit looksChanged();
@@ -5435,7 +5412,7 @@ bool MainWindow::saveCurrentLookAs(const QString &name)
     look.name = name;
     m_userLooks.append(look);
     saveUserLooks(m_userLooks);
-    m_baseLookId = look.id;
+    setBaseLook(look.id);
     emit appearanceChanged();
     emit looksChanged();
     return true;
@@ -5465,9 +5442,28 @@ void MainWindow::overwriteLook(const QString &id)
         look = updated;
     }
     saveUserLooks(m_userLooks);
-    m_baseLookId = id;
+    setBaseLook(id);
     emit appearanceChanged();
     emit looksChanged();
+}
+
+// The look the appearance came from, kept in the settings so that "Revert
+// Unsaved Changes" still knows it after changes by hand and after a restart.
+void MainWindow::setBaseLook(const QString &id)
+{
+    m_baseLookId = id;
+    auto ui = loadPreferencesSection("ui");
+    ui["base_look"] = id.toStdString();
+    savePreferencesSection("ui", ui);
+}
+
+// Remembered from the start: the look the appearance matches then, when no
+// look was applied yet (older settings).
+void MainWindow::rememberStartLook()
+{
+    if (m_baseLookId.isEmpty())
+        if (const auto id = matchingLookId(); !id.isEmpty())
+            setBaseLook(id);
 }
 
 QString MainWindow::baseLookId() const
@@ -5495,7 +5491,7 @@ void MainWindow::deleteLook(const QString &id)
     m_userLooks.removeIf([&id](const Look &look) { return look.id == id; });
     saveUserLooks(m_userLooks);
     if (m_baseLookId == id)
-        m_baseLookId.clear();
+        setBaseLook(QString());
     emit appearanceChanged();
     emit looksChanged();
 }
@@ -5557,7 +5553,8 @@ void MainWindow::setInterfaceFont(const QString &family, int pointSize)
 {
     const InterfaceFont font{family, pointSize};
     saveInterfaceFont(font);
-    applyInterfaceFont(m_systemFont, font);    emit appearanceChanged();
+    applyInterfaceFont(m_systemFont, font);
+    emit appearanceChanged();
 }
 
 bool MainWindow::windowBorders() const
@@ -5581,24 +5578,7 @@ void MainWindow::setDefaultTerminalAppearance(const TerminalAppearance &appearan
 void MainWindow::setDarkTerminalColorScheme(const QString &scheme)
 {
     m_darkTerminalColorScheme = scheme;
-    const auto path = settingsFilePath();
-    YAML::Node settings;
-    try {
-        settings = YAML::LoadFile(path.toStdString());
-    } catch (const YAML::Exception &) {
-    }
-    settings["terminal"]["dark_color_scheme"] = scheme.toStdString();
-    YAML::Emitter emitter;
-    emitter << settings;
-    QSaveFile file(path);
-    if (QDir().mkpath(QFileInfo(path).absolutePath()) && file.open(QIODevice::WriteOnly)) {
-        QByteArray contents(emitter.c_str());
-        contents.append('\n');
-        if (file.write(contents) == contents.size())
-            file.commit();
-        else
-            file.cancelWriting();
-    }
+    saveDarkTerminalColorScheme(scheme);
     applyTerminalAppearanceToTabs();
     emit appearanceChanged();
 }
@@ -5814,6 +5794,12 @@ void MainWindow::showTabActivity(int index)
     bar->setTabTextColor(index, marked && !dot ? colour : QColor());
 }
 
+void MainWindow::setMouseClipboardPreferences(const MouseClipboardPreferences &preferences)
+{
+    saveMouseClipboardPreferences(preferences);
+    Clipboard::setPreferences(preferences);
+}
+
 void MainWindow::setStartupPreferences(const StartupPreferences &preferences)
 {
     m_startup = preferences;
@@ -5954,7 +5940,7 @@ void MainWindow::addRemoteScreenActions(QMenu *menu, RemoteScreenPage *screen)
         const QString name = QStringLiteral("%1 %2.png")
                                  .arg(screen->host(), QDateTime::currentDateTime().toString(
                                                           QStringLiteral("yyyy-MM-dd HH.mm.ss")));
-        const QString path = QFileDialog::getSaveFileName(
+        const QString path = FileDialogs::saveFileName(
             this, QStringLiteral("Save Screenshot"),
             QDir(QStandardPaths::writableLocation(QStandardPaths::PicturesLocation)).filePath(name),
             QStringLiteral("PNG image (*.png);;JPEG image (*.jpg)"));
@@ -6039,12 +6025,13 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
             field = field->parentWidget();
         if (field && !isField(field))
             field = nullptr;
-        if (field && m_startup.wheelOnFields != QStringLiteral("always")) {
+        const auto &wheelOnFields = Clipboard::preferences().wheelOnFields;
+        if (field && wheelOnFields != QStringLiteral("always")) {
             // Not focused by the wheel itself, or "after clicking" would never hold.
             if (field->focusPolicy() == Qt::WheelFocus)
                 field->setFocusPolicy(Qt::StrongFocus);
             if (event->type() == QEvent::Wheel
-                && (m_startup.wheelOnFields == QStringLiteral("never") || !field->hasFocus())) {
+                && (wheelOnFields == QStringLiteral("never") || !field->hasFocus())) {
                 if (auto *holder = field->parentWidget())
                     QCoreApplication::sendEvent(holder, event);
                 return true;
@@ -6094,7 +6081,7 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
     // tabs exist.
     if (m_sessionTabs && watched == m_sessionTabs->tabBar()
         && event->type() == QEvent::MouseButtonRelease
-        && m_startup.middleClickCloses) {
+        && Clipboard::preferences().middleClickClosesTab) {
         auto *mouse = static_cast<QMouseEvent *>(event);
         if (mouse->button() == Qt::MiddleButton) {
             const int index = m_sessionTabs->tabBar()->tabAt(mouse->position().toPoint());
@@ -6227,33 +6214,58 @@ void MainWindow::setSnippets(const QList<Snippet> &snippets)
         m_commandsPanel->setSnippets(snippets);
 }
 
-// Resizable, so the whole text can be read before it is sent; the size is
-// kept for the rest of the session.
-static bool confirmMultilineSend(QWidget *parent, const QString &text, int terminals)
+// Resizable, so the whole text can be read before it is sent, and editable
+// ("Edit the text"; already on with Preferences → Terminals → Start in
+// editing mode): text becomes what was edited. The size is kept for the
+// rest of the session.
+static bool confirmMultilineSend(QWidget *parent, QString &text, int terminals, bool startEditing)
 {
     static QSize lastSize(640, 420);
     QDialog dialog(parent);
     dialog.setWindowTitle(QStringLiteral("Commands"));
     dialog.setSizeGripEnabled(true);
     auto *layout = new QVBoxLayout(&dialog);
-    layout->addWidget(new QLabel(QStringLiteral("Send these %1 lines to %2 terminal(s)?")
-                                     .arg(text.count(QLatin1Char('\n')) + 1)
-                                     .arg(terminals)));
+    auto *question = new QLabel;
+    layout->addWidget(question);
     auto *view = new QPlainTextEdit(text);
-    view->setReadOnly(true);
     view->setLineWrapMode(QPlainTextEdit::NoWrap);
     view->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
     layout->addWidget(view, 1);
+    const auto count = [view, question, terminals] {
+        question->setText(QStringLiteral("Send these %1 lines to %2 terminal(s)?")
+                              .arg(view->toPlainText().count(QLatin1Char('\n')) + 1)
+                              .arg(terminals));
+    };
+    count();
+    QObject::connect(view, &QPlainTextEdit::textChanged, &dialog, count);
+    auto *row = new QHBoxLayout;
+    auto *editable = new QCheckBox(QStringLiteral("Edit the text"));
+    editable->setToolTip(QStringLiteral("Change the text before it is sent"));
+    row->addWidget(editable);
+    row->addStretch();
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Yes | QDialogButtonBox::No);
+    row->addWidget(buttons);
+    layout->addLayout(row);
     QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    layout->addWidget(buttons);
+    QObject::connect(editable, &QCheckBox::toggled, &dialog, [view](bool on) {
+        view->setReadOnly(!on);
+        if (on)
+            view->setFocus();
+    });
+    view->setReadOnly(!startEditing);
+    editable->setChecked(startEditing);
     buttons->button(QDialogButtonBox::Yes)->setDefault(true);
-    buttons->button(QDialogButtonBox::Yes)->setFocus();
+    if (startEditing)
+        view->setFocus();
+    else
+        buttons->button(QDialogButtonBox::Yes)->setFocus();
     dialog.resize(lastSize);
     const bool accepted = dialog.exec() == QDialog::Accepted;
     lastSize = dialog.size();
-    return accepted;
+    if (accepted)
+        text = view->toPlainText();
+    return accepted && !text.isEmpty();
 }
 
 void MainWindow::sendSnippet(const Snippet &snippet, bool toMultiExec, bool withoutEnter)
@@ -6279,10 +6291,11 @@ void MainWindow::sendSnippet(const Snippet &snippet, bool toMultiExec, bool with
             runSavedScriptInTab(page, script);
         return;
     }
-    if (snippet.text.contains(QLatin1Char('\n')) && loadCommandsPreferences().confirmMultiline
-        && !confirmMultilineSend(this, snippet.text, targets.size()))
+    auto body = snippet.text;
+    if (body.contains(QLatin1Char('\n')) && Clipboard::preferences().confirmMultilinePaste
+        && !confirmMultilineSend(this, body, targets.size(), Clipboard::preferences().editMultilinePaste))
         return;
-    const auto text = snippet.text + (snippet.pressEnter && !withoutEnter ? QStringLiteral("\r") : QString());
+    const auto text = body + (snippet.pressEnter && !withoutEnter ? QStringLiteral("\r") : QString());
     for (auto *page : targets) {
         if (targets.size() == 1)
             page->typeText(text);
@@ -7048,8 +7061,11 @@ void MainWindow::updateMultiExecIndicator()
 }
 
 // Preferences → Security → Password storage: copies saved passwords from the
-// vault to the system store, or the saved sessions' ones back. Returns what
-// happened, for a message.
+// vault to the system store, or the saved sessions' ones back. A window
+// shows first what would happen (passwords themselves are never shown):
+// new ones are added, ones the target has with another value are replaced
+// only when ticked. Returns what happened, for a message; empty when the
+// user cancelled.
 QString MainWindow::copyPasswords(bool toSystem)
 {
     QString why;
@@ -7059,32 +7075,135 @@ QString MainWindow::copyPasswords(bool toSystem)
         return QStringLiteral("The vault stays locked; nothing was copied.");
     if (!toSystem && !m_vault.exists() && !ensureVaultUnlocked())
         return QStringLiteral("There is no vault to copy into.");
-    int copied = 0;
-    QStringList problems;
+
+    // What would be copied, and what the target holds for it now.
+    struct Entry
+    {
+        QString key, name, password;
+        enum { New, Same, Different } status;
+    };
+    QList<Entry> entries;
+    const auto nameOf = [this](const QString &key) {
+        for (const auto &session : std::as_const(m_sessions))
+            if (session.id == key)
+                return session.name;
+        return key; // not a session's password
+    };
+    const auto add = [&](const QString &key, const QString &password, const QString &existing) {
+        entries.append({key, nameOf(key), password,
+                        existing.isEmpty() ? Entry::New
+                        : existing == password ? Entry::Same
+                                               : Entry::Different});
+    };
     if (toSystem) {
-        for (const auto &key : m_vault.vaultKeys()) {
-            QString error;
-            if (SystemCredentials::write(key, m_vault.vaultPassword(key), &error))
-                ++copied;
-            else
-                problems.append(error);
-        }
+        for (const auto &key : m_vault.vaultKeys())
+            add(key, m_vault.vaultPassword(key), SystemCredentials::read(key));
     } else {
         for (const auto &session : std::as_const(m_sessions)) {
             const QString password = SystemCredentials::read(session.id);
-            if (password.isEmpty())
-                continue;
+            if (!password.isEmpty())
+                add(session.id, password, m_vault.vaultPassword(session.id));
+        }
+    }
+    const auto target = toSystem ? SystemCredentials::name() : QStringLiteral("the vault");
+    if (entries.isEmpty())
+        return QStringLiteral("There are no saved passwords to copy to %1.").arg(target);
+    std::sort(entries.begin(), entries.end(), [](const Entry &a, const Entry &b) {
+        return a.name.localeAwareCompare(b.name) < 0;
+    });
+    int counts[3] = {0, 0, 0};
+    for (const auto &entry : entries)
+        ++counts[entry.status];
+
+    QDialog dialog(QApplication::activeWindow() ? QApplication::activeWindow() : this);
+    dialog.setWindowTitle(QStringLiteral("Copy Passwords to %1").arg(toSystem ? QStringLiteral("the System Store")
+                                                                              : QStringLiteral("the Vault")));
+    dialog.setSizeGripEnabled(true);
+    auto *layout = new QVBoxLayout(&dialog);
+    layout->addWidget(new QLabel(QStringLiteral("<b>New: %1</b> · Same: %2 · <b>Different: %3</b>")
+                                     .arg(counts[Entry::New]).arg(counts[Entry::Same]).arg(counts[Entry::Different])));
+    auto *explanation = new QLabel(
+        QStringLiteral("New passwords are added to %1. A different one replaces the one there only "
+                       "if you tick it. Nothing is deleted, and the passwords are not shown.")
+            .arg(target));
+    explanation->setWordWrap(true);
+    layout->addWidget(explanation);
+    if (toSystem) {
+        auto *warning = new QLabel(QStringLiteral(
+            "The system store opens with your login, while the vault needs its own master "
+            "password: copied passwords are protected less there."));
+        warning->setWordWrap(true);
+        warning->setStyleSheet(QStringLiteral("color: palette(placeholder-text);"));
+        layout->addWidget(warning);
+    }
+    auto *table = new QTableWidget(int(entries.size()), 3);
+    table->setHorizontalHeaderLabels({QStringLiteral("Password of"), QStringLiteral("In %1").arg(target),
+                                      QStringLiteral("Replace")});
+    table->verticalHeader()->hide();
+    table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    table->setSelectionMode(QAbstractItemView::NoSelection);
+    table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    QList<QCheckBox *> replaceBoxes;
+    for (int row = 0; row < entries.size(); ++row) {
+        const auto &entry = entries.at(row);
+        table->setItem(row, 0, new QTableWidgetItem(entry.name));
+        table->setItem(row, 1, new QTableWidgetItem(entry.status == Entry::New    ? QStringLiteral("not there: added")
+                                                    : entry.status == Entry::Same ? QStringLiteral("the same")
+                                                                                  : QStringLiteral("different")));
+        if (entry.status == Entry::Different) {
+            auto *box = new QCheckBox;
+            box->setToolTip(QStringLiteral("Replace the password in %1 with this one").arg(target));
+            table->setCellWidget(row, 2, box);
+            replaceBoxes.append(box);
+        } else {
+            replaceBoxes.append(nullptr);
+        }
+    }
+    layout->addWidget(table, 1);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel);
+    auto *copy = buttons->addButton(QStringLiteral("Copy"), QDialogButtonBox::AcceptRole);
+    if (counts[Entry::Different] > 0) {
+        auto *all = buttons->addButton(QStringLiteral("Replace All"), QDialogButtonBox::ActionRole);
+        auto *none = buttons->addButton(QStringLiteral("Replace None"), QDialogButtonBox::ActionRole);
+        for (auto [button, on] : {std::pair{all, true}, std::pair{none, false}})
+            QObject::connect(button, &QPushButton::clicked, &dialog, [replaceBoxes, on] {
+                for (auto *box : replaceBoxes)
+                    if (box)
+                        box->setChecked(on);
+            });
+    }
+    copy->setDefault(true);
+    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+    dialog.resize(560, 420);
+    if (dialog.exec() != QDialog::Accepted) {
+        for (auto &entry : entries)
+            entry.password.fill(QChar(0));
+        return QString();
+    }
+
+    int added = 0, replaced = 0;
+    QStringList problems;
+    for (int row = 0; row < entries.size(); ++row) {
+        auto &entry = entries[row];
+        const bool write = entry.status == Entry::New
+                           || (entry.status == Entry::Different && replaceBoxes.at(row)->isChecked());
+        if (write) {
             QString error;
-            if (m_vault.setVaultPassword(session.id, password, &error))
-                ++copied;
+            const bool ok = toSystem ? SystemCredentials::write(entry.key, entry.password, &error)
+                                     : m_vault.setVaultPassword(entry.key, entry.password, &error);
+            if (ok)
+                ++(entry.status == Entry::New ? added : replaced);
             else
                 problems.append(error);
         }
+        entry.password.fill(QChar(0));
     }
     problems.removeDuplicates();
-    QString message = QStringLiteral("Copied %1 password(s) to %2.")
-                          .arg(copied)
-                          .arg(toSystem ? SystemCredentials::name() : QStringLiteral("the vault"));
+    QString message = QStringLiteral("%1 added and %2 replaced in %3; %4 left as they were.")
+                          .arg(added).arg(replaced).arg(target)
+                          .arg(entries.size() - added - replaced);
     if (!problems.isEmpty())
         message += QStringLiteral("\n\n") + problems.join(QLatin1Char('\n'));
     return message;
@@ -7097,9 +7216,10 @@ QComboBox *MainWindow::passwordStoreChoice(const QString &value, QWidget *parent
                                                 {QStringLiteral("system"), QStringLiteral("System credential store")},
                                                 {QStringLiteral("both"), QStringLiteral("Both")}};
     auto *box = new QComboBox(parent);
-    box->addItem(QStringLiteral("Default (%1)").arg(labels.value(m_security.passwordStore)), QString());
+    addInheritedItem(box, labels.value(m_security.passwordStore), QString());
     for (const auto *key : {"vault", "system", "both"})
-        box->addItem(labels.value(QLatin1String(key)), QLatin1String(key));
+        if (QLatin1String(key) != m_security.passwordStore) // listed once, as the inherited one
+            box->addItem(labels.value(QLatin1String(key)), QLatin1String(key));
     box->setCurrentIndex(qMax(0, box->findData(value)));
     QString why;
     const bool available = SystemCredentials::isAvailable(&why);
@@ -7188,3 +7308,15 @@ void MainWindow::validateSessionDialog(QDialog *dialog, QFormLayout *form, QDial
     });
 }
 
+// Widgets under a style sheet keep the font they were polished with when the
+// application font changes (Qt only updates the others): polish them again.
+void refreshWidgetFonts()
+{
+    for (auto *widget : QApplication::allWidgets()) {
+        if (widget->testAttribute(Qt::WA_SetFont))
+            continue; // a font of its own (headings follow by hand)
+        widget->style()->unpolish(widget);
+        widget->style()->polish(widget);
+        widget->updateGeometry();
+    }
+}

@@ -1,0 +1,23 @@
+# Settings files of 0.6.5 development builds, before it was released (one
+# case each; see 0.6.1.yaml).
+
+mouse:
+  # A 0.6.5 development build (settings version 4), before the mouse and
+  # clipboard settings moved: values set by hand.
+  settings_version: 4
+  behaviour:
+    scrollback_lines: 10000
+    copy_on_select_linux: false
+    copy_on_select_windows: true
+    right_click: paste
+    middle_click: clipboard
+    confirm_multiline_paste: true
+    edit_multiline_paste: true
+    trim_pasted_newlines: true
+    word_characters: "-_."
+    bell: sound
+    links: ctrl-click
+  startup:
+    tab_title: both
+    middle_click_closes: false
+    wheel_on_fields: never

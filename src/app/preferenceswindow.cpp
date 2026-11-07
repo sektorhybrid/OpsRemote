@@ -2,6 +2,10 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "preferenceswindow.h"
+#include "filedialogs.h"
+#include "formcard.h"
+#include "programpicker.h"
+#include "reconnect.h"
 #include "tabactivity.h"
 #include "kvantumthemes.h"
 #include "availabilitynote.h"
@@ -50,12 +54,14 @@
 #include <QEnterEvent>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QPointer>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QPixmap>
 #include <QPushButton>
 #include <QStandardItemModel>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QSpinBox>
 #include <QStackedWidget>
 #include <QStyleHints>
@@ -542,7 +548,7 @@ void PreferencesWindow::buildPages()
     buildShortcutsPage();
     buildPresentationPage();
     endCategory();
-    beginCategory(QStringLiteral("terminal-category"), QStringLiteral("Terminal"),
+    beginCategory(QStringLiteral("terminal-category"), QStringLiteral("Terminals"),
                   QStringLiteral("utilities-terminal"), QStyle::SP_ComputerIcon);
     buildTerminalPage();
     buildLocalShellPage();
@@ -572,7 +578,7 @@ void PreferencesWindow::buildPages()
     buildProxyPage();
     buildSftpPage();
     endCategory();
-    beginCategory(QStringLiteral("security"), QStringLiteral("Security and vault"),
+    beginCategory(QStringLiteral("security"), QStringLiteral("Security & vault"),
                   QStringLiteral("security-high"), QStyle::SP_MessageBoxWarning);
     buildSecurityPage();
     buildKeysPage();
@@ -584,7 +590,7 @@ void PreferencesWindow::buildPages()
     buildHttpRequestPage();
     buildScriptsPage();
     endCategory();
-    beginCategory(QStringLiteral("data"), QStringLiteral("Data and backup"),
+    beginCategory(QStringLiteral("data"), QStringLiteral("Data & backup"),
                   QStringLiteral("drive-removable-media"), QStyle::SP_DriveFDIcon);
     buildDataPage();
     endCategory();
@@ -620,8 +626,24 @@ void PreferencesWindow::rebuild()
     filter(m_search->text());
 }
 
-void PreferencesWindow::showPage(const QString &id)
+// A setting kept on another page, related to this one: its name and a
+// button that goes there. The setting itself stays in one place.
+void PreferencesWindow::addLinkRow(SettingsCard *card, const QString &title, const QString &description,
+                                   const QString &where, const QString &pageId, const QString &keywords,
+                                   const QStringList &targets)
 {
+    auto *go = new QPushButton(QString(where).replace(QLatin1Char('&'), QStringLiteral("&&"))
+                               + QStringLiteral(" ›"));
+    go->setFlat(true);
+    go->setCursor(Qt::PointingHandCursor);
+    go->setToolTip(QStringLiteral("Go to %1").arg(where));
+    connect(go, &QPushButton::clicked, this, [this, pageId, targets] { showPage(pageId, targets); });
+    card->addRow(title, description, go, keywords);
+}
+
+void PreferencesWindow::showPage(const QString &id, const QStringList &targets)
+{
+    QWidget *shown = nullptr;
     for (int index = 0; index < m_categories.size(); ++index) {
         const auto &category = m_categories[index];
         int tab = category.id == id ? 0 : -1;
@@ -635,10 +657,50 @@ void PreferencesWindow::showPage(const QString &id)
         m_navigation->setCurrentRow(index);
         if (category.tabs)
             category.tabs->setCurrentIndex(tab);
+        shown = category.pages.value(tab);
     }
     show();
     raise();
     activateWindow();
+    if (shown && !targets.isEmpty())
+        // Once the page is laid out, so it scrolls to the right place.
+        QTimer::singleShot(0, shown, [this, shown, targets] { markTargets(shown, targets); });
+}
+
+// Scrolls to the rows (or cards) with these titles and tints them for a
+// moment, so a link's destination is seen at once.
+void PreferencesWindow::markTargets(QWidget *page, const QStringList &targets)
+{
+    auto *scroll = qobject_cast<QScrollArea *>(page);
+    QList<QWidget *> marked;
+    for (auto *label : page->findChildren<QLabel *>()) {
+        if (!targets.contains(label->text()))
+            continue;
+        QWidget *target = label;
+        while (target && target->objectName() != QStringLiteral("settingsRow")
+               && target->objectName() != QStringLiteral("settingsCard"))
+            target = target->parentWidget();
+        if (target && !marked.contains(target))
+            marked.append(target);
+    }
+    if (marked.isEmpty())
+        return;
+    // The first one near the top, with the others below it in view.
+    if (scroll && scroll->widget())
+        scroll->verticalScrollBar()->setValue(marked.first()->mapTo(scroll->widget(), QPoint()).y() - 40);
+    QColor tint = palette().color(QPalette::Highlight);
+    tint.setAlpha(70);
+    const auto style = QStringLiteral("#%1 { background-color: rgba(%2, %3, %4, %5); border-radius: 6px; }");
+    for (auto *target : std::as_const(marked)) {
+        const QPointer<QWidget> guarded(target);
+        const auto before = target->styleSheet();
+        target->setStyleSheet(style.arg(target->objectName()).arg(tint.red()).arg(tint.green())
+                                  .arg(tint.blue()).arg(tint.alpha()));
+        QTimer::singleShot(1800, this, [guarded, before] {
+            if (guarded)
+                guarded->setStyleSheet(before);
+        });
+    }
 }
 
 void PreferencesWindow::beginCategory(const QString &id, const QString &title,
@@ -675,7 +737,8 @@ SettingsPage *PreferencesWindow::addPage(const QString &id, const QString &title
     if (m_inCategory) {
         auto &category = m_categories.last();
         auto *page = new SettingsPage(id, title, false, category.tabs);
-        category.tabs->addTab(page, title);
+        // A tab's single & would underline the next letter (a shortcut).
+        category.tabs->addTab(page, QString(title).replace(QLatin1Char('&'), QStringLiteral("&&")));
         category.pages.append(page);
         return page;
     }
@@ -877,11 +940,15 @@ SettingsPage *PreferencesWindow::buildLooksPage()
             button->setToolTip(room ? QString() : full);
         }
         const bool own = look && !look->isBuiltIn();
-        saveInto->setText(own ? QStringLiteral("Save into \"%1\"…").arg(look->name)
-                              : QStringLiteral("Save into Selected…"));
+        // One width whatever the name (the confirmation names the look).
+        saveInto->setText(QStringLiteral("Save into Selected Look…"));
+        saveInto->setToolTip(own ? QStringLiteral("Replaces \"%1\" with the current appearance.").arg(look->name)
+                                 : QStringLiteral("Select one of your own looks first."));
         saveInto->setEnabled(own && !look->sameAppearance(now));
         const auto base = lookById(mainWindow->baseLookId());
-        revert->setText(base ? QStringLiteral("Back to \"%1\"").arg(base->name) : QStringLiteral("Back to the Look"));
+        revert->setText(QStringLiteral("Revert Unsaved Changes"));
+        revert->setToolTip(base ? QStringLiteral("Undoes the changes made by hand since \"%1\" was applied.").arg(base->name)
+                                : QStringLiteral("Undoes the changes made by hand since a look was applied."));
         revert->setEnabled(base && !base->sameAppearance(now));
     };
     const auto askName = [this](const QString &title, const QString &name) {
@@ -959,7 +1026,7 @@ SettingsPage *PreferencesWindow::buildLooksPage()
         const auto look = selectedLook();
         if (!look)
             return;
-        const QString path = QFileDialog::getSaveFileName(
+        const QString path = FileDialogs::saveFileName(
             this, QStringLiteral("Export Look"),
             QDir::home().filePath(look->name + QStringLiteral(".opsremote-look.yaml")),
             QStringLiteral("OpsRemote looks (*.opsremote-look.yaml *.yaml)"));
@@ -968,7 +1035,7 @@ SettingsPage *PreferencesWindow::buildLooksPage()
                                  QStringLiteral("Could not write %1.").arg(QDir::toNativeSeparators(path)));
     });
     connect(importButton, &QPushButton::clicked, this, [this, mainWindow] {
-        const QString path = QFileDialog::getOpenFileName(
+        const QString path = FileDialogs::openFileName(
             this, QStringLiteral("Import Look"), QDir::homePath(),
             QStringLiteral("OpsRemote looks (*.opsremote-look.yaml *.yaml)"));
         if (path.isEmpty())
@@ -997,7 +1064,7 @@ void PreferencesWindow::buildAppearancePage()
     auto *page = buildLooksPage();
 
     // Colours and style
-    auto *colours = page->addCard(QStringLiteral("Interface: colours and style"));
+    auto *colours = page->addCard(QStringLiteral("Interface: colours & style"));
     auto *colourMode = new QComboBox;
     for (const auto &choice : mainWindow->colorThemeChoices())
         colourMode->addItem(choice.second, choice.first);
@@ -1047,7 +1114,7 @@ void PreferencesWindow::buildAppearancePage()
 
 
     // Icons and text
-    auto *iconsAndText = page->addCard(QStringLiteral("Interface: icons and text"));
+    auto *iconsAndText = page->addCard(QStringLiteral("Interface: icons & text"));
     auto *iconTheme = new QComboBox;
     iconTheme->addItem(QStringLiteral("Built-in"), QString());
     for (const auto &theme : availableIconThemes())
@@ -1097,7 +1164,7 @@ void PreferencesWindow::buildAppearancePage()
     connect(fontSize, &QSpinBox::valueChanged, this, applyFont);
 
     // Terminal
-    auto *terminal = page->addCard(QStringLiteral("Terminal: colours and font"));
+    auto *terminal = page->addCard(QStringLiteral("Terminal: colours & font"));
     auto *editor = new TerminalAppearanceEditor(mainWindow->defaultTerminalAppearance(), false);
     editor->changed = [mainWindow, editor] {
         mainWindow->setDefaultTerminalAppearance(editor->value());
@@ -1141,7 +1208,7 @@ void PreferencesWindow::buildTerminalPage()
     };
     const auto current = mainWindow->terminalBehaviour();
 
-    auto *display = page->addCard(QStringLiteral("Cursor and display"));
+    auto *display = page->addCard(QStringLiteral("Cursor & display"));
     auto *cursor = choiceBox({{QStringLiteral("block"), QStringLiteral("Block")},
                               {QStringLiteral("underline"), QStringLiteral("Underline")},
                               {QStringLiteral("ibeam"), QStringLiteral("Bar")}},
@@ -1183,72 +1250,32 @@ void PreferencesWindow::buildTerminalPage()
         update([&](TerminalBehaviour &b) { b.scrollbackLines = value; });
     });
 
-    auto *mouse = page->addCard(QStringLiteral("Mouse, copy, and paste"));
-    auto *copyOnSelect = toggle(current.copyOnSelect);
-    mouse->addRow(QStringLiteral("Copy on select"),
-                  QStringLiteral("Selected text goes to the clipboard at once, like PuTTY."),
-                  copyOnSelect, QStringLiteral("clipboard selection"));
-    connectToggle(copyOnSelect, &TerminalBehaviour::copyOnSelect);
-    auto *rightClick = choiceBox({{QStringLiteral("menu"), QStringLiteral("Show menu")},
-                                  {QStringLiteral("paste"), QStringLiteral("Paste")},
-                                  {QStringLiteral("none"), QStringLiteral("Nothing")}},
-                                 current.rightClick);
-    mouse->addRow(QStringLiteral("Right-click"),
-                  QStringLiteral("With Paste or Nothing, Shift+right-click still opens the menu."),
-                  rightClick, QStringLiteral("context menu mouse button putty mobaxterm"));
-    connectChoice(rightClick, &TerminalBehaviour::rightClick);
-    auto *middleClick = choiceBox(
-        {{QStringLiteral("paste"), QStringLiteral("Paste selection")},
-         {QStringLiteral("clipboard"), QStringLiteral("Paste clipboard")},
-         {QStringLiteral("menu"), QStringLiteral("Show menu")},
-         {QStringLiteral("none"), QStringLiteral("Nothing")}},
-        current.middleClick);
-    mouse->addRow(QStringLiteral("Middle-click"),
-                  QStringLiteral("Paste selection uses the last selected text on Linux and the "
-                                 "clipboard on Windows and macOS. Programs that use the mouse "
-                                 "(vim, mc) still get the click unless Shift is held."),
-                  middleClick, QStringLiteral("middle mouse button wheel paste primary selection"));
-    connectChoice(middleClick, &TerminalBehaviour::middleClick);
-    auto *confirmPaste = toggle(current.confirmMultilinePaste);
-    mouse->addRow(QStringLiteral("Confirm multi-line paste"),
-                  QStringLiteral("Asks first, so a pasted script does not run line by line by "
-                                 "accident."),
-                  confirmPaste, QStringLiteral("safety clipboard"));
-    connectToggle(confirmPaste, &TerminalBehaviour::confirmMultilinePaste);
-    auto *trim = toggle(current.trimPastedNewlines);
-    mouse->addRow(QStringLiteral("Remove trailing newlines when pasting"),
-                  QStringLiteral("A pasted command waits for Enter instead of running."), trim,
-                  QStringLiteral("clipboard"));
-    connectToggle(trim, &TerminalBehaviour::trimPastedNewlines);
-    auto *wordChars = new QLineEdit(current.wordCharacters);
-    wordChars->setMaximumWidth(200);
-    mouse->addRow(QStringLiteral("Word characters"),
-                  QStringLiteral("Characters that double-click selects as part of a word, besides "
-                                 "letters and digits; for example paths and URLs."),
-                  wordChars, QStringLiteral("double click selection"));
-    connect(wordChars, &QLineEdit::editingFinished, this, [update, wordChars] {
-        update([&](TerminalBehaviour &b) { b.wordCharacters = wordChars->text(); });
-    });
-    auto *linkable = toggle(current.linksEnabled);
-    mouse->addRow(QStringLiteral("Enable terminal links"),
-                  QStringLiteral("Make web addresses and application-provided links clickable. "
-                                 "Saved sessions can override this setting."), linkable,
-                  QStringLiteral("url hyperlink browser osc8 disable"));
-    connectToggle(linkable, &TerminalBehaviour::linksEnabled);
-    auto *links = toggle(current.ctrlClickOpensLinks);
-    mouse->addRow(QStringLiteral("Ctrl+click opens links"),
-                  QStringLiteral("Web addresses in the output open in your browser."), links,
-                  QStringLiteral("url hyperlink browser"));
-    connectToggle(links, &TerminalBehaviour::ctrlClickOpensLinks);
+    auto *mouse = page->addCard(QStringLiteral("Mouse, copy & paste"));
+    addLinkRow(mouse, QStringLiteral("Selecting, copying, pasting, links"),
+               QStringLiteral("The same in terminals and every other place of OpsRemote, on every system."),
+               QStringLiteral("Workspace → Mouse & clipboard"), QStringLiteral("mouse"),
+               QStringLiteral("copy on select paste middle right click word characters links multiline"));
+
+    auto *dropping = page->addCard(QStringLiteral("Dropping files"));
+    auto *uploadDropped = toggle(current.uploadDroppedFiles);
+    dropping->addRow(QStringLiteral("Upload files dropped on a terminal"),
+                     QStringLiteral("Files and folders dropped on a terminal go into the folder of the "
+                                    "program in it, found when you drop them, after asking. Off, or "
+                                    "with Shift held: their paths are typed, as before. Saved sessions "
+                                    "can turn it on or off for themselves."),
+                     uploadDropped, QStringLiteral("drag drop upload files folder paths"));
+    connectToggle(uploadDropped, &TerminalBehaviour::uploadDroppedFiles);
 
     auto *notifications = page->addCard(QStringLiteral("Notifications"));
-    auto *bell = choiceBox({{QStringLiteral("visual"), QStringLiteral("Flash")},
-                            {QStringLiteral("sound"), QStringLiteral("Sound")},
-                            {QStringLiteral("none"), QStringLiteral("Off")}},
+    auto *bell = choiceBox({{QStringLiteral("visual"), QStringLiteral("Flash the terminal")},
+                            {QStringLiteral("sound"), QStringLiteral("Play the system sound")},
+                            {QStringLiteral("none"), QStringLiteral("Nothing")}},
                            current.bell);
     notifications->addRow(QStringLiteral("Terminal bell"),
-                          QStringLiteral("What happens when a program rings the bell."), bell,
-                          QStringLiteral("beep alert"));
+                          QStringLiteral("When a program rings the bell (for example Tab completion "
+                                         "with nothing to complete). Flash: the terminal dims for a "
+                                         "moment. A background tab is also marked, as for new output."),
+                          bell, QStringLiteral("beep alert flash visual sound"));
     connectChoice(bell, &TerminalBehaviour::bell);
 }
 
@@ -1367,7 +1394,7 @@ void PreferencesWindow::buildTabActivityCard(SettingsPage *page)
 void PreferencesWindow::buildStartupPage()
 {
     auto *mainWindow = m_mainWindow;
-    auto *page = addPage(QStringLiteral("startup"), QStringLiteral("Startup and exit"),
+    auto *page = addPage(QStringLiteral("startup"), QStringLiteral("Startup & exit"),
                          QStringLiteral("system-run"), QStyle::SP_MediaPlay);
     auto update = [mainWindow](auto change) {
         auto preferences = mainWindow->startupPreferences();
@@ -1431,7 +1458,8 @@ void PreferencesWindow::buildStartupPage()
                    QStyle::SP_FileDialogDetailedView);
     auto *tabs = page->addCard(QStringLiteral("General"));
     auto *title = choiceBox({{QStringLiteral("name"), QStringLiteral("Session name")},
-                             {QStringLiteral("userhost"), QStringLiteral("user@host")}},
+                             {QStringLiteral("userhost"), QStringLiteral("user@host")},
+                             {QStringLiteral("both"), QStringLiteral("Session name (user@host)")}},
                             current.tabTitle);
     tabs->addRow(QStringLiteral("Tab title"), QStringLiteral("Applies to newly opened tabs."),
                  title, QStringLiteral("label name"));
@@ -1450,10 +1478,6 @@ void PreferencesWindow::buildStartupPage()
                                 "Applies to every session type."),
                  duplicates, QStringLiteral("duplicate same session multiple tabs connections"));
     connectToggle(duplicates, &StartupPreferences::allowDuplicateSessionTabs);
-    auto *middle = toggle(current.middleClickCloses);
-    tabs->addRow(QStringLiteral("Middle-click closes a tab"), QString(), middle,
-                 QStringLiteral("mouse wheel button"));
-    connectToggle(middle, &StartupPreferences::middleClickCloses);
 
     auto *closeConnected = toggle(current.confirmCloseConnected);
     tabs->addRow(QStringLiteral("Ask before closing a connected SSH tab"), QString(),
@@ -1461,22 +1485,175 @@ void PreferencesWindow::buildStartupPage()
     connectToggle(closeConnected, &StartupPreferences::confirmCloseConnected);
     buildTabActivityCard(page);
 
-    page = addPage(QStringLiteral("mouse"), QStringLiteral("Mouse"), QStringLiteral("input-mouse"),
-                   QStyle::SP_ArrowUp);
-    auto *mouse = page->addCard(QStringLiteral("Mouse wheel"));
+    buildMouseClipboardPage();
+}
+
+// Workspace → Mouse and clipboard: selecting, copying and pasting, the same
+// in terminals and text fields, on every system (clipboard.h).
+void PreferencesWindow::buildMouseClipboardPage()
+{
+    auto *mainWindow = m_mainWindow;
+    auto *page = addPage(QStringLiteral("mouse"), QStringLiteral("Mouse & clipboard"),
+                         QStringLiteral("input-mouse"), QStyle::SP_ArrowUp);
+    auto update = [mainWindow](auto change) {
+        auto preferences = mainWindow->mouseClipboardPreferences();
+        change(preferences);
+        mainWindow->setMouseClipboardPreferences(preferences);
+    };
+    auto connectToggle = [this, update](QCheckBox *box, bool MouseClipboardPreferences::*field) {
+        connect(box, &QCheckBox::toggled, this, [update, field](bool on) {
+            update([&](MouseClipboardPreferences &p) { p.*field = on; });
+        });
+    };
+    auto connectChoice = [this, update](QComboBox *box, QString MouseClipboardPreferences::*field) {
+        connect(box, &QComboBox::activated, this, [update, box, field] {
+            update([&](MouseClipboardPreferences &p) { p.*field = box->currentData().toString(); });
+        });
+    };
+    const auto current = mainWindow->mouseClipboardPreferences();
+
+    auto *copying = page->addCard(QStringLiteral("Selecting & copying"));
+    auto *doubleClick = choiceBox({{QStringLiteral("word-characters"), QStringLiteral("Words with these characters too")},
+                                   {QStringLiteral("letters"), QStringLiteral("Letters and digits only")}},
+                                  current.doubleClick);
+    copying->addRow(QStringLiteral("Double-click selects"),
+                    QStringLiteral("In terminals and text fields. With the characters below, paths, "
+                                   "web addresses and user@host are one word."),
+                    doubleClick, QStringLiteral("double click word selection"));
+    connectChoice(doubleClick, &MouseClipboardPreferences::doubleClick);
+    auto *wordChars = new QLineEdit(current.wordCharacters);
+    wordChars->setMaximumWidth(200);
+    copying->addRow(QStringLiteral("Word characters"),
+                    QStringLiteral("Characters a double-click keeps in a word, besides letters and digits."),
+                    wordChars, QStringLiteral("double click selection path url"));
+    connect(wordChars, &QLineEdit::editingFinished, this, [update, wordChars] {
+        update([&](MouseClipboardPreferences &p) { p.wordCharacters = wordChars->text(); });
+    });
+    wordChars->setEnabled(current.doubleClick != QStringLiteral("letters"));
+    connect(doubleClick, &QComboBox::activated, wordChars, [doubleClick, wordChars] {
+        wordChars->setEnabled(doubleClick->currentData().toString() != QStringLiteral("letters"));
+    });
+    auto *copyOnSelect = toggle(current.copyOnSelect);
+    copying->addRow(QStringLiteral("Copy on select"),
+                    QStringLiteral("Selected text also goes to the clipboard when you finish selecting, "
+                                   "like PuTTY. Not from password fields."),
+                    copyOnSelect, QStringLiteral("clipboard selection putty"));
+    connectToggle(copyOnSelect, &MouseClipboardPreferences::copyOnSelect);
+
+    auto *pasting = page->addCard(QStringLiteral("Pasting"));
+    auto *paste = choiceBox({{QStringLiteral("newest"), QStringLiteral("The newest")},
+                             {QStringLiteral("clipboard"), QStringLiteral("Always the clipboard")},
+                             {QStringLiteral("system"), QStringLiteral("System standard")}},
+                            current.paste);
+    pasting->addRow(QStringLiteral("Paste"),
+                    QStringLiteral("What every paste gives (middle-click, right-click, Ctrl+Shift+V, the "
+                                   "menu), in terminals and text fields. The newest: your last selection "
+                                   "in OpsRemote or your last copy in any program, whichever came last. "
+                                   "System standard: on Linux middle-click pastes the selection, the rest "
+                                   "the clipboard."),
+                    paste, QStringLiteral("clipboard selection primary newest middle"));
+    connectChoice(paste, &MouseClipboardPreferences::paste);
+#ifndef Q_OS_WIN
+    auto *otherPrograms = toggle(current.otherProgramsSelection);
+    pasting->addRow(QStringLiteral("Selections in other programs count too"),
+                    QStringLiteral("With The newest: text only selected (not copied) in another program "
+                                   "counts as well. Off: reading a web page does not change what you paste."),
+                    otherPrograms, QStringLiteral("primary selection linux browser"));
+    connectToggle(otherPrograms, &MouseClipboardPreferences::otherProgramsSelection);
+    otherPrograms->setEnabled(current.paste == QStringLiteral("newest"));
+    connect(paste, &QComboBox::activated, otherPrograms, [paste, otherPrograms] {
+        otherPrograms->setEnabled(paste->currentData().toString() == QStringLiteral("newest"));
+    });
+#endif
+
+    auto *buttons = page->addCard(QStringLiteral("Mouse buttons"));
+    auto *rightClick = choiceBox({{QStringLiteral("menu"), QStringLiteral("Show menu")},
+                                  {QStringLiteral("paste"), QStringLiteral("Paste")},
+                                  {QStringLiteral("none"), QStringLiteral("Nothing")}},
+                                 current.rightClick);
+    buttons->addRow(QStringLiteral("Right-click"),
+                    QStringLiteral("In terminals and text fields. Shift+right-click does the other: the "
+                                   "menu, or with the menu set, a paste."),
+                    rightClick, QStringLiteral("context menu mouse button putty mobaxterm"));
+    connectChoice(rightClick, &MouseClipboardPreferences::rightClick);
+    auto *middleClick = choiceBox({{QStringLiteral("paste"), QStringLiteral("Paste")},
+                                   {QStringLiteral("menu"), QStringLiteral("Show menu")},
+                                   {QStringLiteral("none"), QStringLiteral("Nothing")}},
+                                  current.middleClick);
+    buttons->addRow(QStringLiteral("Middle-click"),
+                    QStringLiteral("In terminals and text fields. Programs that use the mouse (vim, mc) "
+                                   "still get the click unless Shift is held."),
+                    middleClick, QStringLiteral("middle mouse button wheel paste"));
+    connectChoice(middleClick, &MouseClipboardPreferences::middleClick);
+    auto *closesTab = toggle(current.middleClickClosesTab);
+    buttons->addRow(QStringLiteral("Middle-click closes a tab"), QString(), closesTab,
+                    QStringLiteral("mouse wheel button tab"));
+    connectToggle(closesTab, &MouseClipboardPreferences::middleClickClosesTab);
     auto *wheel = choiceBox({{QStringLiteral("focused"), QStringLiteral("Only after clicking the field")},
                              {QStringLiteral("always"), QStringLiteral("Always")},
                              {QStringLiteral("never"), QStringLiteral("Never")}},
                             current.wheelOnFields);
-    mouse->addRow(QStringLiteral("Wheel on drop-down lists and number fields"),
-                  QStringLiteral("In Preferences, the session window, and every other window. Only "
-                                 "after clicking: scrolling over a field that is not selected scrolls "
-                                 "the page, so a choice does not change by accident. Never: change "
-                                 "them with a click or the keyboard."),
-                  wheel, QStringLiteral("scroll wheel combo box spin accident change select"));
-    connect(wheel, &QComboBox::activated, this, [update, wheel] {
-        update([&](StartupPreferences &p) { p.wheelOnFields = wheel->currentData().toString(); });
-    });
+    buttons->addRow(QStringLiteral("Mouse wheel changes drop-down lists and number fields"),
+                    QStringLiteral("In Preferences, the session window, and every other window. Only "
+                                   "after clicking: scrolling over a field that is not selected scrolls "
+                                   "the page, so a choice does not change by accident. Never: change "
+                                   "them with a click or the keyboard."),
+                    wheel, QStringLiteral("scroll wheel combo box spin accident change select"));
+    connectChoice(wheel, &MouseClipboardPreferences::wheelOnFields);
+
+    auto *lines = page->addCard(QStringLiteral("Pasting several lines"));
+    auto *confirmPaste = toggle(current.confirmMultilinePaste);
+    lines->addRow(QStringLiteral("Confirm multi-line paste"),
+                  QStringLiteral("Asks first, so a pasted script does not run line by line by accident. "
+                                 "Also for commands of several lines sent from the Commands tab. Saved "
+                                 "sessions can turn it on or off for themselves."),
+                  confirmPaste, QStringLiteral("safety clipboard confirm multiline commands snippets"));
+    connectToggle(confirmPaste, &MouseClipboardPreferences::confirmMultilinePaste);
+    auto *editPaste = toggle(current.editMultilinePaste);
+    lines->addRow(QStringLiteral("Start in editing mode"),
+                  QStringLiteral("The window that asks before several lines opens with its text "
+                                 "editable, so you can change it before it is pasted or sent."),
+                  editPaste, QStringLiteral("edit change multiline paste confirm commands"));
+    connectToggle(editPaste, &MouseClipboardPreferences::editMultilinePaste);
+    // Editing happens in the asking window: only while it asks.
+    editPaste->setEnabled(current.confirmMultilinePaste);
+    connect(confirmPaste, &QCheckBox::toggled, editPaste, &QWidget::setEnabled);
+    auto *trim = toggle(current.trimPastedNewlines);
+    lines->addRow(QStringLiteral("Remove trailing newlines when pasting"),
+                  QStringLiteral("A pasted command waits for Enter instead of running."), trim,
+                  QStringLiteral("clipboard"));
+    connectToggle(trim, &MouseClipboardPreferences::trimPastedNewlines);
+
+    auto *linksCard = page->addCard(QStringLiteral("Links"));
+    auto *links = choiceBox({{QStringLiteral("ctrl-click"), QStringLiteral("Open with Ctrl+click or the menu")},
+                             {QStringLiteral("menu"), QStringLiteral("Open from the menu only")},
+                             {QStringLiteral("off"), QStringLiteral("Off")}},
+                            current.links);
+    linksCard->addRow(QStringLiteral("Links in terminal output"),
+                      QStringLiteral("Web addresses and links programs print are underlined when the "
+                                     "mouse is over them, and open in your browser. Off: not recognised. "
+                                     "Saved sessions can turn them on or off for themselves."),
+                      links, QStringLiteral("url hyperlink browser osc8 ctrl click open"));
+    connectChoice(links, &MouseClipboardPreferences::links);
+
+    auto *remote = page->addCard(QStringLiteral("Remote desktops clipboard & file transfers"));
+    addLinkRow(remote, QStringLiteral("Clipboard of RDP sessions"),
+               QStringLiteral("Sharing clipboard text and files with the remote computer."),
+               QStringLiteral("Connections → RDP"), QStringLiteral("rdp"),
+               QStringLiteral("rdp clipboard share files"),
+               {QStringLiteral("Share clipboard text"), QStringLiteral("Share files through the clipboard")});
+    addLinkRow(remote, QStringLiteral("Clipboard of VNC sessions"),
+               QStringLiteral("Sharing clipboard text with the remote computer."),
+               QStringLiteral("Connections → VNC"), QStringLiteral("vnc"),
+               QStringLiteral("vnc clipboard share"), {QStringLiteral("Share clipboard text")});
+    addLinkRow(remote, QStringLiteral("Copying files in the Files panel"),
+               QStringLiteral("Copy, paste and drag files between this computer and a server: where "
+                              "downloads go, uploads under a temporary name, and what happens when a "
+                              "file already exists."),
+               QStringLiteral("Network → Files & transfers"), QStringLiteral("sftp"),
+               QStringLiteral("files copy paste drag drop upload download sftp ftp"),
+               {QStringLiteral("Downloads"), QStringLiteral("Uploads"),
+                QStringLiteral("When a file already exists")});
 }
 
 void PreferencesWindow::buildShortcutsPage()
@@ -1623,14 +1800,34 @@ QWidget *pathPicker(const QString &value, const QString &placeholder, bool folde
                      [edit, changed] { changed(QDir::fromNativeSeparators(edit->text().trimmed())); });
     QObject::connect(browse, &QPushButton::clicked, widget, [widget, edit, folder, changed] {
         const auto start = edit->text().isEmpty() ? QDir::homePath() : edit->text();
-        const auto chosen = folder ? QFileDialog::getExistingDirectory(widget, QString(), start)
-                                   : QFileDialog::getOpenFileName(widget, QString(), start);
+        const auto chosen = folder ? FileDialogs::existingDirectory(widget, QString(), start)
+                                   : FileDialogs::openFileName(widget, QString(), start);
         if (chosen.isEmpty())
             return;
         edit->setText(QDir::toNativeSeparators(chosen));
         changed(chosen);
     });
     return widget;
+}
+
+// "Wait before reconnecting" and "Tries" (reconnect.h), the same rows on every
+// session type's tab, greyed out while its "Reconnect automatically" is off.
+void addReconnectTimingRows(SettingsCard *card, QCheckBox *enabled, int delay, int attempts,
+                            std::function<void(int)> setDelay, std::function<void(int)> setAttempts)
+{
+    auto *delayBox = reconnectDelayBox(delay);
+    card->addRow(QStringLiteral("Wait before reconnecting"), QString(), delayBox,
+                 QStringLiteral("reconnect retry delay wait"));
+    auto *attemptsBox = reconnectAttemptsBox(attempts);
+    card->addRow(QStringLiteral("Tries"),
+                 QStringLiteral("How many times it tries before giving up; 0 keeps trying."),
+                 attemptsBox, QStringLiteral("reconnect retry attempts tries forever"));
+    QObject::connect(delayBox, &QSpinBox::valueChanged, card, std::move(setDelay));
+    QObject::connect(attemptsBox, &QSpinBox::valueChanged, card, std::move(setAttempts));
+    for (QWidget *box : {static_cast<QWidget *>(delayBox), static_cast<QWidget *>(attemptsBox)}) {
+        box->setEnabled(enabled->isChecked());
+        QObject::connect(enabled, &QCheckBox::toggled, box, &QWidget::setEnabled);
+    }
 }
 
 // Trusted host keys in settings/known_hosts: host, key type, and the line.
@@ -1682,7 +1879,7 @@ QTableWidget *editorTable(const QStringList &headers)
     table->verticalHeader()->hide();
     table->horizontalHeader()->setStretchLastSection(true);
     table->setSelectionBehavior(QAbstractItemView::SelectRows);
-    table->setMinimumHeight(220);
+    showRows(table); // five rows, more scroll
     return table;
 }
 }
@@ -1728,13 +1925,9 @@ void PreferencesWindow::buildSshPage()
                       QStringLiteral("When a connection drops (not when you log out)."),
                       autoReconnect, QStringLiteral("retry"));
     bindToggle(this, autoReconnect, update, &SshPreferences::autoReconnect);
-    auto *delay = spinBox(1, 600, current.reconnectDelay, QStringLiteral(" s"));
-    reconnect->addRow(QStringLiteral("Wait before reconnecting"), QString(), delay,
-                      QStringLiteral("retry delay"));
-    bindSpin(this, delay, update, &SshPreferences::reconnectDelay);
-    auto *attempts = spinBox(1, 100, current.reconnectAttempts, QString());
-    reconnect->addRow(QStringLiteral("Attempts"), QString(), attempts, QStringLiteral("retry"));
-    bindSpin(this, attempts, update, &SshPreferences::reconnectAttempts);
+    addReconnectTimingRows(reconnect, autoReconnect, current.reconnectDelay, current.reconnectAttempts,
+                           [update](int v) { update([v](SshPreferences &p) { p.reconnectDelay = v; }); },
+                           [update](int v) { update([v](SshPreferences &p) { p.reconnectAttempts = v; }); });
 
     auto *browser = page->addCard(QStringLiteral("File browser"));
     auto *follow = toggle(current.followTerminalFolder);
@@ -2100,7 +2293,7 @@ void PreferencesWindow::buildWslPage()
 // Certificates and FIDO2 security keys for SSH logons.
 void PreferencesWindow::buildKeysPage()
 {
-    auto *page = addPage(QStringLiteral("ssh-keys"), QStringLiteral("Keys and certificates"),
+    auto *page = addPage(QStringLiteral("ssh-keys"), QStringLiteral("Keys & certificates"),
                          QStringLiteral("dialog-password"), QStyle::SP_DialogApplyButton);
     auto update = PREFERENCE_UPDATER(SshPreferences, sshPreferences, setSshPreferences);
     const auto current = m_mainWindow->sshPreferences();
@@ -2146,8 +2339,8 @@ void PreferencesWindow::buildKerberosPage()
     auto *kerberos = toggle(current.kerberos);
     logon->addRow(QStringLiteral("Log on with Kerberos"),
                   QStringLiteral("SSH servers in your domain accept your Kerberos ticket instead "
-                                 "of a password (GSSAPI). Tried before keys and passwords. "
-                                 "Folders and sessions can turn it on or off."),
+                                 "of a password (GSSAPI). Folders and sessions can turn it on or "
+                                 "off."),
                   kerberos, QStringLiteral("kerberos gssapi active directory domain ticket sso"));
     bindToggle(this, kerberos, update, &SshPreferences::kerberos);
     auto *delegate = toggle(current.kerberosDelegate);
@@ -2158,6 +2351,21 @@ void PreferencesWindow::buildKerberosPage()
     bindToggle(this, delegate, update, &SshPreferences::kerberosDelegate);
     delegate->setEnabled(current.kerberos);
     connect(kerberos, &QAbstractButton::toggled, delegate, &QWidget::setEnabled);
+    auto *order = choiceBox({{QStringLiteral("first"), QStringLiteral("First, before keys and passwords")},
+     {QStringLiteral("after-keys"), QStringLiteral("After keys")},
+     {QStringLiteral("last"), QStringLiteral("Last, after keys and the saved password")}},
+                            current.kerberosOrder);
+    logon->addRow(QStringLiteral("Sequence of authentication"),
+                  QStringLiteral("When Kerberos is tried among the ways to log on: first (the "
+                                 "usual choice in a domain), after your keys, or last, after keys "
+                                 "and the saved password but still before anything that asks you "
+                                 "to type. Sessions can choose their own."),
+                  order, QStringLiteral("kerberos order sequence authentication first last keys"));
+    connect(order, &QComboBox::activated, this, [update, order] {
+        update([&](SshPreferences &p) { p.kerberosOrder = order->currentData().toString(); });
+    });
+    order->setEnabled(current.kerberos);
+    connect(kerberos, &QAbstractButton::toggled, order, &QWidget::setEnabled);
     logon->addWideRow(new AvailabilityNote(&kerberosProblem, [kerberos, delegate](bool available) {
         kerberos->setEnabled(available || kerberos->isChecked());
         delegate->setEnabled(available && kerberos->isChecked());
@@ -2223,8 +2431,11 @@ void PreferencesWindow::buildProxyPage()
     auto *card = page->addCard(QStringLiteral("Proxy for SSH connections"));
     auto *proxy = new ProxyEditor(m_mainWindow->sshPreferences().proxy, QString(), QString());
     card->addRow(QString(), QString(), proxy, QStringLiteral("proxy http socks corporate firewall"));
+    // Saved as you type, but not while the chosen proxy lacks its host or
+    // port (the editor says so under the fields).
     connect(proxy, &ProxyEditor::changed, this, [update, proxy] {
-        update([&](SshPreferences &preferences) { preferences.proxy = proxy->value(); });
+        if (proxy->problem().isEmpty())
+            update([&](SshPreferences &preferences) { preferences.proxy = proxy->value(); });
     });
     connect(proxy, &ProxyEditor::passwordEntered, this, [this, proxy] {
         m_mainWindow->saveProxyPassword(proxy->value(), proxy->password());
@@ -2266,6 +2477,7 @@ void PreferencesWindow::buildVncPage()
         connect(box, &QCheckBox::toggled, this, [update, apply](bool on) {
             update([&](VncOptions &options) { apply(options, on ? 1 : 0); });
         });
+        return box;
     };
 
     addChoice(display, QStringLiteral("Resolution"),
@@ -2310,10 +2522,14 @@ void PreferencesWindow::buildVncPage()
                              "jump host encrypts any server."),
               vncEncryptionChoices(), current.encryption, QStringLiteral("tls vencrypt security vnc"),
               [](VncOptions &o, const QString &v) { o.encryption = v; });
-    addSwitch(connection, QStringLiteral("Reconnect automatically"),
-              QStringLiteral("If the network drops, tries again for about half a minute."),
-              current.autoReconnect, QStringLiteral("reconnect network drop vnc"),
-              [](VncOptions &o, int v) { o.autoReconnect = v; });
+    auto *vncReconnect = addSwitch(connection, QStringLiteral("Reconnect automatically"),
+                                   QStringLiteral("When the connection drops (not when the server "
+                                                  "closes the session)."),
+                                   current.autoReconnect, QStringLiteral("reconnect network drop vnc"),
+                                   [](VncOptions &o, int v) { o.autoReconnect = v; });
+    addReconnectTimingRows(connection, vncReconnect, current.reconnectDelay, current.reconnectAttempts,
+                           [update](int v) { update([v](VncOptions &o) { o.reconnectDelay = v; }); },
+                           [update](int v) { update([v](VncOptions &o) { o.reconnectAttempts = v; }); });
     connection->addRow(QStringLiteral("Per session"),
                        QStringLiteral("Every VNC session can override these in its own settings "
                                       "(Sessions → Edit…), and can also listen for "
@@ -2323,7 +2539,7 @@ void PreferencesWindow::buildVncPage()
 
 void PreferencesWindow::buildRshPage()
 {
-    auto *page = addPage(QStringLiteral("rlogin"), QStringLiteral("Rlogin and RSH"),
+    auto *page = addPage(QStringLiteral("rlogin"), QStringLiteral("Rlogin & RSH"),
                          QStringLiteral("utilities-terminal"), QStyle::SP_ComputerIcon);
     const auto current = loadRshDefaults();
     auto update = [](auto change) {
@@ -2496,7 +2712,7 @@ void PreferencesWindow::buildRunCommandPage()
     connect(terminal, &QCheckBox::toggled, this,
             [update](bool on) { update([&](RunCommandPreferences &p) { p.terminal = on; }); });
 
-    auto *kept = page->addCard(QStringLiteral("Results and history"));
+    auto *kept = page->addCard(QStringLiteral("Results & history"));
     auto *output = spinBox(16, 64 * 1024, current.outputKb, QStringLiteral(" KB"));
     kept->addRow(QStringLiteral("Output kept per host"),
                  QStringLiteral("Beyond this, a host's output is read and left out."), output,
@@ -2611,6 +2827,7 @@ void PreferencesWindow::buildRdpPage()
         connect(box, &QCheckBox::toggled, this, [update, apply](bool on) {
             update([&](RdpOptions &options) { apply(options, on ? 1 : 0); });
         });
+        return box;
     };
     auto addText = [this, update](auto *card, const QString &title, const QString &description,
                                   const QString &value, const QString &placeholder,
@@ -2690,11 +2907,14 @@ void PreferencesWindow::buildRdpPage()
                              "Windows usually requires NLA, which needs it up front)."),
               current.askCredentials, QStringLiteral("credentials login logon prompt password"),
               [](RdpOptions &o, int v) { o.askCredentials = v; });
-    addSwitch(connection, QStringLiteral("Reconnect automatically"),
-              QStringLiteral("If the network drops, tries again for about half a minute and "
-                             "resumes the same remote session."),
-              current.autoReconnect, QStringLiteral("reconnect network drop resume"),
-              [](RdpOptions &o, int v) { o.autoReconnect = v; });
+    auto *rdpReconnect = addSwitch(connection, QStringLiteral("Reconnect automatically"),
+                                   QStringLiteral("When the network drops, it resumes the same "
+                                                  "remote session."),
+                                   current.autoReconnect, QStringLiteral("reconnect network drop resume"),
+                                   [](RdpOptions &o, int v) { o.autoReconnect = v; });
+    addReconnectTimingRows(connection, rdpReconnect, current.reconnectDelay, current.reconnectAttempts,
+                           [update](int v) { update([v](RdpOptions &o) { o.reconnectDelay = v; }); },
+                           [update](int v) { update([v](RdpOptions &o) { o.reconnectAttempts = v; }); });
     addSwitch(connection, QStringLiteral("Administrator session"),
               QStringLiteral("Connects to the server's console session (mstsc /admin)."),
               current.adminSession, QStringLiteral("console admin"),
@@ -2720,7 +2940,7 @@ void PreferencesWindow::buildRdpPage()
     // Trusted certificates: FreeRDP keeps one PEM file per host:port.
     auto *certificates = page->addCard(QStringLiteral("Trusted certificates"));
     auto *list = new QListWidget;
-    list->setMinimumHeight(140);
+    showRows(list); // five rows, more scroll
     list->setSelectionMode(QAbstractItemView::ExtendedSelection);
     const QString folder = portableFilePath(QStringLiteral("settings/rdp/server"));
     auto reload = [list, folder] {
@@ -2758,7 +2978,7 @@ void PreferencesWindow::buildRdpPage()
 
 void PreferencesWindow::buildSftpPage()
 {
-    auto *page = addPage(QStringLiteral("sftp"), QStringLiteral("Files and transfers"),
+    auto *page = addPage(QStringLiteral("sftp"), QStringLiteral("Files & transfers"),
                          QStringLiteral("folder-remote"), QStyle::SP_DirLinkIcon);
     auto update = PREFERENCE_UPDATER(SftpPreferences, sftpPreferences, setSftpPreferences);
     const auto current = m_mainWindow->sftpPreferences();
@@ -2835,14 +3055,15 @@ void PreferencesWindow::buildSftpPage()
     bindChoice(this, conflict, update, &SftpPreferences::conflict);
 
     auto *editing = page->addCard(QStringLiteral("Editing remote files"));
-    auto *editor = new QLineEdit(current.editor);
-    editor->setPlaceholderText(QStringLiteral("The system's program for each file type"));
+    auto *editor = new ProgramPicker(ProgramPicker::Kind::TextEditor, current.editor,
+                                     QStringLiteral("The system's program for each file type"));
     editing->addRow(QStringLiteral("Editor"),
                     QStringLiteral("Edit (or double-click a file) opens it here; each save uploads "
-                                   "it again. For example: code --wait, notepad++, gedit."),
-                    editor, QStringLiteral("edit editor open text notepad code"));
-    connect(editor, &QLineEdit::editingFinished, this, [update, editor] {
-        update([&](SftpPreferences &v) { v.editor = editor->text().trimmed(); });
+                                   "it again. Choose a program found on this computer, browse for "
+                                   "one, or type a command with its arguments."),
+                    editor, QStringLiteral("edit editor open text notepad code program"));
+    connect(editor, &ProgramPicker::changed, this, [update, editor] {
+        update([&](SftpPreferences &v) { v.editor = editor->value(); });
     });
 }
 
@@ -2980,21 +3201,25 @@ void PreferencesWindow::buildSecurityPage()
     auto *toSystem = new QPushButton(QStringLiteral("Copy to the system store"));
     toSystem->setEnabled(systemAvailable);
     copies->addRow(QStringLiteral("Vault → system store"),
-                   QStringLiteral("Every password in the vault (unlocks it if needed)."),
+                   QStringLiteral("Every password in the vault (unlocks it if needed). Shows first "
+                                  "what is new and what differs; nothing is replaced unless you tick it."),
                    toSystem, QStringLiteral("migrate export"));
     auto *toVault = new QPushButton(QStringLiteral("Copy to the vault"));
     toVault->setEnabled(systemAvailable);
     copies->addRow(QStringLiteral("System store → vault"),
-                   QStringLiteral("The saved sessions' passwords, so they travel with the folder."),
+                   QStringLiteral("The saved sessions' passwords, so they travel with the folder. "
+                                  "Shows first what is new and what differs."),
                    toVault, QStringLiteral("migrate import"));
     toSystem->setObjectName(QStringLiteral("copyToSystemStore"));
     toVault->setObjectName(QStringLiteral("copyToVault"));
     storeNote->check();
     connect(toSystem, &QPushButton::clicked, this, [this, mainWindow = m_mainWindow] {
-        QMessageBox::information(this, QStringLiteral("Copy Passwords"), mainWindow->copyPasswords(true));
+        if (const auto result = mainWindow->copyPasswords(true); !result.isEmpty())
+            QMessageBox::information(this, QStringLiteral("Copy Passwords"), result);
     });
     connect(toVault, &QPushButton::clicked, this, [this, mainWindow = m_mainWindow] {
-        QMessageBox::information(this, QStringLiteral("Copy Passwords"), mainWindow->copyPasswords(false));
+        if (const auto result = mainWindow->copyPasswords(false); !result.isEmpty())
+            QMessageBox::information(this, QStringLiteral("Copy Passwords"), result);
     });
 }
 
@@ -3056,7 +3281,7 @@ void PreferencesWindow::buildLoggingPage()
 void PreferencesWindow::buildSnippetsPage()
 {
     auto *mainWindow = m_mainWindow;
-    auto *page = addPage(QStringLiteral("snippets"), QStringLiteral("Commands and broadcast"),
+    auto *page = addPage(QStringLiteral("snippets"), QStringLiteral("Commands & broadcast"),
                          QStringLiteral("insert-text"), QStyle::SP_FileDialogListView);
 
     auto *commands = page->addCard(QStringLiteral("Commands"));
@@ -3066,15 +3291,11 @@ void PreferencesWindow::buildSnippetsPage()
                                     "Sessions → Send Snippet and the terminal's right-click menu. A "
                                     "command can also run a saved script."),
                      nullptr, QStringLiteral("snippets commands macro text"));
-    auto *confirm = toggle(loadCommandsPreferences().confirmMultiline);
-    commands->addRow(QStringLiteral("Ask before sending several lines"),
-                     QStringLiteral("A command with more than one line shows them first."), confirm,
-                     QStringLiteral("confirm multiline paste"));
-    connect(confirm, &QCheckBox::toggled, this, [](bool on) {
-        auto value = loadCommandsPreferences();
-        value.confirmMultiline = on;
-        saveCommandsPreferences(value);
-    });
+    addLinkRow(commands, QStringLiteral("Ask before sending several lines"),
+               QStringLiteral("The same setting as asking before a paste of several lines."),
+               QStringLiteral("Workspace → Mouse & clipboard"), QStringLiteral("mouse"),
+               QStringLiteral("confirm multiline commands snippets edit"),
+               {QStringLiteral("Confirm multi-line paste")});
     Q_UNUSED(mainWindow);
 
     auto *broadcast = page->addCard(QStringLiteral("Broadcast"));
@@ -3228,7 +3449,7 @@ void PreferencesWindow::buildSessionListPage()
                                      setSessionListPreferences);
     const auto current = m_mainWindow->sessionListPreferences();
 
-    auto *folders = page->addCard(QStringLiteral("Pinned and recent"));
+    auto *folders = page->addCard(QStringLiteral("Pinned & recent"));
     auto *pinned = toggle(current.showPinned);
     folders->addRow(QStringLiteral("Show Pinned"),
                     QStringLiteral("Sessions pinned with right-click → Pin, at the top of the list."),
@@ -3266,6 +3487,15 @@ void PreferencesWindow::buildSessionListPage()
                                    "keep their own state."),
                     foldersAtStart, QStringLiteral("expand collapse open closed remember tree"));
     bindChoice(this, foldersAtStart, update, &SessionListPreferences::foldersAtStart);
+
+    auto *windows = page->addCard(QStringLiteral("Session settings windows"));
+    auto *revert = toggle(current.showRevertButtons);
+    windows->addRow(QStringLiteral("Show a button to go back to the inherited value"),
+                    QStringLiteral("In a session's or folder's settings, a setting you changed gets "
+                                   "a small ↺ button that returns it to the value from the "
+                                   "Preferences or the folder. For windows opened from now on."),
+                    revert, QStringLiteral("revert reset inherited default button session"));
+    bindToggle(this, revert, update, &SessionListPreferences::showRevertButtons);
 
     auto *search = page->addCard(QStringLiteral("Search"));
     auto *showSearch = toggle(current.showSearch);
@@ -3420,7 +3650,7 @@ void PreferencesWindow::buildDataPage()
     });
 
     auto *list = new QListWidget;
-    list->setMinimumHeight(160);
+    showRows(list); // five rows, more scroll
     auto reload = [list] {
         list->clear();
         for (const auto &name : listBackups())

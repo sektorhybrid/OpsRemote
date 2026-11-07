@@ -2,6 +2,10 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "vncoptions.h"
+#include "formcard.h"
+#include "inheritance.h"
+#include "reconnect.h"
+#include "preferences.h"
 #include "appdirs.h"
 
 #include <QCheckBox>
@@ -11,18 +15,14 @@
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QLineEdit>
-#include <QSaveFile>
 #include <QSpinBox>
 #include <QTabWidget>
+#include <QTabBar>
 #include <QVBoxLayout>
 
 #include <yaml-cpp/yaml.h>
 
 namespace {
-QString settingsPath()
-{
-    return portableFilePath(QStringLiteral("settings/settings.yaml"));
-}
 
 QString labelFor(const RdpChoices &choices, const QString &value)
 {
@@ -58,6 +58,10 @@ VncOptions VncOptions::overriddenBy(const VncOptions &session) const
     number(result.remoteCursor, session.remoteCursor);
     number(result.clipboard, session.clipboard);
     number(result.autoReconnect, session.autoReconnect);
+    if (session.reconnectDelay > 0)
+        result.reconnectDelay = session.reconnectDelay;
+    if (session.reconnectAttempts >= 0)
+        result.reconnectAttempts = session.reconnectAttempts;
     number(result.highDpi, session.highDpi);
     number(result.allMonitors, session.allMonitors);
     // Session only.
@@ -78,6 +82,8 @@ VncOptions VncOptions::builtIn()
     options.remoteCursor = 1;
     options.clipboard = 1;
     options.autoReconnect = 1;
+    options.reconnectDelay = DefaultReconnectDelay;
+    options.reconnectAttempts = DefaultReconnectAttempts;
     options.highDpi = 1;
     options.allMonitors = 0;
     return options;
@@ -144,6 +150,7 @@ VncOptions vncOptionsFromYaml(const YAML::Node &node)
         readSwitch("remote_cursor", options.remoteCursor);
         readSwitch("clipboard", options.clipboard);
         readSwitch("auto_reconnect", options.autoReconnect);
+        readReconnectTiming(node, options.reconnectDelay, options.reconnectAttempts);
         readSwitch("high_dpi", options.highDpi);
         readSwitch("all_monitors", options.allMonitors);
         readText("ssh_tunnel", options.sshTunnel);
@@ -176,6 +183,7 @@ void vncOptionsToYaml(const VncOptions &options, YAML::Node &node)
     flag("remote_cursor", options.remoteCursor);
     flag("clipboard", options.clipboard);
     flag("auto_reconnect", options.autoReconnect);
+    writeReconnectTiming(node, options.reconnectDelay, options.reconnectAttempts);
     flag("high_dpi", options.highDpi);
     flag("all_monitors", options.allMonitors);
     flag("listen", options.listen);
@@ -189,7 +197,7 @@ VncOptions loadVncDefaults()
 {
     try {
         auto defaults = VncOptions::builtIn().overriddenBy(
-            vncOptionsFromYaml(YAML::LoadFile(settingsPath().toStdString())["vnc"]));
+            vncOptionsFromYaml(loadPreferencesSection("vnc")));
         return defaults;
     } catch (const YAML::Exception &) {
         return VncOptions::builtIn();
@@ -198,16 +206,6 @@ VncOptions loadVncDefaults()
 
 void saveVncDefaults(const VncOptions &options)
 {
-    const auto path = settingsPath();
-    if (!QDir().mkpath(QFileInfo(path).absolutePath()))
-        return;
-    YAML::Node settings;
-    try {
-        settings = YAML::LoadFile(path.toStdString());
-    } catch (const YAML::Exception &) {
-    }
-    if (!settings.IsMap())
-        settings = YAML::Node(YAML::NodeType::Map);
     // Defaults never include the session-only fields.
     VncOptions defaults = options;
     defaults.listen = -1;
@@ -216,18 +214,7 @@ void saveVncDefaults(const VncOptions &options)
     defaults.repeaterId.clear();
     YAML::Node node(YAML::NodeType::Map);
     vncOptionsToYaml(defaults, node);
-    settings["vnc"] = node;
-    YAML::Emitter emitter;
-    emitter << settings;
-    QSaveFile file(path);
-    if (!file.open(QIODevice::WriteOnly))
-        return;
-    QByteArray contents(emitter.c_str());
-    contents.append('\n');
-    if (file.write(contents) == contents.size())
-        file.commit();
-    else
-        file.cancelWriting();
+    savePreferencesSection("vnc", node);
 }
 
 VncOptionsEditor::VncOptionsEditor(const VncOptions &value, const VncOptions &defaults,
@@ -237,9 +224,10 @@ VncOptionsEditor::VncOptionsEditor(const VncOptions &value, const VncOptions &de
     const auto makeBox = [this](const RdpChoices &choices, const QString &current,
                                 const QString &defaultValue) {
         auto *box = new QComboBox(this);
-        box->addItem(QStringLiteral("Default (%1)").arg(labelFor(choices, defaultValue)), QString());
+        addInheritedItem(box, QString(labelFor(choices, defaultValue)), QString());
         for (const auto &choice : choices)
-            box->addItem(choice.second, choice.first);
+            if (choice.first != defaultValue) // listed once, as the inherited one
+                box->addItem(choice.second, choice.first);
         box->setCurrentIndex(qMax(0, box->findData(current)));
         connect(box, &QComboBox::currentIndexChanged, this, &VncOptionsEditor::changed);
         return box;
@@ -248,6 +236,7 @@ VncOptionsEditor::VncOptionsEditor(const VncOptions &value, const VncOptions &de
         auto *box = new QCheckBox(text, this);
         box->setToolTip(tip);
         box->setChecked((own >= 0 ? own : fallback) == 1);
+        box->setProperty("inheritedOn", fallback == 1); // applyInheritance()
         connect(box, &QCheckBox::toggled, this, &VncOptionsEditor::changed);
         return box;
     };
@@ -312,28 +301,56 @@ VncOptionsEditor::VncOptionsEditor(const VncOptions &value, const VncOptions &de
     layout->setContentsMargins(0, 0, 0, 0);
     auto *tabs = new QTabWidget(this);
     layout->addWidget(tabs);
+    // A tab of light cards (formcard.h).
     const auto section = [this, tabs](const QString &title) {
         auto *page = new QWidget(this);
-        auto *form = new QFormLayout(page);
+        auto *layout = new QVBoxLayout(page);
+        layout->setSpacing(6);
         tabs->addTab(page, title);
-        return form;
+        return layout;
     };
-    auto *display = section(QStringLiteral("Display"));
+    const auto finish = [this](QVBoxLayout *page) {
+        page->addStretch();
+        alignFormLabels(this); // all tabs alike
+    };
+    auto *displayPage = section(QStringLiteral("Display"));
+    auto *display = addFormCard(displayPage, QStringLiteral("General"), this);
     display->addRow(QStringLiteral("Resolution:"), m_resolution);
     display->addRow(QStringLiteral("Colours:"), m_colorDepth);
     display->addRow(QStringLiteral("Quality:"), m_quality);
     display->addRow(QString(), m_highDpi);
     display->addRow(QString(), m_allMonitors);
-    auto *resources = section(QStringLiteral("Local resources"));
+    finish(displayPage);
+    auto *resourcesPage = section(QStringLiteral("Local resources"));
+    auto *resources = addFormCard(resourcesPage, QStringLiteral("General"), this);
     resources->addRow(QString(), m_remoteCursor);
     resources->addRow(QString(), m_clipboard);
-    auto *connection = section(QStringLiteral("Connection"));
-    connection->addRow(QStringLiteral("Encryption:"), m_encryption);
+    finish(resourcesPage);
+    auto *connectionPage = section(QStringLiteral("Connection"));
+    // The same cards as every session type: General, Logon, then VNC's own.
+    auto *connection = addFormCard(connectionPage, QStringLiteral("General"), this);
     connection->addRow(QString(), m_autoReconnect);
+    // The session type's wait and tries, inherited until set here.
+    m_reconnectDelay = reconnectDelayBox(value.reconnectDelay, m_defaults.reconnectDelay);
+    m_reconnectAttempts = reconnectAttemptsBox(value.reconnectAttempts, m_defaults.reconnectAttempts);
+    connection->addRow(QStringLiteral("Wait:"), m_reconnectDelay);
+    connection->addRow(QStringLiteral("Tries:"), m_reconnectAttempts);
+    for (QWidget *box : {static_cast<QWidget *>(m_reconnectDelay), static_cast<QWidget *>(m_reconnectAttempts)}) {
+        box->setEnabled(m_autoReconnect->isChecked());
+        connect(m_autoReconnect, &QCheckBox::toggled, box, &QWidget::setEnabled);
+    }
+    connection = addFormCard(connectionPage, QStringLiteral("Logon"), this);
+    connection->addRow(QStringLiteral("Encryption:"), m_encryption);
+    connection = addFormCard(connectionPage, QStringLiteral("Listening"), this);
     connection->addRow(QString(), m_listen);
-    connection->addRow(QStringLiteral("Listen on port:"), m_listenPort);
-    connection->addRow(QStringLiteral("Repeater:"), m_repeater);
-    connection->addRow(QStringLiteral("Repeater ID:"), m_repeaterId);
+    connection->addRow(QStringLiteral("Port:"), m_listenPort);
+    connection = addFormCard(connectionPage, QStringLiteral("Repeater"), this);
+    connection->addRow(QStringLiteral("Address:"), m_repeater);
+    connection->addRow(QStringLiteral("ID:"), m_repeaterId);
+    finish(connectionPage);
+    // Connection first, as in every session type's window.
+    tabs->tabBar()->moveTab(tabs->indexOf(connectionPage->parentWidget()), 0);
+    tabs->setCurrentIndex(0);
 }
 
 VncOptions VncOptionsEditor::value() const
@@ -352,6 +369,8 @@ VncOptions VncOptionsEditor::value() const
     options.remoteCursor = switchValue(m_remoteCursor, m_defaults.remoteCursor);
     options.clipboard = switchValue(m_clipboard, m_defaults.clipboard);
     options.autoReconnect = switchValue(m_autoReconnect, m_defaults.autoReconnect);
+    options.reconnectDelay = m_reconnectDelay->value();
+    options.reconnectAttempts = m_reconnectAttempts->value();
     options.highDpi = switchValue(m_highDpi, m_defaults.highDpi);
     options.allMonitors = switchValue(m_allMonitors, m_defaults.allMonitors);
     options.listen = m_listen->isChecked() ? 1 : -1;
