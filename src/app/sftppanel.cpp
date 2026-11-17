@@ -2,6 +2,8 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "sftppanel.h"
+#include "transfers.h"
+#include "statusindicators.h"
 #include "filedialogs.h"
 #include "sftpsync.h"
 #include "icons.h"
@@ -35,6 +37,7 @@
 #include <QPushButton>
 #include <QStackedWidget>
 #include <QStandardPaths>
+#include <QScrollBar>
 #include <QStyle>
 #include <QToolButton>
 #include <QTreeWidget>
@@ -42,7 +45,9 @@
 #include <QUrl>
 #include <QVBoxLayout>
 
+#include <algorithm>
 #include <functional>
+#include <memory>
 
 namespace {
 constexpr int PathRole = Qt::UserRole;
@@ -55,7 +60,6 @@ constexpr int IsSymlinkRole = Qt::UserRole + 4;
 constexpr int IsPlaceRole = Qt::UserRole + 5;
 // Remote paths dragged inside one Files pane (moved on the server).
 const QString RemotePathsMime = QStringLiteral("application/x-opsremote-remote-paths");
-constexpr int ProgressScale = 1000;
 constexpr int MaximumListedErrors = 15;
 
 enum Column { NameColumn, SizeColumn, ModifiedColumn };
@@ -150,6 +154,7 @@ class SftpFileView final : public QTreeWidget
 {
 public:
     using QTreeWidget::QTreeWidget;
+    using QTreeWidget::sizeHintForColumn; // for SftpPanel::contentsWidth()
 
     // Returns whether the key is handled; only performs it when execute is set.
     std::function<bool(int, Qt::KeyboardModifiers, bool execute)> keyHandler;
@@ -261,6 +266,12 @@ protected:
 SftpPanel::SftpPanel(QWidget *parent)
     : QWidget(parent)
 {
+    // Transfers waiting for others start once those have ended (queued: not
+    // in the middle of the list's own change).
+    connect(TransferList::instance(), &TransferList::changed, this, [this] {
+        if (!m_waiting.isEmpty())
+            startWaiting();
+    }, Qt::QueuedConnection);
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(4, 4, 4, 4);
     layout->setSpacing(4);
@@ -269,6 +280,9 @@ SftpPanel::SftpPanel(QWidget *parent)
     // A style sheet rather than setFont(), so the title follows changes to
     // the application's interface font.
     m_titleLabel->setStyleSheet(QStringLiteral("font-weight: bold;"));
+    // The first row: as tall as the tab strip beside it (see panelRowHeight).
+    m_titleLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    m_titleLabel->setFixedHeight(panelRowHeight(this));
     layout->addWidget(m_titleLabel);
 
     auto *navigation = new QHBoxLayout;
@@ -287,9 +301,9 @@ SftpPanel::SftpPanel(QWidget *parent)
     m_homeButton = addButton("go-home", QStyle::SP_DirHomeIcon, QStringLiteral("Home folder"));
     m_refreshButton = addButton("view-refresh", QStyle::SP_BrowserReload,
                                 QStringLiteral("Refresh (F5)"));
-    auto *syncButton = addButton("folder-sync", QStyle::SP_DialogApplyButton,
+    m_syncButton = addButton("folder-sync", QStyle::SP_DialogApplyButton,
                                  QStringLiteral("Sync Folders… (like rsync: copy only what changed)"));
-    connect(syncButton, &QToolButton::clicked, this, &SftpPanel::openSync);
+    connect(m_syncButton, &QToolButton::clicked, this, &SftpPanel::openSync);
     m_pathEdit = new QLineEdit(this);
     m_pathEdit->setPlaceholderText(QStringLiteral("Remote path"));
     navigation->addWidget(m_pathEdit, 1);
@@ -310,16 +324,22 @@ SftpPanel::SftpPanel(QWidget *parent)
     layout->addWidget(m_messageLabel);
 
     m_stack = new QStackedWidget(this);
-    m_statusLabel = new QLabel(m_stack);
-    m_statusLabel->setAlignment(Qt::AlignCenter);
-    m_statusLabel->setWordWrap(true);
-    m_statusLabel->setStyleSheet(QStringLiteral("color: palette(placeholder-text);"));
-    m_stack->addWidget(m_statusLabel);
 
     m_view = new SftpFileView(m_stack);
     m_view->setColumnCount(3);
     m_view->setHeaderLabels({QStringLiteral("Name"), QStringLiteral("Size"),
                              QStringLiteral("Modified")});
+    // "Connecting…", "Disconnected." and the like show in the middle of the
+    // empty list, which keeps its frame and columns: the panel looks the same
+    // with or without files.
+    auto *statusLayout = new QVBoxLayout(m_view->viewport());
+    statusLayout->setContentsMargins(12, 12, 12, 12);
+    m_statusLabel = new QLabel(m_view->viewport());
+    m_statusLabel->setAlignment(Qt::AlignCenter);
+    m_statusLabel->setWordWrap(true);
+    m_statusLabel->setStyleSheet(QStringLiteral("color: palette(placeholder-text);"));
+    statusLayout->addWidget(m_statusLabel);
+    m_statusLabel->hide();
     m_view->setRootIsDecorated(false);
     m_view->setUniformRowHeights(true);
     m_view->setSelectionMode(QAbstractItemView::ExtendedSelection);
@@ -362,34 +382,6 @@ SftpPanel::SftpPanel(QWidget *parent)
     });
     connect(m_view, &QWidget::customContextMenuRequested, this, &SftpPanel::showContextMenu);
 
-    m_progressFooter = new QWidget(this);
-    auto *footerLayout = new QVBoxLayout(m_progressFooter);
-    footerLayout->setContentsMargins(0, 4, 0, 0);
-    footerLayout->setSpacing(2);
-    auto *footerTop = new QHBoxLayout;
-    m_progressLabel = new QLabel(m_progressFooter);
-    m_progressLabel->setMinimumWidth(1);
-    footerTop->addWidget(m_progressLabel, 1);
-    auto *cancelButton = new QToolButton(m_progressFooter);
-    m_buttonIcons.append({cancelButton, QStringLiteral("process-stop"), QStyle::SP_DialogCancelButton});
-    cancelButton->setToolTip(QStringLiteral("Cancel the transfer and any queued transfers"));
-    cancelButton->setAutoRaise(true);
-    footerTop->addWidget(cancelButton);
-    footerLayout->addLayout(footerTop);
-    m_progressBar = new QProgressBar(m_progressFooter);
-    m_progressBar->setRange(0, ProgressScale);
-    m_progressBar->setTextVisible(true);
-    footerLayout->addWidget(m_progressBar);
-    m_progressDetail = new QLabel(m_progressFooter);
-    m_progressDetail->setStyleSheet(QStringLiteral("color: palette(placeholder-text);"));
-    footerLayout->addWidget(m_progressDetail);
-    m_progressFooter->hide();
-    layout->addWidget(m_progressFooter);
-    connect(cancelButton, &QToolButton::clicked, this, [this] {
-        if (m_session)
-            m_session->cancelTransfers();
-    });
-
     setSession(nullptr);
     showStatus(QStringLiteral("Connecting…"));
     refreshIcons();
@@ -397,6 +389,7 @@ SftpPanel::SftpPanel(QWidget *parent)
 
 void SftpPanel::refreshIcons()
 {
+    m_titleLabel->setFixedHeight(panelRowHeight(this)); // the look's font may have changed
     for (const auto &button : std::as_const(m_buttonIcons)) {
         if (button.button)
             button.button->setIcon(themedIcon(button.name, button.fallback));
@@ -407,6 +400,32 @@ void SftpPanel::refreshIcons()
                                                item->data(0, IsDirectoryRole).toBool(),
                                                item->data(0, IsSymlinkRole).toBool()));
     }
+}
+
+// Without a session: the panel's look with a message in the list, for
+// tabs that have no files to show.
+int SftpPanel::contentsWidth() const
+{
+    if (m_view->topLevelItemCount() == 0)
+        return 0;
+    // Measured, not resized: the user's column widths stay as they are.
+    int width = 0;
+    for (int column = 0; column < m_view->columnCount(); ++column) {
+        if (!m_view->isColumnHidden(column))
+            width += qMax(m_view->sizeHintForColumn(column), m_view->header()->sectionSizeHint(column));
+    }
+    width += 2 * m_view->frameWidth() + 8;
+    if (m_view->verticalScrollBar()->isVisible())
+        width += m_view->verticalScrollBar()->width();
+    return width + this->width() - m_view->width();
+}
+
+void SftpPanel::showPlaceholder(const QString &title, const QString &message)
+{
+    setDisconnectedText(message);
+    setSession(nullptr);
+    m_titleLabel->setText(title);
+    m_titleLabel->setToolTip({});
 }
 
 void SftpPanel::setTitle(const QString &title)
@@ -445,7 +464,8 @@ void SftpPanel::setSession(RemoteFileSession *session)
     m_session = session;
     m_ready = false;
     resetTransfers();
-    for (auto *widget : std::initializer_list<QWidget *>{m_upButton, m_homeButton,
+    endWaiting();
+    for (auto *widget : std::initializer_list<QWidget *>{m_upButton, m_homeButton, m_syncButton,
                                                          m_refreshButton, m_pathEdit})
         widget->setEnabled(false);
     if (!session) {
@@ -466,7 +486,7 @@ void SftpPanel::setSession(RemoteFileSession *session)
             m_protocol = m_session->fileProtocol();
             setTitle(m_title);
         }
-        for (auto *widget : std::initializer_list<QWidget *>{m_upButton, m_homeButton,
+        for (auto *widget : std::initializer_list<QWidget *>{m_upButton, m_homeButton, m_syncButton,
                                                              m_refreshButton, m_pathEdit})
             widget->setEnabled(true);
         qInfo("SFTP: ready, home %s", qUtf8Printable(homePath));
@@ -488,8 +508,10 @@ void SftpPanel::setSession(RemoteFileSession *session)
 void SftpPanel::showStatus(const QString &text)
 {
     qInfo("SFTP: %s", qUtf8Printable(text));
+    m_view->clear();
     m_statusLabel->setText(text);
-    m_stack->setCurrentWidget(m_statusLabel);
+    m_statusLabel->show();
+    m_stack->setCurrentWidget(m_view);
 }
 
 void SftpPanel::showMessage(const QString &text, bool error)
@@ -527,7 +549,7 @@ void SftpPanel::populate(const QString &path, const QList<SftpEntry> &entries,
     if (!error.isEmpty()) {
         // A folder remembered from before a reconnect may be gone; fall back
         // to the home folder.
-        if (m_stack->currentWidget() != m_view && path != m_homePath) {
+        if (!m_statusLabel->isHidden() && path != m_homePath) { // nothing listed yet
             m_currentPath.clear();
             navigate(m_homePath);
         }
@@ -592,6 +614,7 @@ void SftpPanel::populate(const QString &path, const QList<SftpEntry> &entries,
             item->setSelected(true);
     }
     m_view->setSortingEnabled(true);
+    m_statusLabel->hide();
     m_stack->setCurrentWidget(m_view);
 }
 
@@ -728,8 +751,8 @@ void SftpPanel::uploadPaths(const QStringList &localPaths, const QString &remote
 {
     if (!m_session || !m_ready || localPaths.isEmpty() || remoteDirectory.isEmpty())
         return;
-    const int jobId = m_session->upload(localPaths, remoteDirectory);
-    m_jobUploads.insert(jobId, true);
+    startChecked({true, localPaths, remoteDirectory, std::nullopt},
+                 [this](int jobId) { m_jobUploads.insert(jobId, true); });
 }
 
 QString SftpPanel::uploadInto(const QStringList &localPaths, const QString &remoteDirectory)
@@ -941,8 +964,8 @@ void SftpPanel::downloadSelected()
     if (directory.isEmpty() || !m_session)
         return;
     m_lastDownloadDirectory = directory;
-    const int jobId = m_session->download(paths, directory);
-    m_jobUploads.insert(jobId, false);
+    startChecked({false, paths, directory, std::nullopt},
+                 [this](int jobId) { m_jobUploads.insert(jobId, false); });
 }
 
 void SftpPanel::createFolder()
@@ -1057,23 +1080,49 @@ void SftpPanel::copySelectedPaths()
     QApplication::clipboard()->setText(selectedPaths().join(QLatin1Char('\n')));
 }
 
+// Progress goes to the transfer list (the tab's strip, Transfers at the
+// bottom right), one entry per job, with the speed and files done.
 void SftpPanel::updateProgress(int jobId, const QString &currentFile, quint64 bytesDone,
                                quint64 bytesTotal, int filesDone, int filesTotal, int queuedJobs)
 {
-    const bool upload = m_jobUploads.value(jobId, true);
-    m_progressFooter->show();
-    m_progressLabel->setText(
-        currentFile.isEmpty()
-            ? (upload ? QStringLiteral("Preparing upload…") : QStringLiteral("Preparing download…"))
-            : QStringLiteral("%1 %2").arg(upload ? QStringLiteral("Uploading")
-                                                 : QStringLiteral("Downloading"),
-                                          currentFile));
-    m_progressLabel->setToolTip(currentFile);
-
-    const int value = bytesTotal > 0
-        ? static_cast<int>(bytesDone * ProgressScale / bytesTotal)
-        : (filesTotal > 0 ? filesDone * ProgressScale / filesTotal : 0);
-    m_progressBar->setValue(value);
+    // Jobs started elsewhere (Sync Folders) are known to the session.
+    const bool upload = m_jobUploads.contains(jobId) ? m_jobUploads.value(jobId)
+                                                     : m_session && m_session->isUploadJob(jobId);
+    auto *transfers = TransferList::instance();
+    if (!m_transferIds.contains(jobId)) {
+        const QPointer<SftpPanel> panel(this);
+        m_transferIds.insert(jobId, transfers->start(
+                                        m_ownerPage ? m_ownerPage.data() : this,
+                                        currentFile.isEmpty() ? (upload ? QStringLiteral("Preparing upload…")
+                                                                        : QStringLiteral("Preparing download…"))
+                                                              : currentFile,
+                                        upload,
+                                        [panel, jobId] {
+                                            if (panel && panel->m_session)
+                                                panel->m_session->cancelJob(jobId);
+                                        },
+                                        QStringLiteral("Cancel this transfer")));
+        const int id = m_transferIds.value(jobId);
+        transfers->setPause(id, [panel](bool paused) {
+            if (panel && panel->m_session)
+                panel->m_session->setTransfersPaused(paused);
+        });
+        // Retry: the same files again from the beginning, on the tab's
+        // connection then (also after a reconnect). Not for files opened for
+        // editing: those go with their editor.
+        const auto job = m_session ? m_session->job(jobId) : std::nullopt;
+        if (job && !m_editDownloads.contains(jobId) && !m_editUploads.contains(jobId)) {
+            transfers->setRetry(id, [panel, job = *job] {
+                if (panel && panel->m_session)
+                    panel->startChecked(job, [panel, upload = job.upload](int jobId) {
+                        panel->m_jobUploads.insert(jobId, upload);
+                    });
+            });
+        }
+        // What it writes, so a transfer of the same file elsewhere asks first.
+        if (job)
+            transfers->setTargets(id, targetsOf(*job));
+    }
 
     // Smoothed transfer rate, sampled at most twice a second.
     if (jobId != m_speedJobId) {
@@ -1090,14 +1139,17 @@ void SftpPanel::updateProgress(int jobId, const QString &currentFile, quint64 by
         m_speedTimer.restart();
     }
 
-    QStringList details{QStringLiteral("%1 of %2").arg(formatSize(bytesDone),
-                                                       formatSize(bytesTotal)),
-                        QStringLiteral("%1/%2 files").arg(filesDone).arg(filesTotal)};
+    QStringList details{QStringLiteral("%1 of %2").arg(formatSize(bytesDone), formatSize(bytesTotal))};
+    if (filesTotal > 1)
+        details.append(QStringLiteral("%1/%2 files").arg(filesDone).arg(filesTotal));
     if (m_bytesPerSecond > 0)
         details.append(QStringLiteral("%1/s").arg(formatSize(static_cast<quint64>(m_bytesPerSecond))));
     if (queuedJobs > 0)
         details.append(QStringLiteral("%1 queued").arg(queuedJobs));
-    m_progressDetail->setText(details.join(QStringLiteral(" · ")));
+    // Without byte counts (folders still being listed), files done stand in.
+    const quint64 total = bytesTotal > 0 ? bytesTotal : quint64(qMax(filesTotal, 0));
+    const quint64 done = bytesTotal > 0 ? bytesDone : quint64(qMax(filesDone, 0));
+    transfers->update(m_transferIds.value(jobId), currentFile, done, total, details.join(QStringLiteral(" · ")));
 }
 
 void SftpPanel::askConflict(const QString &path, quint64 existingSize,
@@ -1185,6 +1237,10 @@ void SftpPanel::finishTransfer(int jobId, bool upload, const QString &destinatio
                                bool cancelled)
 {
     m_jobUploads.remove(jobId);
+    if (const int id = m_transferIds.take(jobId))
+        TransferList::instance()->finish(id, cancelled            ? TransferList::State::Cancelled
+                                             : !errors.isEmpty() ? TransferList::State::Failed
+                                                                 : TransferList::State::Done);
     if (m_jobUploads.isEmpty())
         resetTransfers();
     if (const auto local = m_editDownloads.take(jobId); !local.isEmpty()) {
@@ -1252,11 +1308,159 @@ void SftpPanel::finishTransfer(int jobId, bool upload, const QString &destinatio
         QDesktopServices::openUrl(QUrl::fromLocalFile(destination));
 }
 
+QStringList SftpPanel::targetsOf(const RemoteFileSession::Job &job, QStringList *folders) const
+{
+    QStringList targets;
+    const QString server = job.upload && m_session ? m_session->server() : QString();
+    for (QString source : job.sources) {
+        while (source.size() > 1 && (source.endsWith(QLatin1Char('/')) || source.endsWith(QLatin1Char('\\'))))
+            source.chop(1);
+        const QString name = QDir::fromNativeSeparators(source).section(QLatin1Char('/'), -1);
+        QString path;
+        bool folder = false;
+        if (job.upload) {
+            path = job.destination.endsWith(QLatin1Char('/')) ? job.destination + name
+                                                              : job.destination + QLatin1Char('/') + name;
+            folder = QFileInfo(source).isDir();
+        } else {
+            path = QDir(job.destination).filePath(name);
+            folder = QFileInfo(path).isDir();
+            for (int i = 0; i < m_view->topLevelItemCount() && !folder; ++i) {
+                const auto *item = m_view->topLevelItem(i);
+                folder = item->data(0, PathRole).toString() == source && item->data(0, IsDirectoryRole).toBool();
+            }
+        }
+        targets.append(TransferList::target(server, path));
+        if (folder && folders)
+            folders->append(targets.constLast());
+    }
+    return targets;
+}
+
+void SftpPanel::startChecked(const RemoteFileSession::Job &job, std::function<void(int)> started)
+{
+    if (!m_session || !m_ready)
+        return;
+    auto *transfers = TransferList::instance();
+    QStringList folders;
+    const auto targets = targetsOf(job, &folders);
+    const auto others = transfers->writingTo(targets);
+    if (others.isEmpty()) {
+        started(m_session->startJob(job));
+        return;
+    }
+
+    // A new name helps only where both write the very same file: the paths
+    // it must not take. A folder is merged into, it cannot take a new name.
+    QStringList avoid;
+    bool newNameHelps = folders.isEmpty();
+    for (const auto &other : others) {
+        for (const auto &theirs : other.targets) {
+            if (folders.contains(theirs))
+                continue;
+            if (targets.contains(theirs))
+                avoid.append(theirs.section(QLatin1Char('|'), 1));
+            else if (std::any_of(targets.cbegin(), targets.cend(), [&theirs](const QString &mine) {
+                         return theirs.startsWith(mine + QLatin1Char('/')) || mine.startsWith(theirs + QLatin1Char('/'));
+                     }))
+                newNameHelps = false;
+        }
+    }
+    newNameHelps = newNameHelps && !avoid.isEmpty();
+
+    const auto &first = others.constFirst();
+    const QString where = TransferList::ownerName && first.owner ? TransferList::ownerName(first.owner) : QString();
+    const QString what = job.sources.size() == 1
+                             ? QDir::fromNativeSeparators(job.sources.constFirst()).section(QLatin1Char('/'), -1)
+                             : QStringLiteral("%1 items").arg(job.sources.size());
+    QMessageBox dialog(this);
+    dialog.setIcon(QMessageBox::Question);
+    dialog.setWindowTitle(QStringLiteral("Same File in Transfer"));
+    dialog.setText(QStringLiteral("%1 is being %2 to the same place right now%3.")
+                       .arg(what, first.upload ? QStringLiteral("uploaded") : QStringLiteral("downloaded"),
+                            where.isEmpty() ? QString() : QStringLiteral(" (in %1)").arg(where)));
+    dialog.setInformativeText(QStringLiteral("Both would write the same file: the one that ends last "
+                                             "replaces the other. What should this %1 do?")
+                                  .arg(job.upload ? QStringLiteral("upload") : QStringLiteral("download")));
+    auto *waitButton = dialog.addButton(QStringLiteral("Wait for It"), QMessageBox::AcceptRole);
+    waitButton->setToolTip(QStringLiteral("Start when the other transfer has ended; then you are asked "
+                                          "whether to overwrite the file it wrote"));
+    auto *newNameButton = dialog.addButton(QStringLiteral("Save Under a New Name"), QMessageBox::AcceptRole);
+    newNameButton->setEnabled(newNameHelps);
+    newNameButton->setToolTip(newNameHelps ? QStringLiteral("Save it as \"name (1).ext\" next to the other")
+                                           : QStringLiteral("A folder cannot take a new name: it is merged into"));
+    auto *stopButton = dialog.addButton(QStringLiteral("Stop It, Start This"), QMessageBox::DestructiveRole);
+    stopButton->setToolTip(QStringLiteral("Cancel the other transfer (only that one) and start this one "
+                                          "once it has stopped"));
+    auto *dontButton = dialog.addButton(QStringLiteral("Don't Start"), QMessageBox::RejectRole);
+    dialog.setDefaultButton(waitButton);
+    dialog.setEscapeButton(dontButton);
+    dialog.exec();
+    if (!m_session || !m_ready || dialog.clickedButton() == dontButton || !dialog.clickedButton())
+        return;
+    if (dialog.clickedButton() == newNameButton) {
+        started(m_session->startJob(job, avoid));
+        return;
+    }
+
+    QList<int> otherIds;
+    for (const auto &other : others)
+        otherIds.append(other.id);
+    const bool stop = dialog.clickedButton() == stopButton;
+    if (stop) {
+        for (const int id : std::as_const(otherIds))
+            transfers->cancel(id);
+    }
+    // Waits in the list, as a transfer that can be cancelled (✕).
+    auto listId = std::make_shared<int>(0);
+    *listId = transfers->start(m_ownerPage ? m_ownerPage.data() : this, what, job.upload, [listId] {
+        TransferList::instance()->finish(*listId, TransferList::State::Cancelled);
+    }, QStringLiteral("Don't start this transfer"));
+    transfers->update(*listId, what, 0, 0,
+                      stop ? QStringLiteral("Waiting for the other transfer to stop")
+                           : QStringLiteral("Waiting for the other transfer of this file"));
+    transfers->setTargets(*listId, targets);
+    m_waiting.append({*listId, job, otherIds, std::move(started)});
+    startWaiting(); // the other may have ended while asking
+}
+
+void SftpPanel::startWaiting()
+{
+    if (std::exchange(m_startingWaiting, true))
+        return;
+    auto *transfers = TransferList::instance();
+    for (qsizetype i = 0; i < m_waiting.size();) {
+        const auto &waiting = m_waiting.at(i);
+        if (!transfers->isRunning(waiting.listId)) { // cancelled while waiting
+            m_waiting.removeAt(i);
+            continue;
+        }
+        if (std::any_of(waiting.others.cbegin(), waiting.others.cend(),
+                        [transfers](int id) { return transfers->isRunning(id); })) {
+            ++i;
+            continue;
+        }
+        const auto ready = m_waiting.takeAt(i);
+        transfers->remove(ready.listId);
+        startChecked(ready.job, ready.started); // may ask again: another one may have started meanwhile
+    }
+    m_startingWaiting = false;
+}
+
+// The connection went: the waiting transfers cannot start on it.
+void SftpPanel::endWaiting()
+{
+    for (const auto &waiting : std::exchange(m_waiting, {}))
+        TransferList::instance()->finish(waiting.listId, TransferList::State::Failed);
+}
+
 void SftpPanel::resetTransfers()
 {
     m_jobUploads.clear();
     m_speedJobId = 0;
     m_bytesPerSecond = 0;
-    m_progressFooter->hide();
-    m_progressBar->setValue(0);
+    // Jobs that will not report again (the connection went): ended.
+    for (const int id : std::as_const(m_transferIds))
+        TransferList::instance()->finish(id, TransferList::State::Failed);
+    m_transferIds.clear();
 }

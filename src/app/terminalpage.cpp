@@ -105,6 +105,7 @@ TerminalPage::TerminalPage(const SshConnectionSettings &settings,
     m_terminal->startTerminalTeletype();
     m_fileDropKind = FileDropKind::Ssh; // dropped files go to the shell's folder on the server
     m_sftpPanel = new SftpPanel;
+    m_sftpPanel->setOwnerPage(this); // its transfers belong to this tab
     m_folderTimer = new QTimer(this);
     m_folderTimer->setSingleShot(true);
     m_folderTimer->setInterval(400);
@@ -163,10 +164,7 @@ bool TerminalPage::dropFiles(const QStringList &files, bool shift)
         if (!FileDrop::existingAction(this, clashing, &action))
             return true;
         const auto target = folder.path;
-        emit statusMessage(QStringLiteral("Copying %1 item(s) to %2…").arg(files.size()).arg(target));
         FileDrop::copyLocal(this, files, target, action, [this, files, target](const QStringList &problems) {
-            if (problems.isEmpty())
-                emit statusMessage(QStringLiteral("Copied %1 item(s) to %2").arg(files.size()).arg(target));
             FileDrop::report(this, files.size(), target, problems);
         });
         return true;
@@ -179,7 +177,6 @@ bool TerminalPage::dropFiles(const QStringList &files, bool shift)
         }
         // The server tells where its shell is now (SshSession::queryDropFolder).
         m_droppedFiles = files;
-        emit statusMessage(QStringLiteral("Asking %1 which folder the shell is in…").arg(m_sshSettings.host));
         m_ssh->queryDropFolder();
         return true;
     }
@@ -220,9 +217,6 @@ void TerminalPage::uploadDropped(const QString &answer)
         FileDrop::report(this, files.size(), QStringLiteral("%1:%2").arg(where, folder.path), {problem});
         return;
     }
-    emit statusMessage(QStringLiteral("Uploading %1 item(s) to %2:%3 (see the Files panel)")
-                           .arg(files.size())
-                           .arg(where, folder.path));
 }
 
 // Every paste in a terminal: the text the paste rule gives (clipboard.h).
@@ -582,8 +576,6 @@ void TerminalPage::setFollowsFolder(bool on)
     // Straight to the shell's folder, not only after the next command.
     if (on && m_ssh)
         m_ssh->queryShellFolder();
-    emit statusMessage(on ? QStringLiteral("Files follows this terminal's folder (this tab only).")
-                          : QStringLiteral("Files no longer follows this terminal's folder (this tab only)."));
 }
 
 void TerminalPage::saveTerminalOutput()
@@ -634,7 +626,7 @@ void TerminalPage::startSsh()
         m_inputMode = InputMode::Remote;
         m_wasConnected = true;
         m_reconnectAttempts = 0;
-        emit statusMessage(QStringLiteral("Connected to %1").arg(m_sshSettings.host));
+        emit statusMessage({}); // connected: an earlier disconnect reason is old news
         runLoginScript();
     });
     connect(m_ssh, &SshSession::dataReceived, this, [this](const QByteArray &data) {
@@ -650,10 +642,9 @@ void TerminalPage::startSsh()
     });
     connect(m_ssh, &SshSession::forwardStatus, this,
             [this](int, bool listening, const QString &message) {
-                // A forward that cannot listen shows in the terminal.
-                if (listening)
-                    emit statusMessage(QStringLiteral("Port forward: %1").arg(message));
-                else
+                // A forward that cannot listen shows in the terminal; one
+                // that listens needs no word.
+                if (!listening)
                     showLocalText(QStringLiteral("\x1b[0m\r\n\x1b[1;33mPort forward: %1\x1b[0m\r\n")
                                       .arg(message));
             });
@@ -950,7 +941,7 @@ TerminalPage::TerminalPage(StreamConnection *connection, const TerminalAppearanc
         m_wasConnected = true;
         m_endedBar->hide();
         m_stream->resize(m_terminal->screenColumnsCount(), m_terminal->screenLinesCount());
-        emit statusMessage(QStringLiteral("Connected: %1").arg(m_stream->description()));
+        emit statusMessage({}); // connected: an earlier disconnect reason is old news
         runLoginScript();
     });
     connect(m_stream, &StreamConnection::dataReceived, this, [this](const QByteArray &data) {
@@ -1064,7 +1055,6 @@ void TerminalPage::setRecording(bool on)
         return;
     }
     m_recorder = std::move(recorder);
-    emit statusMessage(QStringLiteral("Recording this tab"));
 }
 
 // A recording that could not be written stopped itself: say so.

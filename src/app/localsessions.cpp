@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "localsessions.h"
+#include "capabilities.h"
 #include "filedialogs.h"
 #include "formcard.h"
 #include "inheritance.h"
@@ -257,11 +258,9 @@ QComboBox *editableList(QWidget *parent, const QString &value, const QString &pl
 
 QStringList localSessionProtocols()
 {
-#ifdef Q_OS_WIN
-    return {Local, Wsl, Docker, Kubernetes};
-#else
+    if (Platform::has(Platform::Feature::WslSessions))
+        return {Local, Wsl, Docker, Kubernetes};
     return {Local, Docker, Kubernetes};
-#endif
 }
 
 QString generatedKubeconfig(const LocalSessionOptions &options, const QString &token)
@@ -457,15 +456,14 @@ QString programPathHint(const QString &name)
 QString localSessionProblem(const QString &protocol, const QString &engine)
 {
     const auto preferences = loadContainerPreferences();
-#ifndef Q_OS_WIN
-    if (protocol == Wsl)
-        return QStringLiteral("WSL sessions are for Windows.");
-#else
-    if (protocol == Wsl && !preferences.wsl.enabled)
-        return QStringLiteral("WSL sessions are turned off (Preferences → Connections → WSL).");
-    if (protocol == Wsl && QStandardPaths::findExecutable(QStringLiteral("wsl")).isEmpty())
-        return QStringLiteral("WSL is not installed on this computer (wsl --install, as administrator).");
-#endif
+    if (protocol == Wsl) {
+        if (const auto problem = Platform::problem(Platform::Feature::WslSessions); !problem.isEmpty())
+            return problem;
+        if (!preferences.wsl.enabled)
+            return QStringLiteral("WSL sessions are turned off (Preferences → Connections → WSL).");
+        if (QStandardPaths::findExecutable(QStringLiteral("wsl")).isEmpty())
+            return QStringLiteral("WSL is not installed on this computer (wsl --install, as administrator).");
+    }
     if (protocol == Docker || protocol == Kubernetes) {
         if (!(protocol == Docker ? preferences.docker.enabled : preferences.kubernetes.enabled))
             return QStringLiteral("%1 sessions are turned off (Preferences → Connections → %2).")

@@ -3,7 +3,9 @@
 
 #include "filedrop.h"
 
+#include "capabilities.h"
 #include "preferences.h"
+#include "processinfo.h"
 
 #include <QApplication>
 #include <QDialog>
@@ -20,25 +22,6 @@
 #include <QVBoxLayout>
 
 namespace FileDrop {
-
-namespace {
-
-QString readText(const QString &path)
-{
-    QFile file(path);
-    return file.open(QIODevice::ReadOnly) ? QString::fromLocal8Bit(file.readAll()) : QString();
-}
-
-// A process's command line, as typed ("ssh web01").
-QString commandLine(int pid)
-{
-    auto parts = readText(QStringLiteral("/proc/%1/cmdline").arg(pid)).split(QChar(0), Qt::SkipEmptyParts);
-    if (!parts.isEmpty())
-        parts.first() = QFileInfo(parts.first()).fileName(); // "ssh web01", not its path
-    return parts.join(QLatin1Char(' '));
-}
-
-} // namespace
 
 bool isNestedProgram(const QString &line)
 {
@@ -57,25 +40,23 @@ Folder localFolder(int shellPid, int foregroundPid)
 {
     Folder result;
     result.where = QStringLiteral("this computer");
-#ifdef Q_OS_LINUX
+    if (const auto problem = Platform::problem(Platform::Feature::LocalFileDrop); !problem.isEmpty()) {
+        result.error = problem;
+        return result;
+    }
     const int pid = foregroundPid > 0 ? foregroundPid : shellPid;
     if (pid <= 0) {
         result.error = QStringLiteral("The terminal's program has ended.");
         return result;
     }
-    result.path = QFileInfo(QStringLiteral("/proc/%1/cwd").arg(pid)).symLinkTarget();
+    result.path = ProcessInfo::workingFolder(pid);
     if (result.path.isEmpty())
         result.error = QStringLiteral("The folder of the program in this terminal cannot be read "
                                       "(it may run as another user, for example as root).");
     if (pid != shellPid) {
-        result.program = commandLine(pid);
+        result.program = ProcessInfo::commandLine(pid);
         result.nested = isNestedProgram(result.program);
     }
-#else
-    Q_UNUSED(shellPid);
-    Q_UNUSED(foregroundPid);
-    result.error = QStringLiteral("The folder of a local terminal is known only on Linux.");
-#endif
     return result;
 }
 

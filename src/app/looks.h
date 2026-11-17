@@ -35,6 +35,8 @@ struct Look
     QString interfaceFontFamily; // empty: the system's
     int interfaceFontSize = 0;
     bool windowBorder = true;
+    int cornerRadius = 6; // 0 (square), 2, 4, 6, 8 or 10 px; see RoundedCorners
+    bool seeThroughLists = false; // the Messages and Transfers lists over the window
 
     bool isBuiltIn() const { return id.startsWith(QStringLiteral("builtin:")); }
     // Same appearance (name and id are not compared).
@@ -42,6 +44,12 @@ struct Look
 };
 
 constexpr int MaximumUserLooks = 20;
+
+// One of 0, 2, 4, 6, 8, 10: the nearest even value within them.
+inline int validCornerRadius(int radius)
+{
+    return qBound(0, radius, 10) & ~1;
+}
 
 // The looks that come with OpsRemote, for this platform.
 QList<Look> builtInLooks();

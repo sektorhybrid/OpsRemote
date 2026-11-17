@@ -91,6 +91,8 @@ public:
     void setLocalClipboard(const QString &text, const QStringList &files);
     void saveRemoteFiles(const QString &folder);
     void cancelRemoteFileSave();
+    // Stops the remote computer's paste of this computer's files.
+    void stopLocalFileTransfer();
 
     // Called from the worker thread; block it until the user answered.
     RdpCertificateDecision askCertificate(const QString &host, const QString &subject,
@@ -117,6 +119,9 @@ signals:
     void remoteFilesProgress(quint64 doneBytes, quint64 totalBytes, const QString &current);
     // The remote computer reading files pasted from this computer.
     void localFilesProgress(quint64 sentBytes, quint64 totalBytes, const QString &current);
+    // The remote computer took a clipboard of its own: a paste of this
+    // computer's files there cannot go on.
+    void localFilesWithdrawn();
     // The saved top-level paths; error is empty on success.
     void remoteFilesSaved(const QStringList &paths, const QString &error);
     void disconnected(const QString &reason, bool error);

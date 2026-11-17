@@ -34,6 +34,9 @@ public:
     // Downloads the files last copied on the server into folder.
     void saveRemoteFiles(const QString &folder);
     void cancelSave();
+    // Stops the server's paste of the offered files: its further requests
+    // are refused (Windows then ends its copy) until it starts another paste.
+    void stopLocalFiles();
 
 private:
     struct LocalFile
@@ -73,6 +76,11 @@ private:
     // How far the remote computer has read each offered file (pasting).
     QList<quint64> m_sentOffsets;
     quint64 m_sendTotal = 0;
+    // The server holds what this computer offered (until it announces a
+    // clipboard of its own): an unchanged offer is not sent again, since
+    // that would end a paste under way there.
+    bool m_offerHeld = false;
+    bool m_refuseFiles = false; // see stopLocalFiles()
 
     quint32 m_remoteTextFormat = 0;
     quint32 m_remoteFilesFormat = 0;

@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "preferenceswindow.h"
+#include "capabilities.h"
 #include "filedialogs.h"
 #include "formcard.h"
 #include "programpicker.h"
@@ -568,9 +569,8 @@ void PreferencesWindow::buildPages()
     buildXdmcpPage();
     buildDockerPage();
     buildKubernetesPage();
-#ifdef Q_OS_WIN
-    buildWslPage();
-#endif
+    if (Platform::has(Platform::Feature::WslSessions))
+        buildWslPage();
     endCategory();
     // Shared by several protocols.
     beginCategory(QStringLiteral("network"), QStringLiteral("Network"),
@@ -794,7 +794,7 @@ SettingsPage *PreferencesWindow::buildLooksPage()
     auto *card = page->addCard(QStringLiteral("Looks"));
     // Faded, like the explanations under every setting.
     auto *intro = secondaryLabel(QStringLiteral(
-        "A look sets the interface colours, style, icons and fonts, the window border and the "
+        "A look sets the interface colours, style, icons and fonts, the window border, the corners, see-through lists and the "
         "terminal colours and font together; all of them are below. Changing one by hand makes "
         "the appearance Custom: save it as a new look, into one of your own looks, or go back "
         "to the look it came from."), nullptr);
@@ -1111,6 +1111,26 @@ void PreferencesWindow::buildAppearancePage()
                          windowBorder, QStringLiteral("frame edge outline shadow separate"));
     connect(windowBorder, &QCheckBox::toggled, this,
             [mainWindow](bool enabled) { mainWindow->setWindowBorders(enabled); });
+    auto *corners = new QComboBox;
+    corners->addItem(QStringLiteral("Square"), 0);
+    for (int radius = 2; radius <= 10; radius += 2)
+        corners->addItem(QStringLiteral("%1 px").arg(radius), radius);
+    corners->setCurrentIndex(qMax(0, corners->findData(mainWindow->cornerRadius())));
+    colours->addRow(QStringLiteral("Rounded corners"),
+                    QStringLiteral("How round the corners of the tabs (with their message strip) and the "
+                                   "session list are."),
+                    corners, QStringLiteral("radius round corner square soft"));
+    connect(corners, &QComboBox::activated, this, [mainWindow, corners] {
+        mainWindow->setCornerRadius(corners->currentData().toInt());
+    });
+    auto *seeThrough = new ToggleSwitch;
+    seeThrough->setChecked(mainWindow->seeThroughLists());
+    colours->addRow(QStringLiteral("See-through lists"),
+                    QStringLiteral("The Messages and Transfers lists let the window behind them show through "
+                                   "a little. Off: solid, also with looks whose colours are see-through."),
+                    seeThrough, QStringLiteral("transparent transparency translucent opacity glass"));
+    connect(seeThrough, &QCheckBox::toggled, this,
+            [mainWindow](bool enabled) { mainWindow->setSeeThroughLists(enabled); });
 
 
     // Icons and text
@@ -1429,24 +1449,22 @@ void PreferencesWindow::buildStartupPage()
     connectToggle(remember, &StartupPreferences::rememberWindow);
     auto *single = toggle(current.singleInstance);
     startup->addRow(QStringLiteral("Run only one copy of OpsRemote"),
-#ifdef Q_OS_LINUX
-                    QStringLiteral("Starting it again brings the open window to the front (on Wayland "
-                                   "only with the next setting on)."),
-#else
-                    QStringLiteral("Starting it again brings the open window to the front."),
-#endif
+                    Platform::has(Platform::Feature::WaylandActivation)
+                        ? QStringLiteral("Starting it again brings the open window to the front (on "
+                                         "Wayland only with the next setting on).")
+                        : QStringLiteral("Starting it again brings the open window to the front."),
                     single, QStringLiteral("instance single multiple second window"));
     connectToggle(single, &StartupPreferences::singleInstance);
-#ifdef Q_OS_LINUX
-    auto *activation = toggle(current.waylandActivation);
-    startup->addRow(QStringLiteral("Bring windows to the front (Wayland)"),
-                    QStringLiteral("Lets OpsRemote raise its windows, such as the open window when it "
-                                   "is started again. On GNOME each time shows the busy pointer for "
-                                   "several seconds, after most menus and dialogs. Applies after a "
-                                   "restart."),
-                    activation, QStringLiteral("activation raise focus busy cursor pointer wayland gnome"));
-    connectToggle(activation, &StartupPreferences::waylandActivation);
-#endif
+    if (Platform::has(Platform::Feature::WaylandActivation)) {
+        auto *activation = toggle(current.waylandActivation);
+        startup->addRow(QStringLiteral("Bring windows to the front (Wayland)"),
+                        QStringLiteral("Lets OpsRemote raise its windows, such as the open window when it "
+                                       "is started again. On GNOME each time shows the busy pointer for "
+                                       "several seconds, after most menus and dialogs. Applies after a "
+                                       "restart."),
+                        activation, QStringLiteral("activation raise focus busy cursor pointer wayland gnome"));
+        connectToggle(activation, &StartupPreferences::waylandActivation);
+    }
 
     auto *closing = page->addCard(QStringLiteral("When OpsRemote closes"));
     auto *exit = toggle(current.confirmExit);
@@ -1471,6 +1489,33 @@ void PreferencesWindow::buildStartupPage()
                  QStringLiteral("Otherwise new tabs open at the end."), nextTo,
                  QStringLiteral("position order"));
     connectToggle(nextTo, &StartupPreferences::newTabNextToCurrent);
+    auto *strip = choiceBox({{QStringLiteral("top"), QStringLiteral("Top")},
+                             {QStringLiteral("bottom"), QStringLiteral("Bottom")},
+                             {QStringLiteral("off"), QStringLiteral("Off")}},
+                            current.messageStrip);
+    tabs->addRow(QStringLiteral("Pane bar"),
+                 QStringLiteral("A bar at the top or bottom of each terminal and remote screen (each pane of a "
+                                "split tab too) with its questions, messages and transfers. Every message also "
+                                "goes to Messages at the bottom right, with where it came from. Off: no bars; "
+                                "questions show inside the tab."),
+                 strip, QStringLiteral("status notice message band strip bar top bottom pane"));
+    auto *barMode = choiceBox({{QStringLiteral("fixed"), QStringLiteral("Always shown")},
+                               {QStringLiteral("auto"), QStringLiteral("Only when needed")}},
+                              current.messageBar);
+    tabs->addRow(QStringLiteral("Show the pane bar"),
+                 QStringLiteral("Always shown: every pane keeps its bar, empty when there is nothing to say, so "
+                                "nothing ever moves. Only when needed: the bar comes with a message, question or "
+                                "transfer and goes again; it pushes a terminal down, and covers the top edge of a "
+                                "remote screen (which keeps its size)."),
+                 barMode, QStringLiteral("status bar fixed always auto push cover overlay"));
+    barMode->setEnabled(current.messageStrip != QStringLiteral("off"));
+    connect(strip, &QComboBox::activated, this, [update, strip, barMode] {
+        update([&](StartupPreferences &p) { p.messageStrip = strip->currentData().toString(); });
+        barMode->setEnabled(strip->currentData().toString() != QStringLiteral("off"));
+    });
+    connect(barMode, &QComboBox::activated, this, [update, barMode] {
+        update([&](StartupPreferences &p) { p.messageBar = barMode->currentData().toString(); });
+    });
     auto *duplicates = toggle(current.allowDuplicateSessionTabs);
     tabs->addRow(QStringLiteral("Allow the same saved session in multiple tabs"),
                  QStringLiteral("Off: opening an already-open saved session selects its tab. "
@@ -1553,18 +1598,18 @@ void PreferencesWindow::buildMouseClipboardPage()
                                    "the clipboard."),
                     paste, QStringLiteral("clipboard selection primary newest middle"));
     connectChoice(paste, &MouseClipboardPreferences::paste);
-#ifndef Q_OS_WIN
-    auto *otherPrograms = toggle(current.otherProgramsSelection);
-    pasting->addRow(QStringLiteral("Selections in other programs count too"),
-                    QStringLiteral("With The newest: text only selected (not copied) in another program "
-                                   "counts as well. Off: reading a web page does not change what you paste."),
-                    otherPrograms, QStringLiteral("primary selection linux browser"));
-    connectToggle(otherPrograms, &MouseClipboardPreferences::otherProgramsSelection);
-    otherPrograms->setEnabled(current.paste == QStringLiteral("newest"));
-    connect(paste, &QComboBox::activated, otherPrograms, [paste, otherPrograms] {
-        otherPrograms->setEnabled(paste->currentData().toString() == QStringLiteral("newest"));
-    });
-#endif
+    if (Platform::has(Platform::Feature::SelectionClipboard)) {
+        auto *otherPrograms = toggle(current.otherProgramsSelection);
+        pasting->addRow(QStringLiteral("Selections in other programs count too"),
+                        QStringLiteral("With The newest: text only selected (not copied) in another program "
+                                       "counts as well. Off: reading a web page does not change what you paste."),
+                        otherPrograms, QStringLiteral("primary selection linux browser"));
+        connectToggle(otherPrograms, &MouseClipboardPreferences::otherProgramsSelection);
+        otherPrograms->setEnabled(current.paste == QStringLiteral("newest"));
+        connect(paste, &QComboBox::activated, otherPrograms, [paste, otherPrograms] {
+            otherPrograms->setEnabled(paste->currentData().toString() == QStringLiteral("newest"));
+        });
+    }
 
     auto *buttons = page->addCard(QStringLiteral("Mouse buttons"));
     auto *rightClick = choiceBox({{QStringLiteral("menu"), QStringLiteral("Show menu")},
@@ -1973,17 +2018,17 @@ void PreferencesWindow::buildSshPage()
     keys->addWideRow(new AvailabilityNote(&LocalResources::x11Problem, [forwardX11](bool available) {
         forwardX11->setEnabled(available || forwardX11->isChecked());
     }), QStringLiteral("x11 xorg display"));
-#ifdef Q_OS_WIN
-    auto *agent = choiceBox({{QStringLiteral("auto"), QStringLiteral("Automatic")},
-                             {QStringLiteral("openssh"), QStringLiteral("OpenSSH agent")},
-                             {QStringLiteral("pageant"), QStringLiteral("Pageant (PuTTY)")}},
-                            current.agent);
-    keys->addRow(QStringLiteral("SSH agent"),
-                 QStringLiteral("Which agent forwarded requests go to. Automatic uses the Windows "
-                                "OpenSSH agent when it runs, otherwise Pageant."),
-                 agent, QStringLiteral("pageant putty agent openssh"));
-    bindChoice(this, agent, update, &SshPreferences::agent);
-#endif
+    if (Platform::has(Platform::Feature::PageantAgent)) {
+        auto *agent = choiceBox({{QStringLiteral("auto"), QStringLiteral("Automatic")},
+                                 {QStringLiteral("openssh"), QStringLiteral("OpenSSH agent")},
+                                 {QStringLiteral("pageant"), QStringLiteral("Pageant (PuTTY)")}},
+                                current.agent);
+        keys->addRow(QStringLiteral("SSH agent"),
+                     QStringLiteral("Which agent forwarded requests go to. Automatic uses the Windows "
+                                    "OpenSSH agent when it runs, otherwise Pageant."),
+                     agent, QStringLiteral("pageant putty agent openssh"));
+        bindChoice(this, agent, update, &SshPreferences::agent);
+    }
     keys->addRow(QStringLiteral("Extra private key"),
                  QStringLiteral("Tried first. Keep it next to the program (for example in "
                                 "settings/) to carry it with you. Keys with a passphrase are not "
@@ -3026,7 +3071,7 @@ void PreferencesWindow::buildSftpPage()
                                  {QStringLiteral("off"), QStringLiteral("Off (write in place)")}},
                                 current.temporaryUpload);
     uploads->addRow(QStringLiteral("Upload to a temporary name first"),
-                    QStringLiteral("The file is written as name.filepart and replaces the old one "
+                    QStringLiteral("The file is written as name.xxxxxx.filepart and replaces the old one "
                                    "only when complete, so a dropped connection never leaves a "
                                    "half-written file. For SFTP, SCP, and FTP."),
                     temporary, QStringLiteral("filepart partial atomic replace winscp safe upload"));

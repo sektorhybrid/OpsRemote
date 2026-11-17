@@ -61,6 +61,8 @@ private:
     QWidget *buildDownloadTab();
     void toggleDownload();
     void finishDownload(const QString &message);
+    void startDownloadTransfer(const QString &name);
+    int m_downloadTransfer = 0; // TransferList id, 0 when none
     void startFtpDownload(const QUrl &url, const QString &folder);
 
     QTabWidget *m_tabs = nullptr;

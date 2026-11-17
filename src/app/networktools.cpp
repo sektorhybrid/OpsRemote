@@ -4,6 +4,7 @@
 #include "httprequestpage.h"
 #include "filedialogs.h"
 #include "networktools.h"
+#include "transfers.h"
 #include "ftpclient.h"
 #include "ftpoptions.h"
 #include "appdirs.h"
@@ -366,6 +367,7 @@ void NetworkToolsWindow::toggleDownload()
     if (already > 0)
         request.setRawHeader("Range", "bytes=" + QByteArray::number(already) + '-');
     m_download = m_network->get(request);
+    startDownloadTransfer(QFileInfo(m_downloadFile->fileName()).fileName());
     m_downloadClock.start();
     m_downloadStart->setText(QStringLiteral("Stop"));
     m_downloadProgress->setValue(0);
@@ -396,6 +398,8 @@ void NetworkToolsWindow::toggleDownload()
         m_downloadStatus->setText(QStringLiteral("%1 MB at %2 MB/s")
                                       .arg((already + received) / 1048576.0, 0, 'f', 1)
                                       .arg(received / 1048576.0 / seconds, 0, 'f', 1));
+        TransferList::instance()->update(m_downloadTransfer, {}, quint64(already + received),
+                                         total > 0 ? quint64(already + total) : 0, m_downloadStatus->text());
     });
     connect(m_download, &QNetworkReply::finished, this, [this] {
         m_downloadFile->write(m_download->readAll());
@@ -447,6 +451,7 @@ void NetworkToolsWindow::startFtpDownload(const QUrl &url, const QString &folder
     }
     auto *session = new FtpSession(this);
     m_ftpDownload = session;
+    startDownloadTransfer(QFileInfo(path).fileName());
     m_downloadClock.start();
     m_downloadStart->setText(QStringLiteral("Stop"));
     m_downloadProgress->setMaximum(1000);
@@ -491,6 +496,7 @@ void NetworkToolsWindow::startFtpDownload(const QUrl &url, const QString &folder
                 m_downloadStatus->setText(QStringLiteral("%1 MB at %2 MB/s")
                                               .arg(done / 1048576.0, 0, 'f', 1)
                                               .arg(done / 1048576.0 / seconds, 0, 'f', 1));
+                TransferList::instance()->update(m_downloadTransfer, {}, done, total, m_downloadStatus->text());
             });
     connect(session, &RemoteFileSession::transferFinished, this,
             [this, path, folder](int, bool, const QString &, int files, int, const QStringList &errors,
@@ -511,8 +517,27 @@ void NetworkToolsWindow::startFtpDownload(const QUrl &url, const QString &folder
     settings.password.fill(QChar(0));
 }
 
+// In the Transfers list too (as "Network Tools"); ✕ there is Stop here.
+void NetworkToolsWindow::startDownloadTransfer(const QString &name)
+{
+    const QPointer<NetworkToolsWindow> window(this);
+    m_downloadTransfer = TransferList::instance()->start(
+        this, name, false,
+        [window] {
+            if (window && (window->m_download || window->m_ftpDownload))
+                window->toggleDownload();
+        },
+        QStringLiteral("Stop the download (Network Tools)"));
+}
+
 void NetworkToolsWindow::finishDownload(const QString &message)
 {
+    TransferList::instance()->finish(m_downloadTransfer, message.startsWith(QStringLiteral("Saved"))
+                                                             ? TransferList::State::Done
+                                                         : message.startsWith(QStringLiteral("Stopped"))
+                                                             ? TransferList::State::Cancelled
+                                                             : TransferList::State::Failed);
+    m_downloadTransfer = 0;
     if (m_ftpDownload) {
         disconnect(m_ftpDownload, nullptr, this, nullptr);
         m_ftpDownload->deleteLater();

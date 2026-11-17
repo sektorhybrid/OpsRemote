@@ -4,12 +4,23 @@
 #include "stallwatch.h"
 #include "workerthreads.h"
 #include "mainwindow.h"
+#include "sessionendedpanel.h"
+#include "sftppanel.h"
+#include "panedrag.h"
+#include "rdpsession.h"
+#include "rdppage.h"
+#include <qtermwidget.h>
 #include "settingsmigrations.h"
 #include "localsessions.h"
 #ifdef Q_OS_WIN
 #include "conpty.h"
 #endif
 #include "filetransfertest.h"
+#include "statusindicators.h"
+#include "transfers.h"
+#include "remotefiles.h"
+#include "ftpclient.h"
+#include "filespage.h"
 #include "preferences.h"
 #include "sshsession.h"
 #include "systemcredentials.h"
@@ -18,6 +29,7 @@
 #include <QAbstractButton>
 #include <QAbstractItemView>
 #include <QApplication>
+#include <QUrlQuery>
 #include <QComboBox>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -41,6 +53,7 @@
 #include <QPointer>
 #include <QStandardPaths>
 #include <QMenu>
+#include <QMessageBox>
 #include <QScrollBar>
 #include <QCheckBox>
 #include <QSpinBox>
@@ -52,6 +65,9 @@
 #include <QDropEvent>
 #include <QUrl>
 #include <QTimer>
+#include <QHeaderView>
+#include <QTreeView>
+#include <QSplitter>
 #include <QThread>
 #include <QToolButton>
 #include <QTreeWidget>
@@ -398,6 +414,302 @@ int main(int argc, char *argv[])
         // OPSREMOTE_TEST_MULTIEXEC=1 with SPLIT: all of them chosen for multi-exec).
         // OPSREMOTE_TEST_DROP=path[;path]: opens a local terminal, cds it to
         // OPSREMOTE_TEST_DROP_FOLDER (if set) and drops these files on it after 2 s.
+        // OPSREMOTE_TEST_MESSAGES=new|open: sample messages (one already read,
+        // one warning); "open" also opens their list.
+        if (const auto messages = qEnvironmentVariable("OPSREMOTE_TEST_MESSAGES"); !messages.isEmpty()) {
+            QTimer::singleShot(200, &window, [&window, messages] {
+                auto *log = window.findChild<MessageLog *>();
+                if (!log)
+                    return;
+                log->add(QStringLiteral("Theme \"OpsRemote Orange\" could not load its icons; the built-in ones are used."));
+                log->markAllRead();
+                log->add(QStringLiteral("Could not reach the update server; OpsRemote checks again tomorrow."),
+                         MessageLog::Level::Warning);
+                log->add(QStringLiteral("Credential vault locked after 15 minutes without use"));
+                log->add(QStringLiteral("3 sessions were imported from PuTTY; 1 was skipped because its host name is "
+                                        "empty (\"Old web server\")."));
+                if (messages == QStringLiteral("open")) {
+                    for (auto *button : window.findChildren<StatusIndicator *>())
+                        if (button->stateText().startsWith(QStringLiteral("Messages"))) {
+                            QTimer::singleShot(300, button, &QAbstractButton::click);
+                            break;
+                        }
+                }
+            });
+        }
+        // OPSREMOTE_TEST_TAB_MESSAGES=new|open|ended: a local terminal with sample tab
+        // messages; "open" also opens the tab's list, "ended" adds the session-ended prompt. "split" splits it first.
+        if (const auto tab = qEnvironmentVariable("OPSREMOTE_TEST_TAB_MESSAGES"); !tab.isEmpty()) {
+            QTimer::singleShot(300, &window, [&window, tab] {
+                window.openLocalTerminal();
+                QTimer::singleShot(900, &window, [&window, tab] {
+                    auto *page = window.findChild<TerminalPage *>();
+                    if (!page)
+                        return;
+                    window.tabMessage(page, QStringLiteral("Recording to ~/opsremote-logs/2026-11-17 web01.cast"));
+                    window.tabMessage(page, QStringLiteral("Could not send the script deploy-web to the server: "
+                                                           "permission denied for /var/tmp/opsremote-scripts"),
+                                      true);
+                    window.tabMessage(page, QStringLiteral("Scripts run in connected SSH tabs (and local terminals). "
+                                                           "Connect this tab first, then run the script again."));
+                    if (tab == QStringLiteral("ended")) {
+                        // The session-ended prompt, as after a logout.
+                        if (auto *ended = page->findChild<SessionEndedPanel *>()) {
+                            ended->setMessage(QStringLiteral("Disconnected from 192.0.2.10"),
+                                              QStringLiteral("Session closed (exit status 0)."), false);
+                            ended->show();
+                        }
+                    }
+                    if (tab == QStringLiteral("open"))
+                        for (auto *strip : window.findChildren<TabMessageStrip *>())
+                            QTimer::singleShot(300, strip, [strip] { emit strip->historyRequested(); });
+                });
+            });
+        }
+        // OPSREMOTE_TEST_TRANSFERS=strip|tab|all|none: a local terminal with sample
+        // transfers (two running, one done); "tab" opens the tab's transfer
+        // list, "all" the Transfers list.
+        if (const auto mode = qEnvironmentVariable("OPSREMOTE_TEST_TRANSFERS"); !mode.isEmpty()) {
+            QTimer::singleShot(300, &window, [&window, mode] {
+                window.openLocalTerminal();
+                QTimer::singleShot(900, &window, [&window, mode] {
+                    auto *page = window.findChild<TerminalPage *>();
+                    auto *list = TransferList::instance();
+                    if (mode == QStringLiteral("none")) { // the list with no transfers at all
+                        for (auto *button : window.findChildren<StatusIndicator *>())
+                            if (button->stateText().startsWith(QStringLiteral("Transfers")))
+                                QTimer::singleShot(300, button, &QAbstractButton::click);
+                        return;
+                    }
+                    const int done = list->start(page, QStringLiteral("notes.txt"), false);
+                    list->update(done, {}, 4096, 4096);
+                    list->finish(done, TransferList::State::Done);
+                    const auto cancelled = [] {};
+                    const int down = list->start(page, QStringLiteral("report-2026-q3.pdf"), false, cancelled,
+                                                 QStringLiteral("Cancel this transfer and any queued after it"));
+                    list->update(down, {}, 2900000, 10400000, QStringLiteral("2.8 MB of 9.9 MB · 0.9 MB/s"));
+                    const int up = list->start(page, QStringLiteral("backup-2026-11-17.tar.gz"), true, cancelled,
+                                               QStringLiteral("Cancel this transfer and any queued after it"));
+                    list->update(up, {}, 62000000, 100000000, QStringLiteral("59.1 MB of 95.4 MB · 1.4 MB/s"));
+                    // The file transfers' buttons: pause / continue, and retry once cancelled.
+                    list->setPause(up, [](bool) {});
+                    list->setPause(down, [](bool) {});
+                    list->pause(down, true);
+                    const int stopped = list->start(page, QStringLiteral("archlinux-2026.10.01-x86_64.iso"), false, cancelled,
+                                                    QStringLiteral("Cancel this transfer and any queued after it"));
+                    list->setRetry(stopped, [] {});
+                    list->update(stopped, {}, 247000000, 1640000000);
+                    list->finish(stopped, TransferList::State::Cancelled);
+                    window.tabMessage(page, QStringLiteral("Recording to ~/opsremote-logs/2026-11-17 web01.cast"));
+                    // OPSREMOTE_TEST_TRANSFER_END=1: both running ones are cancelled once the list is open.
+                    if (qEnvironmentVariableIntValue("OPSREMOTE_TEST_TRANSFER_END") > 0) {
+                        QTimer::singleShot(1000, &window, [list, up, down] {
+                            list->finish(up, TransferList::State::Cancelled);
+                            list->finish(down, TransferList::State::Cancelled);
+                        });
+                    }
+                    if (mode == QStringLiteral("tab")) {
+                        for (auto *strip : window.findChildren<TabMessageStrip *>())
+                            QTimer::singleShot(300, strip, [strip] { emit strip->transfersRequested(); });
+                    } else if (mode == QStringLiteral("all")) {
+                        for (auto *button : window.findChildren<StatusIndicator *>())
+                            if (button->stateText().startsWith(QStringLiteral("Transfers")))
+                                QTimer::singleShot(300, button, &QAbstractButton::click);
+                    }
+                    // OPSREMOTE_TEST_OVERLAY_BLOCK=1 (with "all"): while the list is
+                    // open, pointer moves and keys sent to the terminal must not
+                    // reach it; a click on it closes the list, then they do again.
+                    if (qEnvironmentVariableIntValue("OPSREMOTE_TEST_OVERLAY_BLOCK") > 0) {
+                        QTimer::singleShot(1000, &window, [&window] {
+                            auto *terminal = window.findChild<TerminalPage *>()->findChild<QTermWidget *>();
+                            auto *target = terminal ? terminal->findChild<QWidget *>() : nullptr;
+                            if (!target) {
+                                std::fprintf(stderr, "test overlay: no terminal\n");
+                                return;
+                            }
+                            struct Counter : QObject
+                            {
+                                int moves = 0, keys = 0;
+                                bool eventFilter(QObject *, QEvent *event) override
+                                {
+                                    moves += event->type() == QEvent::MouseMove;
+                                    keys += event->type() == QEvent::KeyPress;
+                                    return false;
+                                }
+                            };
+                            auto *counter = new Counter;
+                            target->installEventFilter(counter);
+                            const auto send = [target](QEvent::Type type) {
+                                const QPointF at(20, 20);
+                                QMouseEvent event(type, at, target->mapToGlobal(at), Qt::LeftButton,
+                                                  type == QEvent::MouseMove ? Qt::NoButton : Qt::LeftButton, Qt::NoModifier);
+                                QApplication::sendEvent(target, &event);
+                            };
+                            const auto lists = [&window] {
+                                int open = 0;
+                                for (auto *child : window.findChildren<QFrame *>(QStringLiteral("messageList")))
+                                    open += child->isVisible();
+                                return open;
+                            };
+                            send(QEvent::MouseMove);
+                            QKeyEvent key(QEvent::KeyPress, Qt::Key_A, Qt::NoModifier, QStringLiteral("a"));
+                            QApplication::sendEvent(target, &key);
+                            std::fprintf(stderr, "test overlay: list open %d, moves reached %d, keys reached %d\n",
+                                         lists(), counter->moves, counter->keys);
+                            send(QEvent::MouseButtonPress);
+                            send(QEvent::MouseButtonRelease);
+                            QTimer::singleShot(200, &window, [&window, send, counter, lists] {
+                                send(QEvent::MouseMove);
+                                std::fprintf(stderr, "test overlay: after a click: list open %d, moves reached %d\n",
+                                             lists(), counter->moves);
+                            });
+                        });
+                    }
+                });
+            });
+        }
+        // OPSREMOTE_TEST_FILES_TAB=ftp://user:password@host:port?upload=file&download=path[&cancel=ms][&same=…]
+        // opens an FTP file tab, uploads the file to the home folder and
+        // downloads path to a temporary folder at the same time (cancelling
+        // the download through the transfer list after ms), then prints the
+        // transfers' states after OPSREMOTE_TEST_SECONDS (20).
+        if (const auto spec = qEnvironmentVariable("OPSREMOTE_TEST_FILES_TAB"); !spec.isEmpty()) {
+            QTimer::singleShot(300, &window, [&window, spec] {
+                const QUrl url(spec);
+                const QUrlQuery query(url);
+                FtpConnectionSettings settings;
+                settings.host = url.host();
+                settings.port = quint16(url.port(21));
+                settings.username = url.userName();
+                settings.password = url.password();
+                settings.security = QStringLiteral("none");
+                auto *page = new FilesPage(settings, false);
+                window.openTestTab(page, QStringLiteral("FTP test"));
+                const auto upload = query.queryItemValue(QStringLiteral("upload"));
+                const auto download = query.queryItemValue(QStringLiteral("download"));
+                const int cancelAfter = query.queryItemValue(QStringLiteral("cancel")).toInt();
+                const int pauseAfter = query.queryItemValue(QStringLiteral("pause")).toInt();
+                const bool retry = query.queryItemValue(QStringLiteral("retry")) == QStringLiteral("1");
+                // The page makes its session when it starts connecting.
+                auto *wait = new QTimer(page);
+                wait->start(50);
+                QObject::connect(wait, &QTimer::timeout, page, [=] {
+                auto *session = page->findChild<RemoteFileSession *>();
+                if (!session)
+                    return;
+                wait->stop();
+                // same=wait|newname|stop|dont: the upload goes through the panel, and
+                // a second FTP tab uploads the same file 1 s later through its panel,
+                // answering "Same File in Transfer" so (its picture: OPSREMOTE_TEST_SAME_PICTURE).
+                const auto same = query.queryItemValue(QStringLiteral("same"));
+                if (!same.isEmpty()) {
+                    QObject::connect(session, &RemoteFileSession::sftpReady, page, [=](const QString &home) {
+                        page->findChild<SftpPanel *>()->uploadInto({upload}, home);
+                        auto *mainWindow = qobject_cast<MainWindow *>(page->window());
+                        QTimer::singleShot(1000, mainWindow, [=] {
+                            auto *second = new FilesPage(settings, false);
+                            mainWindow->openTestTab(second, QStringLiteral("FTP test 2"));
+                            auto *poll = new QTimer(second);
+                            poll->start(50);
+                            QObject::connect(poll, &QTimer::timeout, second, [=] {
+                                auto *other = second->findChild<RemoteFileSession *>();
+                                if (!other)
+                                    return;
+                                poll->stop();
+                                QObject::connect(other, &RemoteFileSession::sftpReady, second, [=](const QString &home) {
+                                    // Answers each question as it comes (then "Overwrite" when
+                                    // the file the other wrote is there).
+                                    auto *answer = new QTimer(second);
+                                    answer->start(200);
+                                    QObject::connect(answer, &QTimer::timeout, second, [same] {
+                                        for (auto *widget : QApplication::topLevelWidgets()) {
+                                            auto *box = qobject_cast<QMessageBox *>(widget);
+                                            if (!box || !box->isVisible())
+                                                continue;
+                                            const bool sameFile = box->windowTitle() == QStringLiteral("Same File in Transfer");
+                                            if (const auto picture = qEnvironmentVariable("OPSREMOTE_TEST_SAME_PICTURE"); sameFile && !picture.isEmpty())
+                                                box->grab().save(picture);
+                                            const QString text = !sameFile ? QStringLiteral("Overwrite")
+                                                : same == QStringLiteral("wait") ? QStringLiteral("Wait for It")
+                                                : same == QStringLiteral("newname") ? QStringLiteral("Save Under a New Name")
+                                                : same == QStringLiteral("stop") ? QStringLiteral("Stop It, Start This")
+                                                                                 : QStringLiteral("Don't Start");
+                                            for (auto *button : box->buttons()) {
+                                                if (button->text() == text) {
+                                                    std::fprintf(stderr, "test same: %s: %s (enabled %d)\n", qPrintable(box->windowTitle()),
+                                                                 qPrintable(text), button->isEnabled());
+                                                    button->click();
+                                                }
+                                            }
+                                        }
+                                    });
+                                    second->findChild<SftpPanel *>()->uploadInto({upload}, home);
+                                });
+                            });
+                        });
+                    });
+                    return;
+                }
+                QObject::connect(session, &RemoteFileSession::sftpReady, page, [=](const QString &home) {
+                    if (!upload.isEmpty())
+                        session->upload({upload}, home, SftpConflictResolution::Overwrite);
+                    if (!download.isEmpty())
+                        session->download({download}, QDir::tempPath(), SftpConflictResolution::Overwrite);
+                    if (cancelAfter > 0) {
+                        QTimer::singleShot(cancelAfter, page, [retry] {
+                            const auto running = TransferList::instance()->running();
+                            if (!running.isEmpty())
+                                TransferList::instance()->cancel(running.first().id);
+                            // retry=1: that cancelled transfer again, from the beginning.
+                            if (retry && !running.isEmpty())
+                                QTimer::singleShot(500, [id = running.first().id] { TransferList::instance()->retry(id); });
+                        });
+                    }
+                    // pause=ms: paused for 2 s after ms; the % before and after must match.
+                    if (pauseAfter > 0) {
+                        QTimer::singleShot(pauseAfter, page, [page] {
+                            const auto running = TransferList::instance()->running();
+                            if (running.isEmpty())
+                                return;
+                            const int id = running.first().id;
+                            TransferList::instance()->pause(id, true);
+                            QTimer::singleShot(300, page, [id] { // what was already on its way
+                                for (const auto &transfer : TransferList::instance()->transfers())
+                                    if (transfer.id == id)
+                                        std::fprintf(stderr, "test pause: paused at %llu\n", transfer.done);
+                            });
+                            QTimer::singleShot(2300, page, [id] {
+                                for (const auto &transfer : TransferList::instance()->transfers())
+                                    if (transfer.id == id)
+                                        std::fprintf(stderr, "test pause: still at %llu, continuing\n", transfer.done);
+                                TransferList::instance()->pause(id, false);
+                            });
+                        });
+                    }
+                });
+                });
+                const int seconds = qEnvironmentVariableIntValue("OPSREMOTE_TEST_SECONDS") > 0
+                                        ? qEnvironmentVariableIntValue("OPSREMOTE_TEST_SECONDS")
+                                        : 20;
+                QTimer::singleShot(seconds * 1000, &window, [] {
+                    static const char *names[] = {"running", "done", "failed", "cancelled"};
+                    for (const auto &transfer : TransferList::instance()->transfers())
+                        std::printf("transfer %s %s %d%% %s\n", transfer.upload ? "up" : "down",
+                                    qUtf8Printable(transfer.name), transfer.percent(), names[int(transfer.state)]);
+                    std::fflush(stdout);
+                    QCoreApplication::exit(0);
+                });
+            });
+        }
+        // OPSREMOTE_TEST_LEFT_TAB=name: shows that side panel tab (Files, Commands…).
+        if (const auto left = qEnvironmentVariable("OPSREMOTE_TEST_LEFT_TAB"); !left.isEmpty()) {
+            QTimer::singleShot(1500, &window, [&window, left] {
+                for (auto *tabs : window.findChildren<QTabWidget *>())
+                    for (int index = 0; index < tabs->count(); ++index)
+                        if (tabs->tabText(index).remove(QLatin1Char('&')) == left)
+                            tabs->setCurrentIndex(index);
+            });
+        }
         if (const auto drop = qEnvironmentVariable("OPSREMOTE_TEST_DROP"); !drop.isEmpty()) {
             QTimer::singleShot(300, &window, [&window, drop] {
                 window.openLocalTerminal();
@@ -419,6 +731,41 @@ int main(int argc, char *argv[])
                     else
                         std::fprintf(stderr, "test drop: no terminal\n");
                 });
+            });
+        }
+        // OPSREMOTE_TEST_EDGE_DBLCLICK=ms: narrows the side panel after 1 s, then
+        // double-clicks its edge after ms (the panel fits what it shows).
+        if (const int at = qEnvironmentVariableIntValue("OPSREMOTE_TEST_EDGE_DBLCLICK"); at > 0) {
+            QTimer::singleShot(1000, &window, [&window] {
+                if (auto *splitter = qobject_cast<QSplitter *>(window.centralWidget()))
+                    splitter->setSizes({1, splitter->width()});
+                if (qEnvironmentVariableIntValue("OPSREMOTE_TEST_EDGE_NARROW_ONLY") > 0)
+                    return;
+            });
+            QTimer::singleShot(at, &window, [&window] {
+                if (qEnvironmentVariableIntValue("OPSREMOTE_TEST_EDGE_NARROW_ONLY") > 0) {
+                    // Where the side panel's rows start, in the window.
+                    const auto left = [&window](QWidget *widget) { return widget ? widget->mapTo(&window, QPoint()).x() : -1; };
+                    auto *search = window.findChild<QLineEdit *>(QStringLiteral("sessionSearch"));
+                    auto *tree = search ? search->parentWidget()->findChild<QTreeView *>() : nullptr;
+                    auto *tabs = search ? qobject_cast<QTabWidget *>(search->parentWidget()->parentWidget()->parentWidget()) : nullptr;
+                    std::fprintf(stderr, "test rows: tab bar %d, first tab %d, search %d, list %d, list frame %d, header %d\n",
+                                 tabs ? left(tabs->tabBar()) : -1,
+                                 tabs ? left(tabs->tabBar()) + tabs->tabBar()->tabRect(0).x() : -1, left(search),
+                                 left(tree), tree ? tree->frameWidth() : -1, tree ? left(tree->header()) : -1);
+                    return; // the panel stays narrow, for a picture
+                }
+                auto *splitter = qobject_cast<QSplitter *>(window.centralWidget());
+                if (!splitter)
+                    return;
+                auto *handle = splitter->handle(1);
+                const QPointF at(handle->width() / 2.0, handle->height() / 2.0);
+                QMouseEvent click(QEvent::MouseButtonDblClick, at, handle->mapToGlobal(at), Qt::LeftButton,
+                                  Qt::LeftButton, Qt::NoModifier);
+                QApplication::sendEvent(handle, &click);
+                std::fprintf(stderr, "test edge: panel %d\n", splitter->sizes().value(0));
+                for (auto *files : window.findChildren<SftpPanel *>())
+                    std::fprintf(stderr, "test edge: files %d wide, fits in %d\n", files->width(), files->contentsWidth());
             });
         }
         // OPSREMOTE_TEST_CLICK=text[;text…]: clicks the shown button whose text
@@ -445,6 +792,110 @@ int main(int argc, char *argv[])
         }
         // OPSREMOTE_TEST_FONT_SIZE=pt: the interface font changes to it after 500 ms
         // (not saved), to picture how open windows follow.
+        // OPSREMOTE_TEST_PANE_MOVE=hover|left|top|newtab|ontab|group, with
+        // OPSREMOTE_TEST_SPLIT=1 (panes A left, B top right, C bottom right):
+        // drags C as by its bar. hover: held over A's left part (for a
+        // picture); left/top: let go there; newtab: on the tab strip past the
+        // tabs; ontab: on the tab; group: a second split tab (D, E) dragged
+        // whole onto A's right half. Prints the tabs after.
+        if (const auto move = qEnvironmentVariable("OPSREMOTE_TEST_PANE_MOVE"); !move.isEmpty()) {
+            if (move == QStringLiteral("group") || move == QStringLiteral("pull"))
+                QTimer::singleShot(1200, &window, [&window] {
+                    window.openLocalTerminal();
+                    window.openInSplit(Qt::Horizontal, QStringLiteral("local"));
+                });
+            QTimer::singleShot(2500, &window, [&window, move] {
+                auto *drag = window.findChild<PaneDrag *>();
+                auto *tabs = drag ? qobject_cast<QTabWidget *>(drag->parent()) : nullptr;
+                auto panes = window.findChildren<TerminalPage *>();
+                if (!drag || !tabs || panes.size() < 3)
+                    return;
+                const QString names = QStringLiteral("ABCDE");
+                for (int index = 0; index < panes.size() && index < names.size(); ++index)
+                    panes[index]->setObjectName(names.at(index));
+                auto *a = window.findChild<TerminalPage *>(QStringLiteral("A"));
+                auto *c = window.findChild<TerminalPage *>(QStringLiteral("C"));
+                const auto describe = [](QWidget *widget) {
+                    std::function<QString(QWidget *)> of = [&of](QWidget *at) -> QString {
+                        if (auto *terminal = qobject_cast<TerminalPage *>(at))
+                            return terminal->objectName();
+                        if (auto *splitter = qobject_cast<QSplitter *>(at)) {
+                            QStringList parts;
+                            for (int index = 0; index < splitter->count(); ++index)
+                                parts << of(splitter->widget(index));
+                            return QStringLiteral("%1(%2)").arg(splitter->orientation() == Qt::Horizontal ? QStringLiteral("H")
+                                                                                                         : QStringLiteral("V"),
+                                                                 parts.join(QLatin1Char(',')));
+                        }
+                        for (auto *child : at->findChildren<QWidget *>(Qt::FindDirectChildrenOnly))
+                            if (qobject_cast<QSplitter *>(child) || qobject_cast<TerminalPage *>(child))
+                                return of(child);
+                        return QStringLiteral("?");
+                    };
+                    return of(widget);
+                };
+                const auto print = [tabs, describe] {
+                    int grips = 0;
+                    for (auto *widget : tabs->findChildren<QWidget *>())
+                        grips += widget->isVisible() && widget->toolTip() == QStringLiteral("Drag to move this pane");
+                    std::fprintf(stderr, "test move: %d grips shown\n", grips);
+                    for (int index = 0; index < tabs->count(); ++index)
+                        std::fprintf(stderr, "test move: tab %d%s %s\n", index, index == tabs->currentIndex() ? "*" : "",
+                                     qPrintable(describe(tabs->widget(index))));
+                };
+                print();
+                const auto inA = [a](double x, double y) {
+                    return a->mapToGlobal(QPoint(int(a->width() * x), int(a->height() * y)));
+                };
+                auto *bar = tabs->tabBar();
+                if (move == QStringLiteral("group") || move == QStringLiteral("pull")) {
+                    QWidget *second = tabs->widget(tabs->count() - 1);
+                    if (move == QStringLiteral("pull")) {
+                        // pull: as by the mouse, the second tab pressed and pulled down.
+                        const QPoint on = bar->tabRect(tabs->count() - 1).center();
+                        QMouseEvent press(QEvent::MouseButtonPress, QPointF(on), bar->mapToGlobal(QPointF(on)), Qt::LeftButton,
+                                          Qt::LeftButton, Qt::NoModifier);
+                        QApplication::sendEvent(bar, &press);
+                        const QPoint below = on + QPoint(0, bar->height() + 40);
+                        QMouseEvent pull(QEvent::MouseMove, QPointF(below), bar->mapToGlobal(QPointF(below)), Qt::NoButton,
+                                         Qt::LeftButton, Qt::NoModifier);
+                        QApplication::sendEvent(bar, &pull);
+                        std::fprintf(stderr, "test move: dragging after the pull: %d\n", drag->dragging());
+                    } else {
+                        drag->start(second);
+                    }
+                    drag->hover(bar->mapToGlobal(bar->tabRect(0).center())); // tab 1 opens after a moment
+                    QTimer::singleShot(800, drag, [drag, inA, print] {
+                        drag->finish(inA(0.9, 0.5), true);
+                        print();
+                    });
+                    return;
+                }
+                drag->start(c);
+                if (move == QStringLiteral("hover")) {
+                    drag->hover(inA(0.15, 0.5));
+                    return;
+                }
+                const QPoint at = move == QStringLiteral("left")     ? inA(0.1, 0.5)
+                                  : move == QStringLiteral("top")    ? inA(0.5, 0.1)
+                                  : move == QStringLiteral("ontab")  ? bar->mapToGlobal(bar->tabRect(0).center())
+                                                                     : tabs->mapToGlobal(QPoint(tabs->width() - 20, bar->geometry().center().y()));
+                drag->finish(at, true);
+                QTimer::singleShot(300, &window, print);
+            });
+        }
+        // OPSREMOTE_TEST_PANE_BAR=top|bottom|off[@ms]: the pane bar moves there
+        // after ms (2000 by default), as from Preferences (saved), to picture how
+        // open panes follow.
+        if (const auto bar = qEnvironmentVariable("OPSREMOTE_TEST_PANE_BAR"); !bar.isEmpty()) {
+            const auto place = bar.section(QLatin1Char('@'), 0, 0);
+            const int delay = bar.contains(QLatin1Char('@')) ? bar.section(QLatin1Char('@'), 1).toInt() : 2000;
+            QTimer::singleShot(delay, &window, [&window, place] {
+                auto preferences = loadStartupPreferences();
+                preferences.messageStrip = place;
+                window.setStartupPreferences(preferences);
+            });
+        }
         if (const int size = qEnvironmentVariableIntValue("OPSREMOTE_TEST_FONT_SIZE"); size > 0) {
             QTimer::singleShot(500, &window, [size] {
                 auto font = QApplication::font();
@@ -476,9 +927,36 @@ int main(int argc, char *argv[])
                     });
                 }
                 if (qEnvironmentVariableIsSet("OPSREMOTE_TEST_SPLIT")) {
-                    window.openLocalTerminal();
-                    window.openInSplit(Qt::Horizontal, QStringLiteral("local"));
-                    window.openInSplit(Qt::Vertical, QStringLiteral("local"));
+                    // OPSREMOTE_TEST_SPLIT_TARGET: the first tab (a quick-connect
+                    // target) instead of a local terminal.
+                    if (const auto target = qEnvironmentVariable("OPSREMOTE_TEST_SPLIT_TARGET"); !target.isEmpty())
+                        window.openTarget(target);
+                    else if (const auto path = qEnvironmentVariable("OPSREMOTE_TEST_SPLIT_SESSION"); !path.isEmpty())
+                        window.openSessionByPath(path);
+                    else
+                        window.openLocalTerminal();
+                    // OPSREMOTE_TEST_SPLIT=down-same: down with a local terminal,
+                    // then right with the same session; otherwise right, then down.
+                    if (qEnvironmentVariable("OPSREMOTE_TEST_SPLIT") == QStringLiteral("down-same")) {
+                        // As by hand: a while apart, the second beside the first
+                        // pane's saved session (OPSREMOTE_TEST_SPLIT_SESSION, by path).
+                        QTimer::singleShot(1500, &window, [&window] {
+                            window.openInSplit(Qt::Vertical, QStringLiteral("local"));
+                            std::fprintf(stderr, "test split: down done\n");
+                        });
+                        QTimer::singleShot(3000, &window, [&window] {
+                            QString id;
+                            for (auto *terminal : window.findChildren<TerminalPage *>())
+                                if (!terminal->property("sessionId").toString().isEmpty())
+                                    id = terminal->property("sessionId").toString().section(QLatin1Char('#'), 0, 0);
+                            std::fprintf(stderr, "test split: right with %s\n", qPrintable(id));
+                            window.openInSplit(Qt::Horizontal, id);
+                            std::fprintf(stderr, "test split: right done\n");
+                        });
+                    } else {
+                        window.openInSplit(Qt::Horizontal, QStringLiteral("local"));
+                        window.openInSplit(Qt::Vertical, QStringLiteral("local"));
+                    }
                     if (qEnvironmentVariableIsSet("OPSREMOTE_TEST_MULTIEXEC")) {
                         for (auto *terminal : window.findChildren<TerminalPage *>())
                             terminal->setMultiExecTarget(true);
@@ -780,6 +1258,79 @@ int main(int argc, char *argv[])
                             widget->grab().save(file);
                     }
                 });
+            });
+        }
+        // OPSREMOTE_TEST_CLOSE_SIDE=menu item: four local terminals, then that
+        // item of the second tab's menu ("Close Tabs to the Right"…); prints
+        // the tabs left.
+        if (const auto item = qEnvironmentVariable("OPSREMOTE_TEST_CLOSE_SIDE"); !item.isEmpty()) {
+            QTimer::singleShot(300, &window, [&window, item] {
+                for (int count = 0; count < 4; ++count)
+                    window.openLocalTerminal();
+                QTimer::singleShot(1500, &window, [&window, item] {
+                    QTabWidget *tabs = nullptr; // the one holding the terminals
+                    for (auto *candidate : window.findChildren<QTabWidget *>())
+                        if (candidate->count() > 0 && qobject_cast<TerminalPage *>(candidate->widget(0)))
+                            tabs = candidate;
+                    if (!tabs)
+                        return;
+                    for (int index = 0; index < tabs->count(); ++index)
+                        tabs->setTabText(index, QStringLiteral("T%1").arg(index + 1));
+                    QTimer::singleShot(300, &window, [item] {
+                        if (auto *menu = qobject_cast<QMenu *>(QApplication::activePopupWidget())) {
+                            for (auto *action : menu->actions())
+                                if (action->text() == item) {
+                                    std::fprintf(stderr, "test close side: %s enabled %d\n", qPrintable(item),
+                                                 action->isEnabled());
+                                    action->trigger();
+                                }
+                            menu->close();
+                        }
+                    });
+                    QTimer::singleShot(900, &window, [tabs] {
+                        QStringList left;
+                        for (int index = 0; index < tabs->count(); ++index)
+                            left << tabs->tabText(index);
+                        std::fprintf(stderr, "test close side: tabs left %s\n", qPrintable(left.join(QLatin1Char(' '))));
+                    });
+                    emit tabs->tabBar()->customContextMenuRequested(tabs->tabBar()->tabRect(1).center());
+                });
+            });
+        }
+        // OPSREMOTE_TEST_RDP_PASTE=1: a remote desktop tab (to an address that
+        // never answers) gets the clipboard events of a paste there: one paste
+        // is cancelled here, another stopped by a clipboard of the server's own;
+        // prints each transfer's state.
+        if (qEnvironmentVariableIntValue("OPSREMOTE_TEST_RDP_PASTE") > 0) {
+            QTimer::singleShot(300, &window, [&window] {
+                RdpConnectionSettings settings;
+                settings.host = QStringLiteral("192.0.2.1");
+                auto *page = new RdpPage(settings);
+                window.openTestTab(page, QStringLiteral("RDP test"));
+                auto *session = page->findChild<RdpSession *>();
+                auto *list = TransferList::instance();
+                const auto report = [list](const char *step) {
+                    static const char *names[] = {"running", "done", "failed", "cancelled"};
+                    for (const auto &transfer : list->transfers())
+                        std::fprintf(stderr, "test paste: %s: %s %s%s\n", step, qPrintable(transfer.name),
+                                     names[int(transfer.state)], transfer.cancel ? " (can cancel)" : "");
+                };
+                QTimer::singleShot(500, page, [session] { emit session->localFilesProgress(100, 1000, QStringLiteral("first.iso")); });
+                QTimer::singleShot(800, page, [report, list] {
+                    report("pasting");
+                    list->cancel(list->running().first().id);
+                    report("after cancel");
+                });
+                QTimer::singleShot(1100, page, [session] { emit session->localFilesProgress(200, 1000, QStringLiteral("second.iso")); });
+                QTimer::singleShot(1400, page, [session] { emit session->localFilesWithdrawn(); });
+                QTimer::singleShot(1700, page, [report] { report("after the server's own copy"); });
+                // =2: a third paste that Windows stops asking for: failed after 30 s.
+                if (qEnvironmentVariableIntValue("OPSREMOTE_TEST_RDP_PASTE") == 2) {
+                    QTimer::singleShot(2000, page, [session] { emit session->localFilesProgress(300, 1000, QStringLiteral("third.iso")); });
+                    for (int at : {5000, 7000, 15000, 25000, 31000})
+                        QTimer::singleShot(at, page, [report, at] { report(qPrintable(QStringLiteral("at %1 s").arg(at / 1000))); });
+                    QTimer::singleShot(33000, page, [report] { report("32 s without requests"); });
+                }
             });
         }
         // For automated tests: close the window like the user would.

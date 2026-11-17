@@ -2,6 +2,11 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "appdirs.h"
+#include "capabilities.h"
+#include "panebars.h"
+#include "roundedcorners.h"
+#include "statusindicators.h"
+#include "transfers.h"
 #include "filedialogs.h"
 #include "mainwindow.h"
 #include "kubecredentials.h"
@@ -311,14 +316,10 @@ constexpr bool LocalTerminalSupported = true;
 
 void disableLocalTerminalWhereUnsupported(QAction *action)
 {
-#ifdef Q_OS_WIN
-    if (!ConPtyConnection::isAvailable()) {
+    if (const auto problem = Platform::problem(Platform::Feature::LocalTerminals); !problem.isEmpty()) {
         action->setEnabled(false);
-        action->setToolTip(QStringLiteral("Local terminals need Windows 10 version 1809 or newer"));
+        action->setToolTip(problem);
     }
-#else
-    Q_UNUSED(action);
-#endif
 }
 
 // The program a local terminal runs, from the Preferences: (program,
@@ -570,6 +571,42 @@ void saveWindowBorderPreference(bool enabled)
 {
     auto ui = loadPreferencesSection("ui");
     ui["window_border"] = enabled;
+    savePreferencesSection("ui", ui);
+}
+
+int loadCornerRadiusPreference()
+{
+    try {
+        if (const auto ui = loadPreferencesSection("ui"); ui["corner_radius"])
+            return validCornerRadius(ui["corner_radius"].as<int>());
+    } catch (const YAML::Exception &) {
+        // An invalid value uses the default.
+    }
+    return Look().cornerRadius;
+}
+
+void saveCornerRadiusPreference(int radius)
+{
+    auto ui = loadPreferencesSection("ui");
+    ui["corner_radius"] = radius;
+    savePreferencesSection("ui", ui);
+}
+
+bool loadSeeThroughListsPreference()
+{
+    try {
+        if (const auto ui = loadPreferencesSection("ui"); ui["see_through_lists"])
+            return ui["see_through_lists"].as<bool>();
+    } catch (const YAML::Exception &) {
+        // An invalid value uses the default.
+    }
+    return Look().seeThroughLists;
+}
+
+void saveSeeThroughListsPreference(bool seeThrough)
+{
+    auto ui = loadPreferencesSection("ui");
+    ui["see_through_lists"] = seeThrough;
     savePreferencesSection("ui", ui);
 }
 
@@ -1116,8 +1153,21 @@ namespace {
 class SessionTabWidget final : public QTabWidget
 {
 public:
-    using QTabWidget::QTabWidget;
+    explicit SessionTabWidget(QWidget *parent) : QTabWidget(parent)
+    {
+        m_corners = new RoundedCorners(this);
+        if (auto *pages = findChild<QStackedWidget *>(QString(), Qt::FindDirectChildrenOnly)) {
+            m_pages = pages;
+            pages->installEventFilter(this);
+        }
+    }
     std::function<void(int)> inserted;
+    // After the panes' bars were placed: the corners go back on top of them.
+    void raiseCorners()
+    {
+        if (m_pages)
+            m_corners->setArea(m_pages->geometry());
+    }
 
 protected:
     void tabInserted(int index) override
@@ -1126,6 +1176,17 @@ protected:
         if (inserted)
             inserted(index);
     }
+    // The tabs' area: round at its corners (with the panes' bars inside it).
+    bool eventFilter(QObject *watched, QEvent *event) override
+    {
+        if (event->type() == QEvent::Move || event->type() == QEvent::Resize)
+            m_corners->setArea(static_cast<QWidget *>(watched)->geometry());
+        return QTabWidget::eventFilter(watched, event);
+    }
+
+private:
+    RoundedCorners *m_corners = nullptr;
+    QWidget *m_pages = nullptr;
 };
 
 } // namespace
@@ -1143,6 +1204,8 @@ MainWindow::MainWindow(QWidget *parent)
     m_systemFont = QApplication::font();
     applyInterfaceFont(m_systemFont, loadInterfaceFont());
     setWindowBordersEnabled(loadWindowBorderPreference());
+    RoundedCorners::setRadius(loadCornerRadiusPreference());
+    ::setSeeThroughLists(loadSeeThroughListsPreference());
     initializeIconThemes();
     m_iconTheme = loadIconThemePreference();
     bool knownIconTheme = false;
@@ -1196,6 +1259,9 @@ MainWindow::MainWindow(QWidget *parent)
     // undocked, floated, or rearranged.
     auto *splitter = new QSplitter(Qt::Horizontal, this);
     splitter->setChildrenCollapsible(false);
+    // The side panel keeps off the window's left edge as far as the tabs keep
+    // off the panel.
+    splitter->setContentsMargins(splitter->handleWidth(), 0, 0, 0);
     setCentralWidget(splitter);
 
     m_leftTabs = new QTabWidget(splitter);
@@ -1274,7 +1340,6 @@ MainWindow::MainWindow(QWidget *parent)
     sessionTree->itemMoved = [this](QTreeWidgetItem *item) {
         saveSessions();
         saveFolderExpansion();
-        statusBar()->showMessage(QStringLiteral("Moved %1").arg(item->text(0)), 3000);
     };
     m_sessionTree = sessionTree;
     m_sessionTree->setColumnCount(4);
@@ -1333,19 +1398,31 @@ MainWindow::MainWindow(QWidget *parent)
     m_noSessionMatches->setAlignment(Qt::AlignCenter);
     m_noSessionMatches->setStyleSheet(QStringLiteral("color: palette(placeholder-text);"));
     m_noSessionMatches->hide();
-    sessionsLayout->addWidget(m_sessionSearch);
+    // The search box, like the tabs above, starts where the list's box does
+    // (inside its frame); see alignSidePanelRows().
+    m_sessionSearchRow = new QHBoxLayout;
+    m_sessionSearchRow->addWidget(m_sessionSearch);
+    sessionsLayout->addLayout(m_sessionSearchRow);
     sessionsLayout->addWidget(m_noSessionMatches);
     sessionsLayout->addWidget(m_sessionTree, 1);
+    RoundedCorners::follow(m_sessionTree);
     m_leftTabs->addTab(sessionsPage, QStringLiteral("Sessions"));
+    m_leftTabs->tabBar()->installEventFilter(this); // moved in by alignSidePanelRows()
+    alignSidePanelRows();
+    connect(this, &MainWindow::appearanceChanged, this, &MainWindow::alignSidePanelRows);
+    // Its header is the first row when the search box is hidden: the row height
+    // the tab strip has too.
+    m_sessionTree->header()->setFixedHeight(panelRowHeight(m_sessionTree));
+    connect(this, &MainWindow::appearanceChanged, this, [this] {
+        m_sessionTree->header()->setFixedHeight(panelRowHeight(m_sessionTree));
+    });
 
     // Each SSH tab owns its own SFTP panel; the stack shows the active one.
     m_sftpStack = new QStackedWidget(m_leftTabs);
-    m_sftpPlaceholder = new QLabel(QStringLiteral("Open an SSH session to browse its files here."),
-                                   m_sftpStack);
-    m_sftpPlaceholder->setAlignment(Qt::AlignCenter);
-    m_sftpPlaceholder->setWordWrap(true);
-    m_sftpPlaceholder->setMargin(12);
-    m_sftpPlaceholder->setStyleSheet(QStringLiteral("color: palette(placeholder-text);"));
+    // A Files panel without a session: the same look, the reason in its list.
+    m_sftpPlaceholder = new SftpPanel(m_sftpStack);
+    m_sftpPlaceholder->showPlaceholder(QStringLiteral("Files"),
+                                       QStringLiteral("Open an SSH session to browse its files here."));
     m_sftpStack->addWidget(m_sftpPlaceholder);
     // "Files": SFTP, SCP or FTP; the panel's header says which.
     m_leftTabs->addTab(m_sftpStack, QStringLiteral("Files"));
@@ -1359,7 +1436,7 @@ MainWindow::MainWindow(QWidget *parent)
         if (auto *page = activeTerminal(m_sessionTabs->currentWidget()))
             runSavedScriptInTab(page, name);
         else
-            statusBar()->showMessage(QStringLiteral("Open an SSH tab (or a local terminal) first."), 5000);
+            notify(QStringLiteral("Open an SSH tab (or a local terminal) first."));
     });
     connect(m_scriptsPanel, &ScriptsPanel::runOnHostsRequested, this, [this](const QString &name) {
         auto *item = selectedItem();
@@ -1376,6 +1453,65 @@ MainWindow::MainWindow(QWidget *parent)
     // Each new tab gets its (idle) activity mark.
     sessionTabs->inserted = [this](int index) { showTabActivity(index); };
     m_sessionTabs = sessionTabs;
+    // A bar on each pane with what it says (see PaneBars); the history of
+    // messages and transfers is at the bottom right.
+    m_paneBars = new PaneBars(sessionTabs);
+    // Terminals and whole tabs dragged to other places (see PaneDrag): a pane
+    // by its bar or grip, a tab pulled down out of the tab strip.
+    m_paneDrag = new PaneDrag(sessionTabs);
+    m_paneBars->movable = [](QWidget *page) { return qobject_cast<TerminalPage *>(page) != nullptr; };
+    m_paneDrag->movable = [](QWidget *page) {
+        return qobject_cast<TerminalPage *>(page) != nullptr || qobject_cast<SplitTab *>(page) != nullptr;
+    };
+    m_paneDrag->canDrop = [this](QWidget *dragged, TerminalPage *target) { return canDropOn(dragged, target); };
+    m_paneDrag->panesOf = [this](QWidget *tab) { return terminalPagesIn(tab); };
+    m_paneDrag->activePaneOf = [this](QWidget *tab) { return activeTerminal(tab); };
+    m_paneDrag->dropped = [this](QWidget *dragged, const PaneDrag::Drop &drop) { moveDropped(dragged, drop); };
+    connect(m_paneBars, &PaneBars::dragRequested, m_paneDrag, &PaneDrag::start);
+    // Questions about a transfer name its tab ("smoke@host › Pane 2").
+    TransferList::ownerName = [this](QWidget *owner) { return paneLabel(owner); };
+    m_paneBars->floats = [](QWidget *page) { return qobject_cast<RemoteScreenPage *>(page) != nullptr; };
+    m_paneBars->placed = [sessionTabs] { sessionTabs->raiseCorners(); };
+    m_paneBars->setPlace(m_startup.messageStrip, m_startup.messageBar);
+    TabPrompt::setInStrip(m_paneBars->shown());
+    connect(m_paneBars, &PaneBars::barCreated, this, [this](QWidget *page, TabMessageStrip *bar) {
+        const QPointer<QWidget> pane(page);
+        connect(bar, &TabMessageStrip::promptActionRequested, this, [pane](int action) {
+            if (auto *prompt = pane ? promptOf(pane) : nullptr)
+                prompt->run(action);
+        });
+        connect(bar, &TabMessageStrip::promptDismissRequested, this, [pane] {
+            if (auto *prompt = pane ? promptOf(pane) : nullptr)
+                prompt->dismiss();
+        });
+        connect(bar, &TabMessageStrip::dismissRequested, this, [this, pane] {
+            if (pane)
+                tabLog(pane)->markAllRead();
+        });
+        connect(bar, &TabMessageStrip::transfersRequested, this, [this] {
+            if (m_transfersIndicator)
+                m_transfersIndicator->click(); // the list of all of them, at the bottom right
+        });
+        // ✕ on the transfer: cancels a running one, puts an ended one away.
+        connect(bar, &TabMessageStrip::cancelTransferRequested, this, [this, pane] {
+            if (!pane)
+                return;
+            const auto shown = paneTransfer(pane);
+            if (!shown)
+                return;
+            if (shown->state == TransferList::State::Running)
+                TransferList::instance()->cancel(shown->id);
+            else {
+                m_transfersPutAway.insert(shown->id);
+                updatePaneBars();
+            }
+        });
+    });
+    connect(TabPrompt::hub(), &TabPrompt::changed, this, &MainWindow::updatePaneBars);
+    connect(m_sessionTabs, &QTabWidget::currentChanged, this, [this] {
+        updatePaneBars();
+        m_paneBars->placeAll();
+    });
     // Colours from the look follow a new look, once its palette is applied.
     connect(this, &MainWindow::appearanceChanged, this, [this] {
         QTimer::singleShot(0, this, [this] {
@@ -1404,6 +1540,8 @@ MainWindow::MainWindow(QWidget *parent)
 
     splitter->addWidget(m_leftTabs);
     splitter->addWidget(m_sessionTabs);
+    // A double-click on the panel's edge fits the panel to what it shows.
+    splitter->handle(1)->installEventFilter(this);
     splitter->setStretchFactor(1, 1);
     splitter->setSizes({300, 800});
     connect(m_sessionTree, &QTreeWidget::itemDoubleClicked,
@@ -1457,7 +1595,6 @@ MainWindow::MainWindow(QWidget *parent)
         fitSessionPanel();
     });
 
-    statusBar()->showMessage(QStringLiteral("Ready — double-click a saved session to open its tab"));
 
     if (m_startup.rememberWindow) {
         const auto geometry = loadWindowGeometry();
@@ -1519,6 +1656,17 @@ MainWindow::MainWindow(QWidget *parent)
         updateMultiExecIndicator();
     });
     statusBar()->addPermanentWidget(m_multiExecIndicator);
+    m_messageLog = new MessageLog(this);
+    m_messagesIndicator = new MessagesIndicator(m_messageLog, this);
+    statusBar()->addPermanentWidget(m_messagesIndicator->button());
+    m_transfersIndicator = new StatusIndicator(themedIcon(QStringLiteral("network-transmit-receive"), QStyle::SP_BrowserReload),
+                                               QStringLiteral("Transfers · 88 · 88%"), this);
+    statusBar()->addPermanentWidget(m_transfersIndicator);
+    connect(m_transfersIndicator, &QAbstractButton::clicked, this, [this] {
+        showTransferList(m_transfersIndicator, {}, [this](QWidget *owner) { return transferPlace(owner); }, false);
+    });
+    connect(TransferList::instance(), &TransferList::changed, this, &MainWindow::updateTransfers);
+    updateTransfers();
 
     if (firstStart) {
         for (const auto &look : builtInLooks()) {
@@ -2079,7 +2227,7 @@ void MainWindow::createToolbar()
         const QString target = quickConnect->currentText().trimmed();
         QString error;
         if (!openTarget(target, &error)) {
-            statusBar()->showMessage(error, 6000);
+            notify(error, true);
             return;
         }
         const QSignalBlocker blocker(quickConnect);
@@ -2201,6 +2349,8 @@ QByteArray settingsSnapshot()
     saveIconThemePreference(loadIconThemePreference());
     saveInterfaceFont(loadInterfaceFont());
     saveWindowBorderPreference(loadWindowBorderPreference());
+    saveCornerRadiusPreference(loadCornerRadiusPreference());
+    saveSeeThroughListsPreference(loadSeeThroughListsPreference());
     saveFolderExpansionStates({});
     saveTerminalAppearance(loadTerminalAppearance());
     saveDarkTerminalColorScheme(loadDarkTerminalColorScheme());
@@ -2574,7 +2724,6 @@ void MainWindow::importSessions()
             return;
         }
         saveSessions();
-        statusBar()->showMessage(QStringLiteral("Imported session configuration"), 3000);
     } catch (const YAML::Exception &error) {
         QMessageBox::warning(this, QStringLiteral("Invalid YAML file"),
                              QString::fromLocal8Bit(error.what()));
@@ -2688,7 +2837,6 @@ bool MainWindow::ensureVaultUnlocked()
             const bool unlocked = m_vault.unlock(masterPassword, &error);
             masterPassword.fill(QChar(0));
             if (unlocked) {
-                statusBar()->showMessage(QStringLiteral("Credential vault unlocked"), 3000);
                 return true;
             }
         }
@@ -2707,7 +2855,6 @@ bool MainWindow::ensureVaultUnlocked()
         QMessageBox::warning(this, QStringLiteral("Could not create vault"), error);
         return false;
     }
-    statusBar()->showMessage(QStringLiteral("Credential vault created and unlocked"), 3000);
     return true;
 }
 
@@ -2903,7 +3050,6 @@ void MainWindow::editFolderSettings(QTreeWidgetItem *folder)
     folder->setData(0, FolderAutomationRole, automationToText(automation->value()));
     saveProxyPassword(proxy->value(), proxy->password());
     saveSessions();
-    statusBar()->showMessage(QStringLiteral("Saved folder settings: %1").arg(folder->text(0)), 3000);
 }
 
 // Del: the selected folder (with its contents) or session.
@@ -2943,7 +3089,6 @@ void MainWindow::deleteSelectedItem()
     else
         delete m_sessionTree->takeTopLevelItem(m_sessionTree->indexOfTopLevelItem(item));
     saveSessions();
-    statusBar()->showMessage(QStringLiteral("Deleted session: %1").arg(name), 3000);
 }
 
 void MainWindow::deleteSelectedFolder()
@@ -3002,7 +3147,6 @@ void MainWindow::deleteSelectedFolder()
         delete m_sessionTree->takeTopLevelItem(m_sessionTree->indexOfTopLevelItem(folder));
     saveSessions();
     saveFolderExpansion();
-    statusBar()->showMessage(QStringLiteral("Deleted folder: %1").arg(folderName), 3000);
 }
 
 void MainWindow::createSession()
@@ -3154,9 +3298,8 @@ void MainWindow::openLocalTerminal()
                              ? new TerminalPage(effectiveTerminalAppearance(), m_sessionTabs)
                              : newLocalProgramPage(shell.program, shell.arguments, shell.label,
                                                    effectiveTerminalAppearance());
-#ifdef Q_OS_LINUX
-    page->setFileDropKind(TerminalPage::FileDropKind::Local); // dropped files go to its folder
-#endif
+    if (Platform::has(Platform::Feature::LocalFileDrop))
+        page->setFileDropKind(TerminalPage::FileDropKind::Local); // dropped files go to its folder
     connectTerminalPage(page);
     applyTabSettings(page, QStringLiteral("local"));
     addSessionTab(page, shell.label, QStringLiteral("Local shell: %1").arg(shell.label));
@@ -3267,9 +3410,8 @@ TerminalPage *MainWindow::openLocalSession(const SessionDefinition &session)
         terminal = shell.program.isEmpty()
                        ? new TerminalPage(appearance, m_sessionTabs)
                        : newLocalProgramPage(shell.program, shell.arguments, shell.label, appearance, options.folder);
-#ifdef Q_OS_LINUX
-        terminal->setFileDropKind(TerminalPage::FileDropKind::Local); // dropped files go to its folder
-#endif
+        if (Platform::has(Platform::Feature::LocalFileDrop))
+            terminal->setFileDropKind(TerminalPage::FileDropKind::Local); // dropped files go to its folder
     } else if (session.protocol == QStringLiteral("WSL")) {
         const auto command = wslCommand(options);
         terminal = newLocalProgramPage(command.program, command.arguments, QStringLiteral("WSL"), appearance);
@@ -3433,7 +3575,7 @@ void MainWindow::openSelectedSession()
 {
     auto *item = selectedItem();
     if (!item || isFolder(item)) {
-        statusBar()->showMessage(QStringLiteral("Select a saved session first"), 3000);
+        notify(QStringLiteral("Select a saved session first"));
         return;
     }
 
@@ -3607,7 +3749,6 @@ void MainWindow::editSelectedSession()
     }
     applyTerminalAppearanceToTabs();
     saveSessions();
-    statusBar()->showMessage(QStringLiteral("Saved session: %1").arg(updated.name), 3000);
 }
 
 // Renames a session or folder (F2 in the session list).
@@ -3647,7 +3788,6 @@ void MainWindow::renameTreeItem(QTreeWidgetItem *item, const QString &newName)
         }
     }
     saveSessions();
-    statusBar()->showMessage(QStringLiteral("Renamed session to %1").arg(name), 3000);
 }
 
 // A copy of the session right below it, named "Name (1)", "Name (2)", ...
@@ -3673,11 +3813,10 @@ void MainWindow::duplicateSession(QTreeWidgetItem *item)
     copy.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
     copy.name = QStringLiteral("%1 (%2)").arg(base).arg(number);
     // The saved password comes along when the vault is open.
-    bool passwordCopied = false;
     if (m_vault.isUnlocked()) {
         QString password = m_vault.passwordForSession(original->id);
-        if (!password.isEmpty())
-            passwordCopied = m_vault.setPassword(copy.id, password);
+        if (!password.isEmpty() && !m_vault.setPassword(copy.id, password))
+            notify(QStringLiteral("Duplicated as %1, but its password could not be copied.").arg(copy.name), true);
         password.fill(QChar(0));
     }
     auto *parent = item->parent();
@@ -3709,13 +3848,8 @@ void MainWindow::duplicateSession(QTreeWidgetItem *item)
         m_sessionTree->insertTopLevelItem(position, added);
     m_sessionTree->setCurrentItem(added);
     saveSessions();
-    statusBar()->showMessage(
-        m_vault.exists() && !m_vault.isUnlocked()
-            ? QStringLiteral("Duplicated as %1 (the vault is locked, so its password was not copied)")
-                  .arg(copy.name)
-            : QStringLiteral("Duplicated as %1%2")
-                  .arg(copy.name, passwordCopied ? QStringLiteral(", with its password") : QString()),
-        5000);
+    if (m_vault.exists() && !m_vault.isUnlocked())
+        notify(QStringLiteral("Duplicated as %1 (the vault is locked, so its password was not copied)").arg(copy.name));
 }
 
 void MainWindow::showTreeContextMenu(const QPoint &position)
@@ -3797,9 +3931,7 @@ void MainWindow::showTreeContextMenu(const QPoint &position)
             const QString name = session->name;
             menu.addAction(QStringLiteral("Wake Up"), this, [this, wake, name] {
                 QString error;
-                if (wake.send(&error))
-                    statusBar()->showMessage(QStringLiteral("Sent Wake-on-LAN to %1").arg(name), 5000);
-                else
+                if (!wake.send(&error))
                     QMessageBox::warning(this, QStringLiteral("Wake-on-LAN"), error);
             });
         }
@@ -3968,12 +4100,11 @@ void MainWindow::openSession(const SessionDefinition &session)
     if (wake.isSet() && wake.beforeConnecting && !m_waking.contains(session.id)) {
         QString error;
         if (!wake.send(&error)) {
-            statusBar()->showMessage(QStringLiteral("Wake-on-LAN failed: %1").arg(error), 5000);
+            notify(QStringLiteral("Wake-on-LAN failed: %1").arg(error), true);
         } else {
             m_waking.insert(session.id);
-            statusBar()->showMessage(QStringLiteral("Waking %1; connecting in %2 s…")
-                                         .arg(session.name).arg(wake.effectiveWait()),
-                                     wake.effectiveWait() * 1000);
+            notify(QStringLiteral("Waking %1; connecting in %2 s…")
+                   .arg(session.name).arg(wake.effectiveWait()));
             QTimer::singleShot(wake.effectiveWait() * 1000, this, [this, session] {
                 const auto current = m_sessions.value(session.id, session);
                 openSession(current);
@@ -3990,8 +4121,7 @@ void MainWindow::openSession(const SessionDefinition &session)
         // password is kept there); a wrong master password or cancelling the
         // prompt does not open the session.
         if (m_vault.needsUnlock(session.id) && !ensureVaultUnlocked()) {
-            statusBar()->showMessage(
-                QStringLiteral("Session not opened: the credential vault is locked"), 5000);
+            notify(QStringLiteral("Session not opened: the credential vault is locked"), true);
             return;
         }
         if (!resolveJumpHosts(session, &settings.jumps))
@@ -4021,8 +4151,7 @@ void MainWindow::openSession(const SessionDefinition &session)
         settings.configPath = stateFilePath(QStringLiteral("rdp"));
         settings.options = loadRdpDefaults().overriddenBy(session.rdp);
         if (m_vault.needsUnlock(session.id) && !ensureVaultUnlocked()) {
-            statusBar()->showMessage(
-                QStringLiteral("Session not opened: the credential vault is locked"), 5000);
+            notify(QStringLiteral("Session not opened: the credential vault is locked"), true);
             return;
         }
         if (!resolveJumpHosts(session, &settings.jumps))
@@ -4033,14 +4162,13 @@ void MainWindow::openSession(const SessionDefinition &session)
         settings.password.fill(QChar(0));
         for (auto &jump : settings.jumps)
             jump.password.fill(QChar(0));
-        connect(rdp, &RdpPage::statusMessage, this, [this](const QString &message) {
-            statusBar()->showMessage(message, 5000);
+        connect(rdp, &RdpPage::statusMessage, this, [this, rdp](const QString &message) {
+            tabMessage(rdp, message);
         });
         page = rdp;
     } else if (session.protocol.compare(QStringLiteral("VNC"), Qt::CaseInsensitive) == 0) {
         if (m_vault.needsUnlock(session.id) && !ensureVaultUnlocked()) {
-            statusBar()->showMessage(
-                QStringLiteral("Session not opened: the credential vault is locked"), 5000);
+            notify(QStringLiteral("Session not opened: the credential vault is locked"), true);
             return;
         }
         VncPageSettings settings;
@@ -4068,8 +4196,8 @@ void MainWindow::openSession(const SessionDefinition &session)
         connection.password.fill(QChar(0));
         for (auto &jump : settings.jumps)
             jump.password.fill(QChar(0));
-        connect(vnc, &VncPage::statusMessage, this, [this](const QString &message) {
-            statusBar()->showMessage(message, 5000);
+        connect(vnc, &VncPage::statusMessage, this, [this, vnc](const QString &message) {
+            tabMessage(vnc, message);
         });
         connect(vnc, &VncPage::passwordSaveRequested, this, [this, baseId](const QString &password) {
             if (m_vault.needsVault(baseId) && !ensureVaultUnlocked())
@@ -4084,8 +4212,7 @@ void MainWindow::openSession(const SessionDefinition &session)
         // A file session: SSH without a terminal, the file browser in the tab.
         auto settings = sshSettingsFor(session.host, session.port, session.username, sessionSshOptions(session));
         if (m_vault.needsUnlock(session.id) && !ensureVaultUnlocked()) {
-            statusBar()->showMessage(
-                QStringLiteral("Session not opened: the credential vault is locked"), 5000);
+            notify(QStringLiteral("Session not opened: the credential vault is locked"), true);
             return;
         }
         if (!resolveJumpHosts(session, &settings.jumps))
@@ -4103,14 +4230,13 @@ void MainWindow::openSession(const SessionDefinition &session)
         settings.password.fill(QChar(0));
         for (auto &jump : settings.jumps)
             jump.password.fill(QChar(0));
-        connect(files, &FilesPage::statusMessage, this, [this](const QString &message) {
-            statusBar()->showMessage(message, 5000);
+        connect(files, &FilesPage::statusMessage, this, [this, files](const QString &message) {
+            tabMessage(files, message);
         });
         page = files;
     } else if (session.protocol.compare(QStringLiteral("FTP"), Qt::CaseInsensitive) == 0) {
         if (m_vault.needsUnlock(session.id) && !ensureVaultUnlocked()) {
-            statusBar()->showMessage(
-                QStringLiteral("Session not opened: the credential vault is locked"), 5000);
+            notify(QStringLiteral("Session not opened: the credential vault is locked"), true);
             return;
         }
         const auto options = loadFtpDefaults().overriddenBy(session.ftp);
@@ -4131,8 +4257,8 @@ void MainWindow::openSession(const SessionDefinition &session)
         auto *ftp = new FilesPage(settings, m_vault.exists(), m_sessionTabs);
         settings.password.fill(QChar(0));
         settings.proxy.password.fill(QChar(0));
-        connect(ftp, &FilesPage::statusMessage, this, [this](const QString &message) {
-            statusBar()->showMessage(message, 5000);
+        connect(ftp, &FilesPage::statusMessage, this, [this, ftp](const QString &message) {
+            tabMessage(ftp, message);
         });
         connect(ftp, &FilesPage::passwordSaveRequested, this, [this, baseId](const QString &password) {
             if (m_vault.needsVault(baseId) && !ensureVaultUnlocked())
@@ -4210,7 +4336,6 @@ void MainWindow::openSession(const SessionDefinition &session)
                     : QStringLiteral("%1 (%2)").arg(session.name, userHost);
     }
     addSessionTab(page, title, QStringLiteral("%1 — %2").arg(session.protocol, session.host));
-    statusBar()->showMessage(QStringLiteral("Opened session tab: %1").arg(session.name), 3000);
     recordRecentSession(session.id);
 }
 
@@ -5152,7 +5277,7 @@ void MainWindow::runSavedScriptInTab(TerminalPage *page, const QString &name)
         return;
     const auto script = findSavedScript(name);
     if (!script) {
-        statusBar()->showMessage(QStringLiteral("There is no saved script called %1.").arg(name), 5000);
+        tabMessage(page, QStringLiteral("There is no saved script called %1.").arg(name));
         return;
     }
     QHash<QString, QString> values{{QStringLiteral("user"), page->sshSettings().username},
@@ -5167,24 +5292,25 @@ void MainWindow::runSavedScriptInTab(TerminalPage *page, const QString &name)
         return;
     }
     if (page->isLocal()) {
-#ifdef Q_OS_WIN
-        statusBar()->showMessage(QStringLiteral("Saved scripts run on SSH servers; local terminals on "
-                                                "Windows are not supported yet."), 6000);
-#else
+        if (const auto problem = Platform::problem(Platform::Feature::LocalScripts); !problem.isEmpty()) {
+            tabMessage(page, problem);
+            return;
+        }
         QTemporaryFile file(QDir::temp().filePath(QStringLiteral("opsremote-XXXXXX")));
         file.setAutoRemove(false);
         if (!file.open() || file.write(body.toUtf8() + '\n') < 0) {
-            statusBar()->showMessage(QStringLiteral("Could not store the script."), 5000);
+            tabMessage(page, QStringLiteral("Could not store the script."), true);
             return;
         }
         file.close();
         page->sendInput((runStoredScriptLine(*script, file.fileName()) + QLatin1Char('\r')).toUtf8());
-#endif
         return;
     }
     auto *ssh = page->sshSession();
     if (!ssh || !page->isConnected()) {
-        statusBar()->showMessage(QStringLiteral("Scripts run in connected SSH tabs (and local terminals)."), 6000);
+        tabMessage(page, Platform::has(Platform::Feature::LocalScripts)
+                             ? QStringLiteral("Scripts run in connected SSH tabs (and local terminals).")
+                             : QStringLiteral("Scripts run in connected SSH tabs."));
         return;
     }
     const int id = ssh->runCommand(storeScriptCommand(body), false, 30, 4096);
@@ -5200,10 +5326,10 @@ void MainWindow::runSavedScriptInTab(TerminalPage *page, const QString &name)
                               const auto marker = QByteArrayLiteral("OPSREMOTE-SCRIPT:");
                               const int at = output.indexOf(marker);
                               if (exitStatus != 0 || at < 0) {
-                                  statusBar()->showMessage(
-                                      QStringLiteral("Could not send the script %1 to the server%2.")
-                                          .arg(script.name, error.isEmpty() ? QString() : QStringLiteral(": ") + error),
-                                      8000);
+                                  tabMessage(page,
+                                             QStringLiteral("Could not send the script %1 to the server%2.")
+                                                 .arg(script.name, error.isEmpty() ? QString() : QStringLiteral(": ") + error),
+                                             true);
                                   return;
                               }
                               const auto path = QString::fromUtf8(output.mid(at + marker.size())).section(QLatin1Char('\n'), 0, 0).trimmed();
@@ -5361,6 +5487,8 @@ Look MainWindow::currentLook() const
     look.interfaceFontFamily = font.family;
     look.interfaceFontSize = font.pointSize;
     look.windowBorder = windowBordersEnabled();
+    look.cornerRadius = RoundedCorners::radius();
+    look.seeThroughLists = ::seeThroughLists();
     return look;
 }
 
@@ -5389,6 +5517,8 @@ void MainWindow::applyLook(const Look &look)
         setIconThemeChoice(knownIcons ? look.iconTheme : QString());
         setInterfaceFont(look.interfaceFontFamily, look.interfaceFontSize);
         setWindowBorders(look.windowBorder);
+        setCornerRadius(look.cornerRadius);
+        setSeeThroughLists(look.seeThroughLists);
         TerminalAppearance terminal;
         terminal.colorScheme = look.terminalScheme;
         terminal.fontFamily = look.terminalFontFamily;
@@ -5397,7 +5527,6 @@ void MainWindow::applyLook(const Look &look)
         setDarkTerminalColorScheme(look.darkTerminalScheme);
     }
     setBaseLook(look.id);
-    statusBar()->showMessage(QStringLiteral("Look: %1").arg(look.name), 3000);
     emit appearanceChanged();
     emit looksChanged();
 }
@@ -5568,6 +5697,31 @@ void MainWindow::setWindowBorders(bool enabled)
     setWindowBordersEnabled(enabled);    emit appearanceChanged();
 }
 
+int MainWindow::cornerRadius() const
+{
+    return RoundedCorners::radius();
+}
+
+void MainWindow::setCornerRadius(int radius)
+{
+    radius = validCornerRadius(radius);
+    saveCornerRadiusPreference(radius);
+    RoundedCorners::setRadius(radius);
+    emit appearanceChanged();
+}
+
+bool MainWindow::seeThroughLists() const
+{
+    return ::seeThroughLists();
+}
+
+void MainWindow::setSeeThroughLists(bool seeThrough)
+{
+    saveSeeThroughListsPreference(seeThrough);
+    ::setSeeThroughLists(seeThrough);
+    emit appearanceChanged();
+}
+
 void MainWindow::setDefaultTerminalAppearance(const TerminalAppearance &appearance)
 {
     m_terminalAppearance = appearance;
@@ -5679,7 +5833,8 @@ void MainWindow::showSftpPanelForCurrentTab()
     auto *page = activeTerminal(m_sessionTabs->currentWidget());
     auto *panel = page ? page->sftpPanel() : nullptr;
     if (!panel) {
-        m_sftpPlaceholder->setText(
+        m_sftpPlaceholder->showPlaceholder(
+            QStringLiteral("Files"),
             m_sessionTabs->count() == 0
                 ? QStringLiteral("Open an SSH session to browse its files here.")
                 : qobject_cast<FilesPage *>(m_sessionTabs->currentWidget())
@@ -5804,6 +5959,9 @@ void MainWindow::setStartupPreferences(const StartupPreferences &preferences)
 {
     m_startup = preferences;
     saveStartupPreferences(preferences);
+    m_paneBars->setPlace(m_startup.messageStrip, m_startup.messageBar);
+    TabPrompt::setInStrip(m_paneBars->shown());
+    updatePaneBars();
 }
 
 // The host has its own column (Preferences → Appearance → Session list).
@@ -5814,8 +5972,8 @@ QString MainWindow::sessionLabel(const SessionDefinition &session) const
 
 void MainWindow::connectTerminalPage(TerminalPage *page)
 {
-    connect(page, &TerminalPage::statusMessage, this, [this](const QString &message) {
-        statusBar()->showMessage(message, 5000);
+    connect(page, &TerminalPage::statusMessage, this, [this, page](const QString &message) {
+        tabMessage(page, message);
     });
     // Background tabs with new output or a bell are marked.
     auto mark = [this, page] { markTabActivity(page); };
@@ -5824,9 +5982,7 @@ void MainWindow::connectTerminalPage(TerminalPage *page)
     connect(page, &TerminalPage::automationMark, this, mark);
     connect(page, &TerminalPage::scriptMenuRequested, this, [this, page](QMenu *menu) { addScriptMenu(menu, page); });
     connect(page, &TerminalPage::automationNotice, this, [this, page, mark](const QString &message) {
-        const int index = tabIndexOf(page);
-        const auto tab = index >= 0 ? m_sessionTabs->tabText(index) : QString();
-        statusBar()->showMessage(tab.isEmpty() ? message : QStringLiteral("%1: %2").arg(tab, message), 15000);
+        tabMessage(page, message);
         mark();
         QApplication::alert(this);
     });
@@ -5870,6 +6026,9 @@ void MainWindow::connectTerminalPage(TerminalPage *page)
 
 void MainWindow::addSessionTab(QWidget *page, const QString &title, const QString &toolTip)
 {
+    // Kept for a tab of its own, should it be moved out of a split tab.
+    page->setProperty("opsremoteTabTitle", title);
+    page->setProperty("opsremoteTabToolTip", toolTip);
     // A terminal opened for Split Right / Split Down goes into that tab.
     if (const auto pending = std::exchange(m_pendingSplit, {}); pending.beside) {
         if (auto *terminal = qobject_cast<TerminalPage *>(page)) {
@@ -5934,7 +6093,7 @@ void MainWindow::addRemoteScreenActions(QMenu *menu, RemoteScreenPage *screen)
     menu->addAction(QStringLiteral("Save Screenshot…"), this, [this, screen] {
         const QImage image = screen->screenshot();
         if (image.isNull()) {
-            statusBar()->showMessage(QStringLiteral("Nothing to save yet: not connected."), 5000);
+            tabMessage(screen, QStringLiteral("Nothing to save yet: not connected."));
             return;
         }
         const QString name = QStringLiteral("%1 %2.png")
@@ -5947,9 +6106,7 @@ void MainWindow::addRemoteScreenActions(QMenu *menu, RemoteScreenPage *screen)
         if (path.isEmpty())
             return;
         if (image.save(path))
-            statusBar()->showMessage(QStringLiteral("Screenshot saved to %1")
-                                         .arg(QDir::toNativeSeparators(path)),
-                                     5000);
+            tabMessage(screen, QStringLiteral("Screenshot saved to %1").arg(QDir::toNativeSeparators(path)));
         else
             QMessageBox::warning(this, QStringLiteral("Save Screenshot"),
                                  QStringLiteral("Could not save %1.").arg(QDir::toNativeSeparators(path)));
@@ -5994,6 +6151,21 @@ void MainWindow::showTabContextMenu(const QPoint &position)
                 closeSessionTab(other);
         }
     });
+    // The tabs on one side; by page, since each may ask first or stay open.
+    const auto closeSide = [this](int from, int to) {
+        QList<QPointer<QWidget>> pages;
+        for (int other = from; other < to; ++other)
+            pages.append(m_sessionTabs->widget(other));
+        for (int page = int(pages.size()) - 1; page >= 0; --page) {
+            if (pages[page] && m_sessionTabs->indexOf(pages[page]) >= 0)
+                closeSessionTab(m_sessionTabs->indexOf(pages[page]));
+        }
+    };
+    menu.addAction(QStringLiteral("Close Tabs to the Left"), this, [closeSide, index] { closeSide(0, index); })
+        ->setEnabled(index > 0);
+    menu.addAction(QStringLiteral("Close Tabs to the Right"), this, [this, closeSide, index] {
+        closeSide(index + 1, m_sessionTabs->count());
+    })->setEnabled(index < m_sessionTabs->count() - 1);
     menu.exec(m_sessionTabs->tabBar()->mapToGlobal(position));
 }
 
@@ -6007,6 +6179,21 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
         break;
     default:
         break;
+    }
+    // The side panel's tab bar, where the tab widget puts it, moved in to
+    // start where the session list's box does (and no wider than the room).
+    if ((event->type() == QEvent::Move || event->type() == QEvent::Resize) && m_leftTabs
+        && watched == m_leftTabs->tabBar() && m_sidePanelInset > 0) {
+        auto *bar = m_leftTabs->tabBar();
+        if (bar->x() < m_sidePanelInset) {
+            const int right = qMin(bar->geometry().right(), m_leftTabs->width() - 1);
+            bar->setGeometry(m_sidePanelInset, bar->y(), right + 1 - m_sidePanelInset, bar->height());
+        }
+    }
+    if (event->type() == QEvent::MouseButtonDblClick && m_leftTabs
+        && watched == qobject_cast<QSplitter *>(m_leftTabs->parentWidget())->handle(1)) {
+        fitSidePanelToContents();
+        return true;
     }
     // Drop-down lists and number fields, in every window: the wheel changes
     // them only as Preferences → Workspace → Mouse says; otherwise it goes
@@ -6161,10 +6348,9 @@ void MainWindow::resizeEvent(QResizeEvent *event)
 void MainWindow::lockVaultFor(const QString &reason)
 {
     m_vault.lock();
-    statusBar()->showMessage(reason.isEmpty()
-                                 ? QStringLiteral("Credential vault locked")
-                                 : QStringLiteral("Credential vault locked %1").arg(reason),
-                             5000);
+    notify(reason.isEmpty()
+           ? QStringLiteral("Credential vault locked")
+           : QStringLiteral("Credential vault locked %1").arg(reason));
 }
 
 void MainWindow::applyTabSettings(TerminalPage *page, const QString &logName)
@@ -6277,13 +6463,13 @@ void MainWindow::sendSnippet(const Snippet &snippet, bool toMultiExec, bool with
                 targets << page;
         }
         if (targets.isEmpty()) {
-            statusBar()->showMessage(QStringLiteral("No terminals are chosen for multi-exec (Tabs → Multi-exec…)."), 5000);
+            notify(QStringLiteral("No terminals are chosen for multi-exec (Tabs → Multi-exec…)."));
             return;
         }
     } else if (auto *page = activeTerminal(m_sessionTabs->currentWidget())) {
         targets << page;
     } else {
-        statusBar()->showMessage(QStringLiteral("Open a terminal tab first."), 4000);
+        notify(QStringLiteral("Open a terminal tab first."));
         return;
     }
     if (const auto script = scriptFromMarker(snippet.text); !script.isEmpty()) {
@@ -6310,9 +6496,6 @@ void MainWindow::setBroadcast(bool on)
     m_broadcastIndicator->setVisible(on);
     if (m_broadcastAction->isChecked() != on)
         m_broadcastAction->setChecked(on);
-    statusBar()->showMessage(on ? QStringLiteral("Typing now goes to every connected SSH tab")
-                                : QStringLiteral("Broadcast off"),
-                             3000);
 }
 
 // Larger text and nothing but terminals, for screen sharing and projectors.
@@ -6617,6 +6800,17 @@ void MainWindow::applySessionFilter()
     m_noSessionMatches->setVisible(filtering && shown == 0);
 }
 
+// The side panel's tabs and search box start where the session list's box
+// does: inside its frame, as wide as the style draws it. Never further left.
+void MainWindow::alignSidePanelRows()
+{
+    m_sidePanelInset = m_sessionTree->frameWidth();
+    m_sessionSearchRow->setContentsMargins(m_sidePanelInset, 0, m_sidePanelInset, 0);
+    // The tab widget places its tab bar again on its next layout.
+    QEvent request(QEvent::LayoutRequest);
+    QApplication::sendEvent(m_leftTabs, &request);
+}
+
 // Grows or shrinks the side panel to show the list without cutting it off.
 void MainWindow::fitSessionPanel()
 {
@@ -6624,9 +6818,17 @@ void MainWindow::fitSessionPanel()
         return;
     // The columns always fit their contents, so names are not cut off; the
     // panel follows only with "Always fit the panel to the list".
-    // The width wanted is the contents', measured with the last column not
-    // stretched: it fills the panel otherwise, and reading that back made
-    // every fit a little wider than the one before.
+    const int columns = fitSessionColumns();
+    if (!m_sessionList.fitPanel)
+        return;
+    setSidePanelWidth(sessionListWidth(columns));
+}
+
+// Fits the session list's columns to their contents; their width together.
+// Measured with the last column not stretched: it fills the panel otherwise,
+// and reading that back made every fit a little wider than the one before.
+int MainWindow::fitSessionColumns()
+{
     int width = 0;
     auto *header = m_sessionTree->header();
     header->setStretchLastSection(false);
@@ -6637,14 +6839,44 @@ void MainWindow::fitSessionPanel()
         width += m_sessionTree->columnWidth(column);
     }
     header->setStretchLastSection(true);
-    auto *splitter = qobject_cast<QSplitter *>(m_leftTabs->parentWidget());
-    if (!m_sessionList.fitPanel || !splitter)
-        return;
-    width += 2 * m_sessionTree->frameWidth() + 8;
+    return width;
+}
+
+// The side panel's width for a list whose columns take columnsWidth.
+int MainWindow::sessionListWidth(int columnsWidth) const
+{
+    int width = columnsWidth + 2 * m_sessionTree->frameWidth() + 8;
     if (m_sessionTree->verticalScrollBar()->isVisible())
         width += m_sessionTree->verticalScrollBar()->width();
-    width += m_leftTabs->width() - m_sessionTree->width();
-    const int total = splitter->width();
+    return width + m_leftTabs->width() - m_sessionTree->width();
+}
+
+// A double-click on the panel's edge: fitted to what it shows now, the
+// session list or the Files panel's files. Nothing listed: left as it is.
+void MainWindow::fitSidePanelToContents()
+{
+    if (!m_leftTabs || !m_leftTabs->isVisible())
+        return;
+    int width = 0;
+    if (m_leftTabs->currentWidget() == m_sftpStack) {
+        if (auto *panel = qobject_cast<SftpPanel *>(m_sftpStack->currentWidget()); panel && panel->contentsWidth() > 0)
+            width = panel->contentsWidth() + m_leftTabs->width() - m_sftpStack->width();
+    } else if (m_leftTabs->currentIndex() == 0 && m_sessionTree->topLevelItemCount() > 0) {
+        width = sessionListWidth(fitSessionColumns());
+    }
+    if (width > 0)
+        setSidePanelWidth(width);
+}
+
+void MainWindow::setSidePanelWidth(int width)
+{
+    auto *splitter = qobject_cast<QSplitter *>(m_leftTabs->parentWidget());
+    if (!splitter)
+        return;
+    // At least as wide as all of Sessions | Files | Commands | Scripts, so the
+    // tab bar never needs its scroll buttons.
+    width = qMax(width, m_sidePanelInset + m_leftTabs->tabBar()->sizeHint().width() + 4);
+    const int total = splitter->contentsRect().width();
     const int wanted = qBound(m_leftTabs->minimumWidth(), width, qMax(m_leftTabs->minimumWidth(), total / 2));
     auto sizes = splitter->sizes();
     if (sizes.size() == 2 && sizes[0] != wanted && total > 0) {
@@ -6775,7 +7007,7 @@ void MainWindow::splitActivePane(Qt::Orientation orientation, const QString &wha
 {
     auto *beside = activeTerminal(m_sessionTabs->currentWidget());
     if (!beside) {
-        statusBar()->showMessage(QStringLiteral("Only terminal tabs can be split"), 4000);
+        tabMessage(m_sessionTabs->currentWidget(), QStringLiteral("Only terminal tabs can be split"));
         return;
     }
     const QString baseId = beside->property("sessionId").toString().section(QLatin1Char('#'), 0, 0);
@@ -6856,9 +7088,7 @@ std::optional<QString> MainWindow::choosePaneSession(const QString &currentId)
         add(QStringLiteral("Same session: %1").arg(m_sessions.value(currentId).name), currentId, sessionIcon);
     if (LocalTerminalSupported)
         add(QStringLiteral("Local terminal"), QStringLiteral("local"), terminalIcon);
-#ifdef Q_OS_WIN
-    if (ConPtyConnection::isAvailable())
-#endif
+    if (Platform::has(Platform::Feature::AdministratorTerminals))
         add(QStringLiteral("Local terminal as administrator"), QStringLiteral("local-administrator"),
             style()->standardIcon(QStyle::SP_VistaShield));
     // Saved terminal sessions, in the list's order, with their folder.
@@ -6930,30 +7160,171 @@ std::optional<QString> MainWindow::choosePaneSession(const QString &currentId)
 // Puts a new terminal next to beside, turning beside's tab into a split tab.
 void MainWindow::insertPane(TerminalPage *beside, TerminalPage *added, Qt::Orientation orientation)
 {
-    const int index = tabIndexOf(beside);
-    if (index < 0) {
+    if (tabIndexOf(beside) < 0) {
         added->deleteLater();
         return;
     }
+    placePane(added, beside, orientation, false);
+    connect(added, &TerminalPage::closeRequested, this, [this, added] { closePane(added); });
+}
+
+// The split tab beside is in; a plain terminal tab becomes one in the same
+// place first.
+SplitTab *MainWindow::splitTabOf(TerminalPage *beside)
+{
+    const int index = tabIndexOf(beside);
+    if (index < 0)
+        return nullptr;
+    if (auto *split = qobject_cast<SplitTab *>(m_sessionTabs->widget(index)))
+        return split;
+    const QString title = m_sessionTabs->tabText(index);
+    const QString toolTip = m_sessionTabs->tabToolTip(index);
+    const QIcon icon = m_sessionTabs->tabIcon(index);
+    rememberTab(beside, index);
+    m_sessionTabs->removeTab(index);
+    auto *split = new SplitTab(beside, m_sessionTabs);
+    connect(split, &SplitTab::activePaneChanged, this, [this, split] {
+        if (m_sessionTabs->currentWidget() == split)
+            showSftpPanelForCurrentTab();
+    });
+    m_sessionTabs->insertTab(index, split, icon, title);
+    m_sessionTabs->setTabToolTip(index, toolTip);
+    return split;
+}
+
+// Puts pane (in no tab) next to beside: right of it or below it, or with
+// before left of it or above it.
+void MainWindow::placePane(TerminalPage *pane, TerminalPage *beside, Qt::Orientation orientation, bool before)
+{
+    auto *split = splitTabOf(beside);
+    if (!split)
+        return;
+    split->split(beside, pane, orientation, before);
+    m_sessionTabs->setCurrentWidget(split);
+    showSftpPanelForCurrentTab();
+    panesChanged();
+}
+
+// A tab's title, tooltip and icon kept with its terminal, for when the
+// terminal gets a tab of its own again (moved out of a split tab).
+void MainWindow::rememberTab(QWidget *page, int index)
+{
+    page->setProperty("opsremoteTabTitle", m_sessionTabs->tabText(index));
+    page->setProperty("opsremoteTabToolTip", m_sessionTabs->tabToolTip(index));
+    page->setProperty("opsremoteTabIcon", m_sessionTabs->tabIcon(index));
+}
+
+// A split tab left with one pane becomes a plain terminal tab again.
+void MainWindow::unsplitIfSingle(SplitTab *split)
+{
+    const int index = m_sessionTabs->indexOf(split);
+    const auto remaining = split->panes();
+    if (index < 0 || remaining.size() != 1)
+        return;
+    auto *last = remaining.constFirst();
+    const QString title = m_sessionTabs->tabText(index);
+    const QString toolTip = m_sessionTabs->tabToolTip(index);
+    const QIcon icon = m_sessionTabs->tabIcon(index);
+    const bool current = m_sessionTabs->currentIndex() == index;
+    split->removePane(last);
+    m_sessionTabs->removeTab(index);
+    m_sessionTabs->insertTab(index, last, icon, title);
+    m_sessionTabs->setTabToolTip(index, toolTip);
+    if (current)
+        m_sessionTabs->setCurrentIndex(index);
+    split->deleteLater();
+}
+
+// Takes pane out of its tab (the tab goes when nothing is left in it); the
+// caller puts it somewhere else.
+void MainWindow::takePaneOut(TerminalPage *pane)
+{
+    const int index = tabIndexOf(pane);
+    if (index < 0)
+        return;
     auto *split = qobject_cast<SplitTab *>(m_sessionTabs->widget(index));
     if (!split) {
-        // The tab's terminal moves into a split tab in the same place.
-        const QString title = m_sessionTabs->tabText(index);
-        const QString toolTip = m_sessionTabs->tabToolTip(index);
-        const QIcon icon = m_sessionTabs->tabIcon(index);
+        rememberTab(pane, index);
         m_sessionTabs->removeTab(index);
-        split = new SplitTab(beside, m_sessionTabs);
-        connect(split, &SplitTab::activePaneChanged, this, [this, split] {
-            if (m_sessionTabs->currentWidget() == split)
-                showSftpPanelForCurrentTab();
-        });
-        m_sessionTabs->insertTab(index, split, icon, title);
-        m_sessionTabs->setTabToolTip(index, toolTip);
+        return;
     }
-    split->split(beside, added, orientation);
-    connect(added, &TerminalPage::closeRequested, this, [this, added] { closePane(added); });
-    m_sessionTabs->setCurrentIndex(index);
+    split->removePane(pane);
+    if (split->panes().isEmpty()) {
+        m_sessionTabs->removeTab(index);
+        split->deleteLater();
+    } else {
+        unsplitIfSingle(split);
+    }
+}
+
+bool MainWindow::canDropOn(QWidget *dragged, TerminalPage *target) const
+{
+    if (!dragged || !target || dragged == target || dragged->isAncestorOf(target))
+        return false;
+    return qobject_cast<TerminalPage *>(dragged) || qobject_cast<SplitTab *>(dragged);
+}
+
+// Moves a dragged pane, or a whole tab (a terminal or a split tab), to
+// where it was dropped: next to a pane, or into a tab of its own.
+void MainWindow::moveDropped(QWidget *dragged, const PaneDrag::Drop &drop)
+{
+    if (!dragged)
+        return;
+    auto *pane = qobject_cast<TerminalPage *>(dragged);
+    auto *group = qobject_cast<SplitTab *>(dragged);
+    if (!pane && !group)
+        return;
+    if (drop.newTab) {
+        if (pane) {
+            // A plain tab dropped on the tab strip: it just moves along.
+            if (m_sessionTabs->indexOf(pane) >= 0) {
+                const int from = m_sessionTabs->indexOf(pane);
+                m_sessionTabs->tabBar()->moveTab(from, qBound(0, drop.tabIndex < 0 ? m_sessionTabs->count() - 1
+                                                                                 : drop.tabIndex - (drop.tabIndex > from ? 1 : 0),
+                                                              m_sessionTabs->count() - 1));
+                return;
+            }
+            takePaneOut(pane);
+            const int at = drop.tabIndex < 0 || drop.tabIndex > m_sessionTabs->count() ? m_sessionTabs->count()
+                                                                                       : drop.tabIndex;
+            const QString title = pane->property("opsremoteTabTitle").toString();
+            const int index = m_sessionTabs->insertTab(at, pane, pane->property("opsremoteTabIcon").value<QIcon>(),
+                                                       title.isEmpty() ? QStringLiteral("Terminal") : title);
+            m_sessionTabs->setTabToolTip(index, pane->property("opsremoteTabToolTip").toString());
+            m_sessionTabs->setCurrentIndex(index);
+            pane->setFocus();
+        } else if (const int from = m_sessionTabs->indexOf(group); from >= 0 && drop.tabIndex >= 0) {
+            m_sessionTabs->tabBar()->moveTab(from, qBound(0, drop.tabIndex - (drop.tabIndex > from ? 1 : 0),
+                                                          m_sessionTabs->count() - 1));
+        }
+    } else if (canDropOn(dragged, drop.beside)) {
+        auto *beside = drop.beside.data();
+        if (pane) {
+            takePaneOut(pane);
+            placePane(pane, beside, drop.orientation, drop.before);
+            pane->setFocus();
+        } else if (auto *split = splitTabOf(beside)) {
+            split->insertGroup(beside, group, drop.orientation, drop.before);
+            if (const int index = m_sessionTabs->indexOf(group); index >= 0)
+                m_sessionTabs->removeTab(index);
+            group->deleteLater();
+            m_sessionTabs->setCurrentWidget(split);
+        }
+    } else {
+        return;
+    }
     showSftpPanelForCurrentTab();
+    panesChanged();
+    updateMultiExecIndicator();
+}
+
+// A tab was split, or lost a pane: each pane's bar in its place.
+void MainWindow::panesChanged()
+{
+    QTimer::singleShot(0, this, [this] {
+        updatePaneBars();
+        m_paneBars->placeAll();
+    });
 }
 
 // Closes one terminal: the whole tab when it is alone, otherwise its pane
@@ -6978,19 +7349,12 @@ void MainWindow::closePane(TerminalPage *pane)
     pane->deleteLater();
     // One pane left: the tab becomes a plain terminal tab again.
     if (const auto remaining = split->panes(); remaining.size() == 1) {
-        auto *last = remaining.constFirst();
-        const QString title = m_sessionTabs->tabText(index);
-        const QString toolTip = m_sessionTabs->tabToolTip(index);
-        const QIcon icon = m_sessionTabs->tabIcon(index);
-        split->removePane(last);
-        m_sessionTabs->removeTab(index);
-        m_sessionTabs->insertTab(index, last, icon, title);
-        m_sessionTabs->setTabToolTip(index, toolTip);
-        m_sessionTabs->setCurrentIndex(index);
-        split->deleteLater();
-        last->setFocus();
+        unsplitIfSingle(split);
+        m_sessionTabs->setCurrentWidget(remaining.constFirst());
+        remaining.constFirst()->setFocus();
     }
     showSftpPanelForCurrentTab();
+    panesChanged();
 }
 
 // ---- Multi-exec ----
@@ -7320,3 +7684,214 @@ void refreshWidgetFonts()
         widget->updateGeometry();
     }
 }
+
+void MainWindow::notify(const QString &text, bool warning)
+{
+    if (m_messageLog)
+        m_messageLog->add(text, warning ? MessageLog::Level::Warning : MessageLog::Level::Notice);
+}
+
+// A tab's (or a split tab's pane's) own messages, kept with the page so they
+// move with it when it is split or unsplit and go when it closes.
+MessageLog *MainWindow::tabLog(QWidget *page)
+{
+    if (auto *log = page->findChild<MessageLog *>(QStringLiteral("tabMessages"), Qt::FindDirectChildrenOnly))
+        return log;
+    auto *log = new MessageLog(page);
+    log->setObjectName(QStringLiteral("tabMessages"));
+    connect(log, &MessageLog::changed, this, &MainWindow::updatePaneBars);
+    return log;
+}
+
+void MainWindow::tabMessage(QWidget *page, const QString &text, bool warning)
+{
+    if (text.isEmpty() && !page)
+        return;
+    const int index = page ? (m_sessionTabs->indexOf(page) >= 0 ? m_sessionTabs->indexOf(page) : tabIndexOf(page)) : -1;
+    if (index < 0) {
+        notify(text, warning);
+        return;
+    }
+    // An empty message: the pane connected (again), so what it said before
+    // (a disconnect reason) is put away.
+    if (text.isEmpty()) {
+        tabLog(page)->markAllRead();
+        return;
+    }
+    // The history is at the bottom right, with where it came from (new
+    // there only when the pane is out of sight).
+    if (m_messageLog)
+        m_messageLog->add(QStringLiteral("%1: %2").arg(paneLabel(page), text),
+                          warning ? MessageLog::Level::Warning : MessageLog::Level::Notice,
+                          m_paneBars->shown() && page->isVisible());
+    if (m_paneBars->shown())
+        tabLog(page)->add(text, warning ? MessageLog::Level::Warning : MessageLog::Level::Notice);
+}
+
+// "web01" or, in a split tab, "web01 › Pane 2".
+QString MainWindow::paneLabel(QWidget *page) const
+{
+    const int index = m_sessionTabs->indexOf(page) >= 0 ? m_sessionTabs->indexOf(page) : tabIndexOf(page);
+    QString label = index >= 0 ? m_sessionTabs->tabText(index).remove(QLatin1Char('&')) : QString();
+    if (auto *split = index >= 0 ? qobject_cast<SplitTab *>(m_sessionTabs->widget(index)) : nullptr) {
+        const auto panes = split->panes();
+        for (int pane = 0; pane < panes.size(); ++pane)
+            if (panes.size() > 1 && panes[pane] == page)
+                label += QStringLiteral(" › Pane %1").arg(pane + 1);
+    }
+    return label;
+}
+
+// The pages of a tab: one, or one per pane ("Pane 2") in a split tab.
+QList<QPair<QString, QWidget *>> MainWindow::tabPages(QWidget *tab)
+{
+    QList<QPair<QString, QWidget *>> pages;
+    if (!tab)
+        return pages;
+    if (auto *split = qobject_cast<SplitTab *>(tab)) {
+        const auto panes = split->panes();
+        for (int index = 0; index < panes.size(); ++index)
+            pages.append({panes.size() > 1 ? QStringLiteral("Pane %1").arg(index + 1) : QString(), panes[index]});
+    } else {
+        pages.append({QString(), tab});
+    }
+    return pages;
+}
+
+TabPrompt *MainWindow::promptOf(QWidget *page)
+{
+    return page->findChild<TabPrompt *>(QStringLiteral("tabPrompt"), Qt::FindDirectChildrenOnly);
+}
+
+// The transfer a pane's bar shows: its newest running one; else the last
+// ended one still shown (done: a few seconds; failed or cancelled: until put
+// away).
+std::optional<TransferList::Transfer> MainWindow::paneTransfer(QWidget *page) const
+{
+    constexpr int DoneShownMs = 4000;
+    std::optional<TransferList::Transfer> ended;
+    for (const auto &transfer : TransferList::instance()->transfers()) {
+        if (!transfer.owner || (transfer.owner != page && !page->isAncestorOf(transfer.owner)))
+            continue;
+        if (transfer.state == TransferList::State::Running)
+            return transfer;
+        if (ended || m_transfersPutAway.contains(transfer.id))
+            continue;
+        if (transfer.state != TransferList::State::Done
+            || transfer.ended.msecsTo(QDateTime::currentDateTime()) < DoneShownMs)
+            ended = transfer;
+    }
+    return ended;
+}
+
+// Every pane's bar: a question first, else its newest message not put away;
+// its transfer on the right.
+void MainWindow::updatePaneBars()
+{
+    if (!m_paneBars)
+        return;
+    for (int index = 0; index < m_sessionTabs->count(); ++index) {
+        for (const auto &[name, page] : tabPages(m_sessionTabs->widget(index)))
+            updatePaneBar(page);
+    }
+}
+
+void MainWindow::updatePaneBar(QWidget *page)
+{
+    auto *bar = m_paneBars->bar(page);
+    bool needed = false;
+    auto *prompt = TabPrompt::inStrip() ? promptOf(page) : nullptr;
+    if (prompt && prompt->isActive()) {
+        QList<QPair<QString, QString>> buttons;
+        for (const auto &action : prompt->actions())
+            buttons.append({action.label, action.tip});
+        bar->showPrompt(prompt->text(), prompt->isWarning(), {}, buttons, prompt->canDismiss(), 0);
+        needed = true;
+    } else {
+        bar->clearPrompt();
+        MessageLog::Entry newest;
+        for (const auto &entry : tabLog(page)->entries()) {
+            if (!entry.read && (newest.text.isEmpty() || entry.time > newest.time))
+                newest = entry;
+        }
+        if (newest.text.isEmpty()) {
+            bar->clear();
+        } else {
+            bar->showEntry(newest, {});
+            needed = true;
+            // A notice goes after a while in view; a warning stays until ✕.
+            if (newest.level == MessageLog::Level::Notice)
+                hideNoticeLater(page, newest.time);
+        }
+    }
+    if (const auto transfer = paneTransfer(page)) {
+        static const QString ended[] = {QString(), QStringLiteral("done"), QStringLiteral("failed"),
+                                        QStringLiteral("cancelled")};
+        const bool running = transfer->state == TransferList::State::Running;
+        bar->showTransfer(transfer->name, transfer->upload, transfer->percent(), 0,
+                          running ? (transfer->cancel ? transfer->cancelHint : QString())
+                                  : QStringLiteral("Put this away"),
+                          running ? QString() : ended[int(transfer->state)]);
+        needed = true;
+        if (transfer->state == TransferList::State::Done) // gone a few seconds after
+            QTimer::singleShot(4100, this, &MainWindow::updatePaneBars);
+    } else {
+        bar->clearTransfer();
+    }
+    m_paneBars->setNeeded(page, needed);
+}
+
+// The notice shown in page's bar is put away after 8 seconds in view (the
+// clock waits while its tab is not in front); it stays in Messages.
+void MainWindow::hideNoticeLater(QWidget *page, const QDateTime &time)
+{
+    const auto key = qMakePair(static_cast<QObject *>(page), time.toMSecsSinceEpoch());
+    if (m_noticeTimers.contains(key))
+        return;
+    m_noticeTimers.insert(key);
+    const QPointer<QWidget> pane(page);
+    auto check = std::make_shared<std::function<void()>>();
+    *check = [this, pane, time, key, check] {
+        if (!pane) {
+            m_noticeTimers.remove(key);
+            return;
+        }
+        if (!pane->isVisible()) {
+            QTimer::singleShot(8000, this, *check);
+            return;
+        }
+        m_noticeTimers.remove(key);
+        tabLog(pane)->markRead(time);
+    };
+    QTimer::singleShot(8000, this, *check);
+}
+
+// Where a transfer comes from, for the lists: its tab's title, or the
+// window it belongs to (Network Tools).
+QString MainWindow::transferPlace(QWidget *owner) const
+{
+    if (!owner)
+        return {};
+    for (int index = 0; index < m_sessionTabs->count(); ++index) {
+        auto *tab = m_sessionTabs->widget(index);
+        if (tab == owner || tab->isAncestorOf(owner))
+            return m_sessionTabs->tabText(index).remove(QLatin1Char('&'));
+    }
+    return owner->window() != this ? owner->window()->windowTitle() : QString();
+}
+
+// The Transfers indicator (all of them) and the current tab's strip.
+void MainWindow::updateTransfers()
+{
+    auto *transfers = TransferList::instance();
+    const auto running = transfers->running();
+    if (m_transfersIndicator) {
+        m_transfersIndicator->setState(running.isEmpty() ? QStringLiteral("Transfers · 0")
+                                                         : QStringLiteral("Transfers · %1 · %2%")
+                                                               .arg(running.size())
+                                                               .arg(transfers->runningPercent()),
+                                       !running.isEmpty());
+    }
+    updatePaneBars();
+}
+

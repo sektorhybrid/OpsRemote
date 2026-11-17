@@ -96,16 +96,42 @@ QWidget *SplitTab::frameOf(TerminalPage *pane) const
     return pane ? pane->parentWidget() : nullptr;
 }
 
-void SplitTab::split(TerminalPage *beside, TerminalPage *added, Qt::Orientation orientation)
+void SplitTab::split(TerminalPage *beside, TerminalPage *added, Qt::Orientation orientation, bool before)
 {
     QWidget *frame = frameOf(beside);
     if (!frame)
         return;
-    QWidget *addedFrame = wrap(added);
+    insertNextTo(frame, wrap(added), orientation, before);
+    setActivePane(added);
+    added->setFocus();
+}
+
+void SplitTab::insertGroup(TerminalPage *beside, SplitTab *from, Qt::Orientation orientation, bool before)
+{
+    QWidget *frame = frameOf(beside);
+    QLayoutItem *item = from ? from->m_layout->itemAt(0) : nullptr;
+    if (!frame || !item || !item->widget())
+        return;
+    QWidget *group = item->widget();
+    from->m_layout->removeWidget(group);
+    insertNextTo(frame, group, orientation, before);
+    group->show();
+    const auto moved = group->findChildren<TerminalPage *>();
+    if (!moved.isEmpty()) {
+        auto *active = from->activePane() && moved.contains(from->activePane()) ? from->activePane()
+                                                                               : moved.constFirst();
+        setActivePane(active);
+        active->setFocus();
+    }
+    updateFrames();
+}
+
+void SplitTab::insertNextTo(QWidget *frame, QWidget *addedFrame, Qt::Orientation orientation, bool before)
+{
     auto *parentSplitter = qobject_cast<QSplitter *>(frame->parentWidget());
     if (parentSplitter && parentSplitter->orientation() == orientation) {
         // Same direction: one more pane in this row (or column).
-        parentSplitter->insertWidget(parentSplitter->indexOf(frame) + 1, addedFrame);
+        parentSplitter->insertWidget(parentSplitter->indexOf(frame) + (before ? 0 : 1), addedFrame);
         equalize(parentSplitter);
     } else {
         // The pane becomes a row (or column) of two in its place.
@@ -117,13 +143,11 @@ void SplitTab::split(TerminalPage *beside, TerminalPage *added, Qt::Orientation 
         } else {
             m_layout->replaceWidget(frame, splitter);
         }
-        splitter->addWidget(frame);
-        splitter->addWidget(addedFrame);
+        splitter->addWidget(before ? addedFrame : frame);
+        splitter->addWidget(before ? frame : addedFrame);
         frame->show();
         equalize(splitter);
     }
-    setActivePane(added);
-    added->setFocus();
 }
 
 void SplitTab::removePane(TerminalPage *pane)

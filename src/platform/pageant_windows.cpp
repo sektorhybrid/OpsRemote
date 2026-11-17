@@ -3,8 +3,6 @@
 
 #include "pageant.h"
 
-#ifdef _WIN32
-
 #include <QString>
 
 #include <windows.h>
@@ -94,16 +92,3 @@ QByteArray Pageant::query(const QByteArray &request)
     return reply;
 }
 
-#else
-
-bool Pageant::isRunning()
-{
-    return false;
-}
-
-QByteArray Pageant::query(const QByteArray &)
-{
-    return {};
-}
-
-#endif

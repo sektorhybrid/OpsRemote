@@ -7,6 +7,7 @@
 #include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
+#include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QTimer>
@@ -377,7 +378,7 @@ void RemoteFileEngine::startTransfer(int jobId, bool upload, const QStringList &
         emit transferFinished(jobId, upload, destination, 0, 0, {m_unavailable}, false);
         return;
     }
-    m_jobQueue.append({jobId, upload, sources, destination, policy});
+    m_jobQueue.append({jobId, upload, sources, destination, policy, std::exchange(m_nextAvoid, {})});
     startNextJob();
 }
 
@@ -399,6 +400,7 @@ void RemoteFileEngine::startNextJob()
     m_conflictPolicy = m_job->policy;
     m_taskResolution.reset();
     m_cancelRequested = false;
+    m_cancelOnlyJob = false;
 
     QString error;
     const bool planned = m_job->upload ? planUpload(*m_job, &error) : planDownload(*m_job, &error);
@@ -553,6 +555,8 @@ void RemoteFileEngine::transferStep()
         finishJob(true);
         return;
     }
+    if (m_paused)
+        return; // setPaused(false) schedules the next step
 
     if (!m_remoteFileOpen) {
         if (m_taskIndex >= m_tasks.size()) {
@@ -635,6 +639,9 @@ RemoteFileEngine::TaskStart RemoteFileEngine::beginTask()
         return TaskStart::Finished;
     }
 
+    // Another transfer writes this file: this one gets a name of its own.
+    if (m_job->avoid.contains(task.destination))
+        task.destination = uniqueDestination(task.destination);
     quint64 existingSize = 0;
     QDateTime existingModified;
     if (!m_taskResolution && destinationExists(task.destination, &existingSize, &existingModified)) {
@@ -668,9 +675,15 @@ RemoteFileEngine::TaskStart RemoteFileEngine::beginTask()
         }
         m_localFile = std::move(file);
         // Big files go to a temporary name first, so an interrupted upload
-        // never leaves a half-written file in place of a complete one.
+        // never leaves a half-written file in place of a complete one. The
+        // name is the upload's own: two uploads of the same file never write
+        // into the same temporary file.
         const bool temporary = m_temporaryMinimum >= 0 && qint64(task.size) >= m_temporaryMinimum;
-        m_writtenPath = temporary ? task.destination + QStringLiteral(".filepart") : task.destination;
+        m_writtenPath = temporary
+            ? QStringLiteral("%1.%2.filepart")
+                  .arg(task.destination)
+                  .arg(QRandomGenerator::global()->generate() & 0xffffff, 6, 16, QLatin1Char('0'))
+            : task.destination;
         if (!m_backend->openWrite(m_writtenPath, task.size, task.modified, task.executable,
                                   &error)) {
             failFile(error);
@@ -730,7 +743,7 @@ QString RemoteFileEngine::uniqueDestination(const QString &path)
     for (int counter = 1;; ++counter) {
         const auto candidate = QStringLiteral("%1%2 (%3)%4").arg(directory, stem).arg(counter)
                                    .arg(suffix);
-        if (!destinationExists(candidate, &size, &modified))
+        if (!m_job->avoid.contains(candidate) && !destinationExists(candidate, &size, &modified))
             return candidate;
     }
 }
@@ -825,12 +838,13 @@ void RemoteFileEngine::finishJob(bool cancelled)
     m_awaitingConflict = false;
     emit transferFinished(job.id, job.upload, job.destination, m_filesTransferred, m_skipped,
                           m_transferErrors, cancelled);
-    if (cancelled) {
+    if (cancelled && !m_cancelOnlyJob) {
         for (const auto &queued : std::as_const(m_jobQueue))
             emit transferFinished(queued.id, queued.upload, queued.destination, 0, 0, {}, true);
         m_jobQueue.clear();
     }
     m_cancelRequested = false;
+    m_cancelOnlyJob = false;
     if (m_backend)
         m_backend->idle();
     startNextJob();
@@ -864,13 +878,64 @@ void RemoteFileEngine::resolveConflict(SftpConflictResolution resolution, bool a
     scheduleTransferStep();
 }
 
+void RemoteFileEngine::setPaused(bool paused)
+{
+    m_paused = paused;
+    if (!paused)
+        scheduleTransferStep();
+}
+
 void RemoteFileEngine::cancelTransfers()
 {
+    m_paused = false; // a cancel ends a paused transfer too
     if (!m_job)
         return;
     m_cancelRequested = true;
     m_awaitingConflict = false;
     scheduleTransferStep();
+}
+
+void RemoteFileEngine::cancelJob(int jobId)
+{
+    if (m_job && m_job->id == jobId) {
+        m_paused = false;
+        m_cancelRequested = true;
+        m_cancelOnlyJob = true;
+        m_awaitingConflict = false;
+        scheduleTransferStep();
+        return;
+    }
+    for (qsizetype i = 0; i < m_jobQueue.size(); ++i) {
+        if (m_jobQueue[i].id == jobId) {
+            const auto queued = m_jobQueue.takeAt(i);
+            emit transferFinished(queued.id, queued.upload, queued.destination, 0, 0, {}, true);
+            return;
+        }
+    }
+}
+
+void RemoteFileSession::cancelJob(int jobId)
+{
+    if (m_engine)
+        QMetaObject::invokeMethod(m_engine, [engine = m_engine, jobId] { engine->cancelJob(jobId); },
+                                  Qt::QueuedConnection);
+}
+
+int RemoteFileSession::startJob(const Job &job, const QStringList &avoid)
+{
+    // Queued before the job itself, so it reaches the engine first.
+    if (m_engine && !avoid.isEmpty())
+        QMetaObject::invokeMethod(m_engine, [engine = m_engine, avoid] { engine->setNextAvoid(avoid); },
+                                  Qt::QueuedConnection);
+    return job.upload ? upload(job.sources, job.destination, job.policy)
+                      : download(job.sources, job.destination, job.policy);
+}
+
+void RemoteFileSession::setTransfersPaused(bool paused)
+{
+    if (m_engine)
+        QMetaObject::invokeMethod(m_engine, [engine = m_engine, paused] { engine->setPaused(paused); },
+                                  Qt::QueuedConnection);
 }
 
 void RemoteFileSession::setTemporaryUploads(qint64 minimumBytes)

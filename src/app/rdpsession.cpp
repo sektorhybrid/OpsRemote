@@ -848,6 +848,12 @@ void RdpSession::cancelRemoteFileSave()
         m_clipboard->cancelSave();
 }
 
+void RdpSession::stopLocalFileTransfer()
+{
+    if (m_clipboard)
+        m_clipboard->stopLocalFiles();
+}
+
 void RdpSession::requestDesktopSize(int width, int height, qreal scale)
 {
     requestMonitorLayout({QRect(0, 0, width, height)}, scale);

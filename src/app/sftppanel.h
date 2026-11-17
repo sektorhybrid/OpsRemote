@@ -37,6 +37,9 @@ public:
     static void removeStaleEditFolders();
 
     void setTitle(const QString &title);
+    void showPlaceholder(const QString &title, const QString &message);
+    // The tab page its transfers belong to (the panel itself shows elsewhere).
+    void setOwnerPage(QWidget *page) { m_ownerPage = page; }
     // Shown while no connection is attached.
     void setDisconnectedText(const QString &text);
     // Re-applies icons after the application's icon theme changed.
@@ -51,6 +54,9 @@ public:
     void setFollowControl(std::function<bool()> following, std::function<void(bool)> setFollowing);
     void openSync();
     QString currentPath() const { return m_currentPath; }
+    // The width that shows every column of the files listed without cutting
+    // them off (0: no files listed, nothing to fit).
+    int contentsWidth() const;
     // Uploads local files and folders into a remote folder (files dropped
     // on the terminal); an empty answer means started, else why not.
     QString uploadInto(const QStringList &localPaths, const QString &remoteDirectory);
@@ -91,6 +97,15 @@ private:
     void finishTransfer(int jobId, bool upload, const QString &destination, int filesTransferred,
                         int skipped, const QStringList &errors, bool cancelled);
     void resetTransfers();
+    // Starts job (started: with its ID); first asks what to do when another
+    // transfer is writing the same file or folder now (see startWaiting()).
+    void startChecked(const RemoteFileSession::Job &job, std::function<void(int)> started);
+    // What job would write, as TransferList targets; folders: those of them
+    // that are folders.
+    QStringList targetsOf(const RemoteFileSession::Job &job, QStringList *folders = nullptr) const;
+    // Starts the transfers that waited for others once those have ended.
+    void startWaiting();
+    void endWaiting();
 
     QPointer<RemoteFileSession> m_session;
     QString m_homePath;
@@ -103,6 +118,7 @@ private:
 
     QLabel *m_titleLabel = nullptr;
     QToolButton *m_upButton = nullptr;
+    QToolButton *m_syncButton = nullptr;
     QToolButton *m_homeButton = nullptr;
     QToolButton *m_refreshButton = nullptr;
     QLineEdit *m_pathEdit = nullptr;
@@ -111,10 +127,6 @@ private:
     QLabel *m_statusLabel = nullptr;
     SftpFileView *m_view = nullptr;
 
-    QWidget *m_progressFooter = nullptr;
-    QLabel *m_progressLabel = nullptr;
-    QProgressBar *m_progressBar = nullptr;
-    QLabel *m_progressDetail = nullptr;
     struct ButtonIcon
     {
         QPointer<QToolButton> button;
@@ -141,6 +153,19 @@ private:
     QHash<QString, FileVersion> m_editUploading;
     QFileSystemWatcher *m_watcher = nullptr;
     QString m_editDirectory;
+    QPointer<QWidget> m_ownerPage;
+    QHash<int, int> m_transferIds; // job → TransferList id
+    // Transfers waiting for others writing the same file (their entries in
+    // the transfer list show them waiting).
+    struct Waiting
+    {
+        int listId = 0;
+        RemoteFileSession::Job job;
+        QList<int> others; // TransferList ids
+        std::function<void(int)> started;
+    };
+    QList<Waiting> m_waiting;
+    bool m_startingWaiting = false;
     int m_speedJobId = 0;
     quint64 m_speedBytes = 0;
     double m_bytesPerSecond = 0;

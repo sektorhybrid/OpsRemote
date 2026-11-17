@@ -27,7 +27,12 @@ bool AvailabilityNote::check()
 {
     const QString reason = m_problem ? m_problem() : QString();
     m_text->setText(QStringLiteral("⚠ %1").arg(reason));
-    setVisible(!reason.isEmpty());
+    // Without a parent yet (still being placed in a page), showing it would
+    // open it as a window of its own for a moment; it appears with the page.
+    if (reason.isEmpty())
+        hide();
+    else if (parentWidget())
+        show();
     if (m_apply)
         m_apply(reason.isEmpty());
     return reason.isEmpty();

@@ -43,6 +43,8 @@ struct StartupPreferences
     bool confirmCloseConnected = true;
     bool confirmExit = true;
     bool newTabNextToCurrent = false;
+    QString messageStrip = QStringLiteral("top"); // top, bottom, off: each pane's bar with its messages and transfers
+    QString messageBar = QStringLiteral("fixed"); // fixed: always there; auto: only when there is something (PaneBars)
     // Off: choosing an already-open saved session focuses its existing tab.
     // On: every Open command starts an independent tab/connection.
     bool allowDuplicateSessionTabs = false;

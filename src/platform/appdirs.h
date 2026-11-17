@@ -13,6 +13,9 @@ QString portableHome();
 // The same, before QApplication exists (Linux; elsewhere only from the
 // launcher's OPSREMOTE_HOME).
 QString portableHomeBeforeStart();
+// The home for an executable in executableFolder (OPSREMOTE_HOME first);
+// shared by portableHome() and the per-system portableHomeBeforeStart().
+QString portableHomeFor(const QString &executableFolder);
 // portableHome()/name, for example portableFilePath("data/icons").
 QString portableFilePath(const QString &name);
 // Makes a file readable and writable by its owner only (vault, known hosts).

@@ -49,7 +49,8 @@ bool Look::sameAppearance(const Look &other) const
            && terminalFontFamily == other.terminalFontFamily
            && terminalFontSize == other.terminalFontSize
            && interfaceFontFamily == other.interfaceFontFamily
-           && interfaceFontSize == other.interfaceFontSize && windowBorder == other.windowBorder;
+           && interfaceFontSize == other.interfaceFontSize && windowBorder == other.windowBorder
+           && cornerRadius == other.cornerRadius && seeThroughLists == other.seeThroughLists;
 }
 
 QList<Look> builtInLooks()
@@ -105,6 +106,8 @@ QList<Look> builtInLooks()
         // Classic and Windows 11 look like the system's own windows.
         if (look.id == QStringLiteral("builtin:classic") || look.style == QStringLiteral("windows11"))
             look.windowBorder = false;
+        if (look.id == QStringLiteral("builtin:classic"))
+            look.cornerRadius = 0;
     }
     return looks;
 }
@@ -129,6 +132,8 @@ Look lookFromNode(const YAML::Node &node)
     look.interfaceFontFamily = text(node, "interface_font_family");
     look.interfaceFontSize = qBound(0, node["interface_font_size"].as<int>(0), 48);
     look.windowBorder = node["window_border"].as<bool>(true);
+    look.cornerRadius = validCornerRadius(node["corner_radius"].as<int>(6));
+    look.seeThroughLists = node["see_through_lists"].as<bool>(false);
     return look;
 }
 
@@ -151,6 +156,8 @@ YAML::Node lookToNode(const Look &look)
     node["interface_font_family"] = look.interfaceFontFamily.toStdString();
     node["interface_font_size"] = look.interfaceFontSize;
     node["window_border"] = look.windowBorder;
+    node["corner_radius"] = look.cornerRadius;
+    node["see_through_lists"] = look.seeThroughLists;
     return node;
 }
 
@@ -243,6 +250,10 @@ QStringList lookDifferences(const Look &from, const Look &to)
         parts << QStringLiteral("interface font");
     if (from.windowBorder != to.windowBorder)
         parts << QStringLiteral("window border");
+    if (from.cornerRadius != to.cornerRadius)
+        parts << QStringLiteral("corners");
+    if (from.seeThroughLists != to.seeThroughLists)
+        parts << QStringLiteral("see-through lists");
     if (from.terminalScheme != to.terminalScheme || from.darkTerminalScheme != to.darkTerminalScheme)
         parts << QStringLiteral("terminal colours");
     if (from.terminalFontFamily != to.terminalFontFamily || from.terminalFontSize != to.terminalFontSize)

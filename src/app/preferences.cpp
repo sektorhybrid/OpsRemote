@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "preferences.h"
+#include "processinfo.h"
 #include "reconnect.h"
 #include "settingsmigrations.h"
 #include "appdirs.h"
@@ -17,11 +18,6 @@
 #include <yaml-cpp/yaml.h>
 
 #include <algorithm>
-
-#ifdef Q_OS_WIN
-#include <windows.h>
-#include <tlhelp32.h>
-#endif
 
 namespace {
 QString settingsPath()
@@ -731,6 +727,9 @@ StartupPreferences loadStartupPreferences()
     read(node, "confirm_close_connected", value.confirmCloseConnected);
     read(node, "confirm_exit", value.confirmExit);
     read(node, "new_tab_next_to_current", value.newTabNextToCurrent);
+    readChoice(node, "message_strip", value.messageStrip,
+               {QStringLiteral("top"), QStringLiteral("bottom"), QStringLiteral("off")});
+    readChoice(node, "message_bar", value.messageBar, {QStringLiteral("fixed"), QStringLiteral("auto")});
     read(node, "allow_duplicate_session_tabs", value.allowDuplicateSessionTabs);
     readChoice(node, "tab_title", value.tabTitle,
                {QStringLiteral("name"), QStringLiteral("userhost"), QStringLiteral("both")});
@@ -761,6 +760,8 @@ void saveStartupPreferences(const StartupPreferences &value)
     node["confirm_close_connected"] = value.confirmCloseConnected;
     node["confirm_exit"] = value.confirmExit;
     node["new_tab_next_to_current"] = value.newTabNextToCurrent;
+    node["message_strip"] = value.messageStrip.toStdString();
+    node["message_bar"] = value.messageBar.toStdString();
     node["allow_duplicate_session_tabs"] = value.allowDuplicateSessionTabs;
     node["tab_title"] = value.tabTitle.toStdString();
     node["remember_window"] = value.rememberWindow;
@@ -940,56 +941,13 @@ void saveShortcuts(const QHash<QString, QKeySequence> &shortcuts)
     saveSection("shortcuts", node);
 }
 
-namespace {
-// Whether another process runs a program from inside folder.
-bool otherProcessUses(const QString &folder)
-{
-    const QString prefix = QDir::cleanPath(folder) + QLatin1Char('/');
-#ifdef Q_OS_WIN
-    bool found = false;
-    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snapshot == INVALID_HANDLE_VALUE)
-        return true; // Unknown: be safe.
-    PROCESSENTRY32W entry{};
-    entry.dwSize = sizeof(entry);
-    for (BOOL more = Process32FirstW(snapshot, &entry); more && !found;
-         more = Process32NextW(snapshot, &entry)) {
-        if (entry.th32ProcessID == GetCurrentProcessId())
-            continue;
-        HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ProcessID);
-        if (!process)
-            continue;
-        wchar_t path[MAX_PATH * 2];
-        DWORD size = static_cast<DWORD>(std::size(path));
-        if (QueryFullProcessImageNameW(process, 0, path, &size)) {
-            const auto image = QDir::fromNativeSeparators(QString::fromWCharArray(path, int(size)));
-            found = image.startsWith(prefix, Qt::CaseInsensitive);
-        }
-        CloseHandle(process);
-    }
-    CloseHandle(snapshot);
-    return found;
-#else
-    const auto own = QString::number(QCoreApplication::applicationPid());
-    for (const auto &pid : QDir(QStringLiteral("/proc")).entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
-        if (pid == own || !pid.front().isDigit())
-            continue;
-        const auto image = QFileInfo(QStringLiteral("/proc/%1/exe").arg(pid)).symLinkTarget();
-        if (image.startsWith(prefix))
-            return true;
-    }
-    return false;
-#endif
-}
-}
-
 void scheduleRuntimeRemoval()
 {
     const QString folder = QDir::cleanPath(QCoreApplication::applicationDirPath());
     const QString runtimeRoot = QDir::cleanPath(QDir(portableHome()).filePath(QStringLiteral("runtime")));
     // Only an unpacked copy made by the launcher, never an installed or
     // uncompressed program.
-    if (QFileInfo(folder).dir().absolutePath() != runtimeRoot || otherProcessUses(folder))
+    if (QFileInfo(folder).dir().absolutePath() != runtimeRoot || ProcessInfo::otherProcessRunsFrom(folder))
         return;
 #ifdef Q_OS_WIN
     // A running program's files cannot be deleted on Windows: the launcher,

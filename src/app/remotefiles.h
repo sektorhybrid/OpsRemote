@@ -7,6 +7,8 @@
 #include <QElapsedTimer>
 #include <QList>
 #include <QObject>
+#include <QHash>
+#include <QSet>
 #include <QString>
 #include <QStringList>
 
@@ -139,9 +141,9 @@ public:
     void reset();
     // The message used while no backend is set.
     void setUnavailableMessage(const QString &message) { m_unavailable = message; }
-    // Uploads go to "name.filepart" first and replace name only when
-    // complete (as WinSCP does), for files of at least minimumBytes;
-    // minimumBytes < 0: never.
+    // Uploads go to "name.xxxxxx.filepart" (random, each upload its own)
+    // first and replace name only when complete (as WinSCP does), for files
+    // of at least minimumBytes; minimumBytes < 0: never.
     void setTemporaryUploads(qint64 minimumBytes) { m_temporaryMinimum = minimumBytes; }
 
     void listDirectory(const QString &path);
@@ -154,6 +156,13 @@ public:
                        std::optional<SftpConflictResolution> policy);
     void resolveConflict(SftpConflictResolution resolution, bool applyToAll);
     void cancelTransfers();
+    // Cancels one job: the running one (the queue goes on), or a queued one.
+    void cancelJob(int jobId);
+    // Holds the running transfer (its files stay open) until continued.
+    void setPaused(bool paused);
+    // Paths the next startTransfer() must not write (other transfers are
+    // writing them): its files with those names are saved as "name (n).ext".
+    void setNextAvoid(const QStringList &paths) { m_nextAvoid = paths; }
 
 signals:
     void directoryListed(const QString &path, const QList<SftpEntry> &entries,
@@ -189,6 +198,7 @@ private:
         QStringList sources;
         QString destination;
         std::optional<SftpConflictResolution> policy;
+        QStringList avoid; // see setNextAvoid()
     };
 
     bool planUpload(const TransferJob &job, QString *error);
@@ -226,6 +236,9 @@ private:
     bool m_awaitingConflict = false;
     bool m_stepScheduled = false;
     bool m_cancelRequested = false;
+    bool m_cancelOnlyJob = false; // the queue goes on after the cancel
+    QStringList m_nextAvoid;
+    bool m_paused = false;
     bool m_remoteFileOpen = false;
     // True once an upload has created or truncated m_writtenPath: the
     // destination, or its temporary name.
@@ -266,10 +279,35 @@ public:
     virtual void resolveConflict(SftpConflictResolution resolution, bool applyToAll) = 0;
     // Cancels the running transfer and everything queued after it.
     virtual void cancelTransfers() = 0;
+    // Cancels one job (from upload() or download()), running or queued.
+    void cancelJob(int jobId);
+    // Holds the transfers (the running one stays open) until continued.
+    void setTransfersPaused(bool paused);
+    // What a job (from upload() or download()) copies, to start it again
+    // from the beginning, on this connection or a later one.
+    struct Job
+    {
+        bool upload = true;
+        QStringList sources;
+        QString destination;
+        std::optional<SftpConflictResolution> policy;
+    };
+    std::optional<Job> job(int jobId) const
+    {
+        return m_jobs.contains(jobId) ? std::optional<Job>(m_jobs.value(jobId)) : std::nullopt;
+    }
+    // Starts it as a new job; its ID. Its files named in avoid (paths other
+    // transfers are writing) are saved as "name (n).ext".
+    int startJob(const Job &job, const QStringList &avoid = {});
+    // Whether a job (from upload() or download(), whoever started it) uploads.
+    bool isUploadJob(int jobId) const { return m_uploadJobs.contains(jobId); }
     // Asks for the folder a remote shell is in; answered by shellFolder().
     virtual void queryShellFolder() {}
     // See RemoteFileEngine::setTemporaryUploads().
     void setTemporaryUploads(qint64 minimumBytes);
+    // The server, as "host:port" (lower case): transfers to the same path on
+    // the same server write the same file. Empty until connectToHost().
+    QString server() const { return m_server; }
 
 signals:
     // The file connection is ready (homePath: where it logged on), or will
@@ -296,7 +334,19 @@ signals:
 protected:
     // Relays an engine's signals (living on another thread) to this handle's.
     void relay(RemoteFileEngine *engine);
+    // Called by upload() and download() with the job they start.
+    void noteJob(int jobId, bool upload, const QStringList &sources, const QString &destination,
+                 std::optional<SftpConflictResolution> policy)
+    {
+        if (upload)
+            m_uploadJobs.insert(jobId);
+        m_jobs.insert(jobId, {upload, sources, destination, policy});
+    }
+
+    QString m_server; // see server()
 
 private:
     RemoteFileEngine *m_engine = nullptr;
+    QSet<int> m_uploadJobs;
+    QHash<int, Job> m_jobs; // see job()
 };

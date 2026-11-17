@@ -3,6 +3,9 @@
 
 #pragma once
 
+#include "transfers.h"
+#include "panedrag.h"
+
 #include "looks.h"
 #include "hoststatus.h"
 #include "session.h"
@@ -29,6 +32,7 @@
 class QAction;
 class QMenu;
 class RemoteScreenPage;
+class SplitTab;
 class JumpHostEditor;
 class PortForwardListEditor;
 class ProxyEditor;
@@ -54,10 +58,14 @@ class QDialogButtonBox;
 class WakeOnLanEditor;
 class QTimer;
 class QToolButton;
+class MessageLog;
+class TabPrompt;
+class SftpPanel;
 class QTreeWidgetItem;
 class QTabWidget;
 class QStackedWidget;
 class QLabel;
+class QHBoxLayout;
 class QLineEdit;
 class QComboBox;
 class QFormLayout;
@@ -77,6 +85,10 @@ class MainWindow final : public QMainWindow
     Q_OBJECT
 
 public:
+    // A message about the tab (or split tab's pane) page, in its strip.
+    void tabMessage(QWidget *page, const QString &text, bool warning = false);
+    // For tests: page as a new session tab.
+    void openTestTab(QWidget *page, const QString &title) { addSessionTab(page, title, title); }
     // Saved SSH sessions that can be a jump host: (id, label).
     QList<QPair<QString, QString>> jumpHostChoices() const;
     // A new SSH session made in the session window over `over` (for "New…"
@@ -184,6 +196,12 @@ public:
     void setInterfaceFont(const QString &family, int pointSize);
     bool windowBorders() const;
     void setWindowBorders(bool enabled);
+    // Of the tabs and the side panel's list: 0 (square) to 10 px.
+    int cornerRadius() const;
+    void setCornerRadius(int radius);
+    // The Messages and Transfers lists: slightly see-through, or solid.
+    bool seeThroughLists() const;
+    void setSeeThroughLists(bool seeThrough);
     TerminalAppearance defaultTerminalAppearance() const { return m_terminalAppearance; }
     void setDefaultTerminalAppearance(const TerminalAppearance &appearance);
     QString darkTerminalColorScheme() const { return m_darkTerminalColorScheme; }
@@ -314,6 +332,11 @@ private:
     QPair<int, int> folderStatusCounts(const QTreeWidgetItem *folder) const;
     void refreshSessionList();
     void fitSessionPanel();
+    void alignSidePanelRows();
+    int fitSessionColumns();
+    int sessionListWidth(int columnsWidth) const;
+    void fitSidePanelToContents();
+    void setSidePanelWidth(int width);
     void checkHostStatus();
     void applySessionFilter();
     QList<TerminalPage *> terminalPagesIn(QWidget *tab) const;
@@ -325,6 +348,14 @@ private:
     std::optional<QString> choosePaneSession(const QString &currentId);
     void insertPane(TerminalPage *beside, TerminalPage *added, Qt::Orientation orientation);
     void closePane(TerminalPage *pane);
+    // Moving panes and tabs to other places (dragged: see PaneDrag).
+    SplitTab *splitTabOf(TerminalPage *beside);
+    void placePane(TerminalPage *pane, TerminalPage *beside, Qt::Orientation orientation, bool before);
+    void rememberTab(QWidget *page, int index);
+    void unsplitIfSingle(SplitTab *split);
+    void takePaneOut(TerminalPage *pane);
+    bool canDropOn(QWidget *dragged, TerminalPage *target) const;
+    void moveDropped(QWidget *dragged, const PaneDrag::Drop &drop);
     void chooseMultiExecTargets();
     TerminalPage *newLocalProgramPage(const QString &program, const QStringList &arguments,
                                       const QString &label, const TerminalAppearance &appearance,
@@ -372,7 +403,7 @@ private:
     QTabWidget *m_leftTabs = nullptr;
     QTreeWidget *m_sessionTree = nullptr;
     QStackedWidget *m_sftpStack = nullptr;
-    QLabel *m_sftpPlaceholder = nullptr;
+    SftpPanel *m_sftpPlaceholder = nullptr;
     QTabWidget *m_sessionTabs = nullptr;
     QHash<QString, SessionDefinition> m_sessions;
     QHash<QString, QColor> m_customColors;
@@ -420,11 +451,34 @@ private:
     QTimer *m_blinkTimer = nullptr;
     bool m_blinkOn = false;
     QLineEdit *m_sessionSearch = nullptr;
+    QHBoxLayout *m_sessionSearchRow = nullptr;
+    int m_sidePanelInset = 0; // where the side panel's rows start (the list's frame)
     QLabel *m_noSessionMatches = nullptr;
     // While a search filters the list, expanding folders to show matches is
     // not remembered; the folders' own state comes back afterwards.
     bool m_filtering = false;
     QToolButton *m_multiExecIndicator = nullptr;
+    // A message for the whole application, kept in the messages list.
+    void notify(const QString &text, bool warning = false);
+    MessageLog *tabLog(QWidget *page);
+    QList<QPair<QString, QWidget *>> tabPages(QWidget *tab);
+    static TabPrompt *promptOf(QWidget *page);
+    QString paneLabel(QWidget *page) const;
+    void updatePaneBars();
+    void panesChanged();
+    void updatePaneBar(QWidget *page);
+    void hideNoticeLater(QWidget *page, const QDateTime &time);
+    std::optional<TransferList::Transfer> paneTransfer(QWidget *page) const;
+    void updateTransfers();
+    QString transferPlace(QWidget *owner) const;
+    class PaneBars *m_paneBars = nullptr;
+    PaneDrag *m_paneDrag = nullptr;
+    QSet<int> m_transfersPutAway; // ended transfers whose ✕ was clicked in a pane's bar
+    QSet<QPair<QObject *, qint64>> m_noticeTimers; // see hideNoticeLater()
+    // Fixed-width status-bar indicators, always the rightmost.
+    MessageLog *m_messageLog = nullptr;
+    class MessagesIndicator *m_messagesIndicator = nullptr;
+    class StatusIndicator *m_transfersIndicator = nullptr;
     LocalServersWindow *m_localServersWindow = nullptr;
     QPointer<ScriptsWindow> m_scriptsWindow;
     CommandsPanel *m_commandsPanel = nullptr;

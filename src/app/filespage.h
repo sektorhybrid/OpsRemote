@@ -50,6 +50,7 @@ private:
     void askCertificate(const QString &problems, const QString &fingerprint, const QString &details,
                         bool changed);
     void setState(const QString &text, bool error);
+    void offerReconnect(bool offer);
 
     bool m_ftp = true;
     FtpConnectionSettings m_ftpSettings;
@@ -61,6 +62,8 @@ private:
     SftpPanel *m_panel = nullptr;
     QLabel *m_state = nullptr;
     QPushButton *m_reconnect = nullptr;
+    bool m_reconnectOffered = false;
+    bool m_stateError = false;
     QToolButton *m_logButton = nullptr;
     QPlainTextEdit *m_log = nullptr;
 };

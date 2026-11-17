@@ -1309,6 +1309,7 @@ FtpSession::~FtpSession()
 
 void FtpSession::connectToHost(const FtpConnectionSettings &settings)
 {
+    m_server = QStringLiteral("%1:%2").arg(settings.host.toLower()).arg(settings.port);
     QMetaObject::invokeMethod(m_worker, [worker = m_worker, settings] { worker->start(settings); },
                               Qt::QueuedConnection);
 }
@@ -1365,6 +1366,7 @@ int FtpSession::upload(const QStringList &localPaths, const QString &remoteDirec
                        std::optional<SftpConflictResolution> policy)
 {
     const int jobId = m_nextJobId++;
+    noteJob(jobId, true, localPaths, remoteDirectory, policy);
     QMetaObject::invokeMethod(m_worker, [worker = m_worker, jobId, localPaths, remoteDirectory, policy] {
         worker->files()->startTransfer(jobId, true, localPaths, remoteDirectory, policy);
     }, Qt::QueuedConnection);
@@ -1375,6 +1377,7 @@ int FtpSession::download(const QStringList &remotePaths, const QString &localDir
                          std::optional<SftpConflictResolution> policy)
 {
     const int jobId = m_nextJobId++;
+    noteJob(jobId, false, remotePaths, localDirectory, policy);
     QMetaObject::invokeMethod(m_worker, [worker = m_worker, jobId, remotePaths, localDirectory, policy] {
         worker->files()->startTransfer(jobId, false, remotePaths, localDirectory, policy);
     }, Qt::QueuedConnection);

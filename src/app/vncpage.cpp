@@ -142,11 +142,7 @@ VncPage::VncPage(const VncPageSettings &settings, QWidget *parent)
                 setFocus();
                 offerLocalClipboard();
                 qInfo("VNC: connected to %s, %dx%d", qUtf8Printable(host()), width, height);
-                emit statusMessage(QStringLiteral("Connected to %1 (%2×%3%4)")
-                                       .arg(host())
-                                       .arg(width)
-                                       .arg(height)
-                                       .arg(name.isEmpty() ? QString() : QStringLiteral(", ") + name));
+                emit statusMessage({}); // connected: an earlier disconnect reason is old news
                 update();
             });
     connect(m_session, &VncSession::frameUpdated, this, [this](const QRect &area) {
@@ -421,7 +417,7 @@ bool VncPage::event(QEvent *event)
 
 void VncPage::keyPressEvent(QKeyEvent *event)
 {
-    if (!m_connected && m_endedPanel->isVisible()) {
+    if (!m_connected && m_endedPanel->isOffered()) {
         if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) {
             m_reconnectAttempts = 0;
             start();

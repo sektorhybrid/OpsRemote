@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 cmake_minimum_required(VERSION 3.21)
 
-project(OpsRemote VERSION 0.6.2 LANGUAGES CXX)
+project(OpsRemote VERSION 0.6.5 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -54,7 +54,7 @@ add_executable(settings-migration-test EXCLUDE_FROM_ALL
     tests/settingsmigrationtest.cpp
     src/app/settingsmigrations.cpp
 )
-target_include_directories(settings-migration-test PRIVATE src/app)
+target_include_directories(settings-migration-test PRIVATE src/app src/platform)
 target_link_libraries(settings-migration-test PRIVATE Qt6::Gui yaml-cpp::yaml-cpp)
 add_test(NAME settings-migration
          COMMAND settings-migration-test "${CMAKE_CURRENT_SOURCE_DIR}/tests/settings-migration")
@@ -64,6 +64,10 @@ add_test(NAME settings-schema
                  "-DEXPECTED=${CMAKE_CURRENT_SOURCE_DIR}/tests/settings-migration/schema.yaml"
                  "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/settings-schema.yaml"
                  -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/settings-schema.cmake")
+# Operating-system headers only in src/platform (and the files allowed there).
+add_test(NAME platform-includes
+         COMMAND "${CMAKE_COMMAND}" "-DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}"
+                 -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/platform-includes.cmake")
 
 qt_add_executable(opsremote
     src/app/main.cpp
@@ -71,6 +75,16 @@ qt_add_executable(opsremote
     src/app/mainwindow.cpp
     src/app/mainwindow.h
     src/app/session.cpp
+    src/app/panebars.cpp
+    src/app/panedrag.cpp
+    src/app/panebars.h
+    src/app/panedrag.h
+    src/app/roundedcorners.cpp
+    src/app/roundedcorners.h
+    src/app/statusindicators.cpp
+    src/app/statusindicators.h
+    src/app/transfers.cpp
+    src/app/transfers.h
     src/app/session.h
     src/app/remotescreenpage.cpp
     src/app/remotescreenpage.h
@@ -119,8 +133,10 @@ qt_add_executable(opsremote
     src/app/terminalappearance.h
     src/app/icons.cpp
     src/app/icons.h
-    src/app/appdirs.cpp
-    src/app/appdirs.h
+    src/platform/appdirs.cpp
+    src/platform/appdirs.h
+    src/platform/capabilities.cpp
+    src/platform/capabilities.h
     src/app/jumphost.cpp
     src/app/keymanager.cpp
     src/app/kvantumthemes.cpp
@@ -132,8 +148,8 @@ qt_add_executable(opsremote
     src/app/opsremotestyle.cpp
     src/app/opsremotestyle.h
     src/app/keymanager.h
-    src/app/pageant.cpp
-    src/app/pageant.h
+    src/platform/pageant.h
+    src/platform/processinfo.h
     src/app/portforward.cpp
     src/app/proxy.cpp
     src/app/proxy.h
@@ -156,8 +172,7 @@ qt_add_executable(opsremote
     src/app/availabilitynote.h
     src/app/localresources.cpp
     src/app/localresources.h
-    src/app/systemcredentials.cpp
-    src/app/systemcredentials.h
+    src/platform/systemcredentials.h
     src/app/sftpsync.cpp
     src/app/sftpsync.h
     src/app/iperf.cpp
@@ -300,9 +315,27 @@ add_custom_target(opsremote-data ALL
     VERBATIM)
 add_dependencies(opsremote-data opsremote)
 
+# Operating-system services (src/platform): one file per system for the
+# parts that call its APIs; everything else stays in src/app.
+# src/app too: platform files use a few of its headers (conpty.h: streamconnection.h).
+target_include_directories(opsremote PRIVATE src/platform src/app)
+if(WIN32)
+    target_sources(opsremote PRIVATE
+        src/platform/appdirs_windows.cpp
+        src/platform/pageant_windows.cpp
+        src/platform/processinfo_windows.cpp
+        src/platform/systemcredentials_windows.cpp)
+else()
+    target_sources(opsremote PRIVATE
+        src/platform/appdirs_unix.cpp
+        src/platform/pageant_none.cpp
+        src/platform/processinfo_proc.cpp
+        src/platform/systemcredentials_libsecret.cpp)
+endif()
+
 # Local terminals on Windows: a pseudo console (ConPTY).
 if(WIN32)
-    target_sources(opsremote PRIVATE src/app/conpty.cpp src/app/conpty.h)
+    target_sources(opsremote PRIVATE src/platform/conpty.cpp src/platform/conpty.h)
     target_link_libraries(opsremote PRIVATE shell32 advapi32)
 endif()
 

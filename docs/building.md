@@ -19,7 +19,7 @@ The commands say what is built and what is run:
 | `package-linux` | Builds the Linux program and updates the package (keeps the last Windows build) |
 | `package-windows` | Builds the Windows program and updates the package (keeps the last Linux build) |
 | `package-all` | Builds both programs and updates the package |
-| `package-zip` | Packs the current package as `dist/OpsRemote-<arch>-<systems>-<version>.tar.gz` (for example `OpsRemote-x86_64-linux-windows-0.6.2.tar.gz`) and `.zip` for handing out (the version is in `CMakeLists.txt`), without your settings and backups |
+| `package-zip` | Packs the current package as `dist/OpsRemote-<arch>-<systems>-<version>.tar.gz` (for example `OpsRemote-x86_64-linux-windows-0.6.5.tar.gz`) and `.zip` for handing out (the version is in `CMakeLists.txt`), without your settings and backups |
 | `run-package` | Starts the package's Linux version |
 | `package-linux-and-run` | `package-linux`, then `run-package` (the default) |
 | `package-all-and-run` | `package-all`, then `run-package` |
@@ -50,9 +50,20 @@ Use `./scripts/build-and-run.sh --help` to see options. For example, set `BUILD_
 
 | Folder | Contents |
 |---|---|
-| `src/` | Application source |
+| `src/app/` | Application source, the same on every system |
+| `src/platform/` | Operating-system services, one file per system (see below) |
 | `third_party/` | Bundled QTermWidget, Kvantum, colour schemes, and icon themes |
 | `packaging/` | Docker images and launchers |
 | `scripts/` | `build-and-run.sh`; helpers in `scripts/internal/` |
 | `build/` | Build trees, all disposable: `dev/` (developer build), `linux/` and `windows/` (package builds), `linux-host/`, `asan/`, and `stage/` (the per-platform bundles and tools the package is assembled from) |
 | `dist/` | Only the release: `dist/OpsRemote/`, plus `OpsRemote-<arch>-<systems>-<version>.tar.gz` and `.zip` after `package-zip` |
+
+## Code for one operating system
+
+Code that differs between systems goes in one of three places, by what it does:
+
+1. **Calls the system's own APIs, or is more than about 15 lines** → `src/platform/`: one header, plus one source file per system (`name_windows.cpp`, `name_unix.cpp`, `name_libsecret.cpp`...). `CMakeLists.txt` compiles only the files for the system being built. Now: `appdirs` (portable folder, replacing files in one step), `systemcredentials` (Windows Credential Manager, libsecret), `processinfo` (another process's folder and command line, programs running from a folder), `pageant` (PuTTY's agent on Windows) and `conpty` (local terminals on Windows; on Linux QTermWidget has its own).
+2. **Decides whether a feature exists on this system** → `Platform::has(Platform::Feature::…)` or `Platform::problem(…)` (the reason, for a disabled control or a message) from `src/platform/capabilities.h`. New features that only some systems have get an entry there.
+3. **Anything else** (a shortcut, a label, a one-line difference) → a plain `#ifdef Q_OS_…` where it is used.
+
+The test `platform-includes` (run by `ctest`) fails when a file in `src/app` includes an operating-system header (`windows.h`, `unistd.h`, `dlfcn.h`, `sys/…`) and is not on the list in `tests/platform-includes.cmake`, which gives each listed file's reason.

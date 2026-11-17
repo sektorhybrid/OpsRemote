@@ -2,6 +2,8 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "rdppage.h"
+#include "statusindicators.h"
+#include "transfers.h"
 #include "filedialogs.h"
 #include "jumphost.h"
 #include "sessionendedpanel.h"
@@ -120,7 +122,8 @@ RdpPage::RdpPage(const RdpConnectionSettings &settings, QWidget *parent)
     connect(m_endedPanel, &SessionEndedPanel::reconnectRequested, this, &RdpPage::start);
     connect(m_endedPanel, &SessionEndedPanel::closeRequested, this, &RdpPage::requestClose);
 
-    // Clipboard file transfers report in a bar across the top of the tab.
+    // Clipboard file copies offer themselves in a bar across the top of the
+    // tab (Save to…, Open folder); their progress is in the transfer list.
     m_bar = new QWidget(this);
     m_bar->setAttribute(Qt::WA_StyledBackground);
     m_bar->setObjectName(QStringLiteral("rdpClipboardBar"));
@@ -130,9 +133,6 @@ RdpPage::RdpPage(const RdpConnectionSettings &settings, QWidget *parent)
     barLayout->setContentsMargins(10, 4, 6, 4);
     m_barText = new QLabel(m_bar);
     m_barText->setTextFormat(Qt::PlainText);
-    m_barProgress = new QProgressBar(m_bar);
-    m_barProgress->setRange(0, 1000);
-    m_barProgress->setFixedWidth(160);
     m_barAction = new QPushButton(m_bar);
     m_barClose = new QPushButton(QStringLiteral("✕"), m_bar);
     m_barClose->setFlat(true);
@@ -140,10 +140,14 @@ RdpPage::RdpPage(const RdpConnectionSettings &settings, QWidget *parent)
     for (auto *button : {m_barAction, m_barClose})
         button->setFocusPolicy(Qt::NoFocus);
     barLayout->addWidget(m_barText, 1);
-    barLayout->addWidget(m_barProgress);
     barLayout->addWidget(m_barAction);
     barLayout->addWidget(m_barClose);
     m_bar->hide();
+    // The strip turned on or off: the bar hands over, or takes over.
+    connect(TabPrompt::hub(), &TabPrompt::changed, this, [this] {
+        if (m_barShown && m_bar->isHidden() != TabPrompt::inStrip())
+            m_bar->setVisible(!TabPrompt::inStrip());
+    });
     m_barTimer = new QTimer(this);
     m_barTimer->setSingleShot(true);
     connect(m_barTimer, &QTimer::timeout, this, &RdpPage::hideBar);
@@ -158,9 +162,15 @@ RdpPage::RdpPage(const RdpConnectionSettings &settings, QWidget *parent)
             if (folder.isEmpty())
                 return;
             m_savedFolder = folder;
-            showBar(QStringLiteral("Saving…"), BarAction::Cancel, false);
-            m_barProgress->setValue(0);
-            m_barProgress->show();
+            hideBar();
+            const QPointer<RdpPage> page(this);
+            m_saveTransfer = TransferList::instance()->start(
+                this, QStringLiteral("Files from the remote computer"), false,
+                [page] {
+                    if (page)
+                        page->m_session->cancelRemoteFileSave();
+                },
+                QStringLiteral("Stop saving the copied files"));
             m_session->saveRemoteFiles(folder);
             break;
         }
@@ -219,28 +229,62 @@ RdpPage::RdpPage(const RdpConnectionSettings &settings, QWidget *parent)
             });
     connect(m_session, &RdpSession::remoteFilesProgress, this,
             [this](quint64 done, quint64 total, const QString &current) {
-                m_barProgress->setValue(total ? int(done * 1000 / total) : 1000);
-                m_barText->setText(QStringLiteral("Saving %1…").arg(current.section(QLatin1Char('/'), -1)));
+                TransferList::instance()->update(m_saveTransfer, current.section(QLatin1Char('/'), -1), done, total,
+                                                 QStringLiteral("%1 of %2").arg(QLocale().formattedDataSize(qint64(done)),
+                                                                                QLocale().formattedDataSize(qint64(total))));
             });
     connect(m_session, &RdpSession::localFilesProgress, this,
             [this](quint64 sent, quint64 total, const QString &current) {
-                if (m_barActionKind == BarAction::Cancel)
-                    return; // a download owns the bar
+                // Pasting files on the remote computer: one transfer for the paste.
+                auto *transfers = TransferList::instance();
                 if (total == 0 || sent >= total) {
-                    showBar(QStringLiteral("Pasted on the remote computer."), BarAction::None, true, 4000);
+                    if (m_pasteTransfer) {
+                        transfers->finish(m_pasteTransfer, TransferList::State::Done);
+                        m_pasteTransfer = 0;
+                        m_pasteStallTimer->stop();
+                    }
                     return;
                 }
-                if (!m_bar->isVisible() || m_barProgress->isHidden())
-                    showBar(QString(), BarAction::None, false);
-                m_barText->setText(QStringLiteral("Sending %1 to the remote computer… (%2 of %3)")
-                                       .arg(current, QLocale().formattedDataSize(qint64(sent)),
-                                            QLocale().formattedDataSize(qint64(total))));
-                m_barProgress->setValue(int(sent * 1000 / total));
-                m_barProgress->show();
-                m_barTimer->stop();
+                if (!m_pasteTransfer) {
+                    const QPointer<RdpPage> page(this);
+                    m_pasteTransfer = transfers->start(
+                        this, current, true,
+                        [page] {
+                            if (page)
+                                page->endPaste(TransferList::State::Cancelled, {});
+                        },
+                        QStringLiteral("Stop sending the files (the remote computer ends its copy)"));
+                }
+                // Windows asks for the files chunk by chunk; when it stops
+                // asking before the end, its copy has failed or was cancelled
+                // there, and nothing else would tell.
+                m_pasteStallTimer->start();
+                transfers->update(m_pasteTransfer, current, sent, total,
+                                  QStringLiteral("%1 of %2").arg(QLocale().formattedDataSize(qint64(sent)),
+                                                                 QLocale().formattedDataSize(qint64(total))));
             });
+    m_pasteStallTimer = new QTimer(this);
+    m_pasteStallTimer->setSingleShot(true);
+    // OPSREMOTE_TEST_PASTE_STALL_MS: shorter, for tests.
+    m_pasteStallTimer->setInterval(qEnvironmentVariableIntValue("OPSREMOTE_TEST_PASTE_STALL_MS") > 0
+                                       ? qEnvironmentVariableIntValue("OPSREMOTE_TEST_PASTE_STALL_MS")
+                                       : 30000);
+    connect(m_pasteStallTimer, &QTimer::timeout, this, [this] {
+        endPaste(TransferList::State::Failed,
+                 QStringLiteral("The remote computer stopped copying the files (nothing asked for 30 seconds)."));
+    });
+    connect(m_session, &RdpSession::localFilesWithdrawn, this, [this] {
+        endPaste(TransferList::State::Failed,
+                 QStringLiteral("The copy on the remote computer stopped: it took a clipboard of its own."));
+    });
     connect(m_session, &RdpSession::remoteFilesSaved, this,
             [this](const QStringList &paths, const QString &error) {
+                // RdpClipboard::cancelSave reports "Cancelled.".
+                TransferList::instance()->finish(m_saveTransfer, error.isEmpty() ? TransferList::State::Done
+                                                                 : error == QStringLiteral("Cancelled.")
+                                                                     ? TransferList::State::Cancelled
+                                                                     : TransferList::State::Failed);
+                m_saveTransfer = 0;
                 if (!error.isEmpty()) {
                     showBar(QStringLiteral("The files were not saved. %1").arg(error), BarAction::None, true);
                     return;
@@ -271,12 +315,7 @@ RdpPage::RdpPage(const RdpConnectionSettings &settings, QWidget *parent)
         m_overlay->hide();
         m_endedPanel->hide();
         setFocus();
-        emit statusMessage(QStringLiteral("Connected to %1 (%2×%3%4)")
-                               .arg(m_settings.host)
-                               .arg(width)
-                               .arg(height)
-                               .arg(m_graphicsMode.isEmpty() ? QString()
-                                                             : QStringLiteral(", ") + m_graphicsMode));
+        emit statusMessage({}); // connected: an earlier disconnect reason is old news
         update();
     });
     connect(m_session, &RdpSession::frameUpdated, this, [this](const QRect &area) {
@@ -468,9 +507,14 @@ void RdpPage::showOverlay(const QString &text, bool ended, bool error)
     }
     m_overlayText->setText(text);
     m_overlayText->setVisible(!ended);
-    m_endedPanel->setVisible(ended);
+    // The clipboard bar goes first: the ended message takes the tab's prompt.
+    // A paste there is over too (the reason is the session's).
     if (ended) {
         hideBar();
+        endPaste(TransferList::State::Failed, {});
+    }
+    m_endedPanel->setVisible(ended);
+    if (ended) {
         m_endedPanel->setGeometry(0, 0, width(), m_endedPanel->sizeHint().height());
     }
     m_overlay->setGeometry(rect());
@@ -578,7 +622,7 @@ void RdpPage::sendKeyEvent(QKeyEvent *event, bool down)
 void RdpPage::keyPressEvent(QKeyEvent *event)
 {
     // After the session ended: Enter reconnects, Esc closes the tab.
-    if (!m_connected && m_endedPanel->isVisible()) {
+    if (!m_connected && m_endedPanel->isOffered()) {
         if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter)
             start();
         else if (event->key() == Qt::Key_Escape)
@@ -822,6 +866,11 @@ void RdpPage::offerLocalClipboard()
                 files.append(url.toLocalFile());
         }
     }
+    // Other files than those being pasted there: that paste cannot go on.
+    if (m_pasteTransfer && files != m_offeredFiles)
+        endPaste(TransferList::State::Failed,
+                 QStringLiteral("The copy on the remote computer stopped: a new copy here replaced the files."));
+    m_offeredFiles = files;
     m_session->setLocalClipboard(files.isEmpty() ? mime->text() : QString(), files);
 }
 
@@ -849,6 +898,10 @@ void RdpPage::dropEvent(QDropEvent *event)
     if (files.isEmpty())
         return;
     event->acceptProposedAction();
+    if (m_pasteTransfer && files != m_offeredFiles)
+        endPaste(TransferList::State::Failed,
+                 QStringLiteral("The copy on the remote computer stopped: files dropped here replaced the files."));
+    m_offeredFiles = files;
     m_session->setLocalClipboard(QString(), files);
     if (const auto *mime = QApplication::clipboard()->mimeData()) {
         m_clipboardAtDrop = clipboardSignature(mime);
@@ -862,6 +915,21 @@ void RdpPage::dropEvent(QDropEvent *event)
             BarAction::None, true, 12000);
 }
 
+// The paste of this computer's files on the remote computer is over before
+// its end: cancelled here (its further requests are refused, so Windows ends
+// its copy), or it stopped there. reason goes to the tab's messages.
+void RdpPage::endPaste(TransferList::State state, const QString &reason)
+{
+    if (!m_pasteTransfer)
+        return;
+    m_pasteStallTimer->stop();
+    if (state == TransferList::State::Cancelled)
+        m_session->stopLocalFileTransfer();
+    TransferList::instance()->finish(std::exchange(m_pasteTransfer, 0), state);
+    if (!reason.isEmpty())
+        emit statusMessage(reason);
+}
+
 void RdpPage::showBar(const QString &text, BarAction action, bool closable, int hideAfterMs)
 {
     m_barText->setText(text);
@@ -872,9 +940,19 @@ void RdpPage::showBar(const QString &text, BarAction action, bool closable, int 
                          : action == BarAction::OpenFolder ? QStringLiteral("Open folder")
                                                            : QString());
     m_barClose->setVisible(closable);
-    m_barProgress->hide();
     m_bar->setGeometry(0, 0, width(), m_bar->sizeHint().height());
-    m_bar->show();
+    // In the tab strip when it is on, else across the top of the tab.
+    QList<TabPrompt::Action> actions;
+    if (action != BarAction::None)
+        actions.append({m_barAction->text(), QString(), [this] { m_barAction->click(); }});
+    // A choice has no ✕ in the strip: leaving the files is one of its answers.
+    if (action == BarAction::Save)
+        actions.append({QStringLiteral("Not now"), QStringLiteral("Leave the copied files on the remote computer"),
+                        [this] { hideBar(); }});
+    TabPrompt::of(this)->set(text, false, actions, closable ? std::function<void()>([this] { hideBar(); })
+                                                            : std::function<void()>());
+    m_barShown = true;
+    m_bar->setVisible(!TabPrompt::inStrip());
     m_bar->raise();
     if (hideAfterMs > 0)
         m_barTimer->start(hideAfterMs);
@@ -886,6 +964,9 @@ void RdpPage::hideBar()
 {
     m_barTimer->stop();
     m_bar->hide();
+    if (m_barShown)
+        TabPrompt::of(this)->clear();
+    m_barShown = false;
 }
 
 bool RdpPage::canSpanMonitors() const

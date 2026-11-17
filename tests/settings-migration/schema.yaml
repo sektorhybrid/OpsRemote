@@ -6,6 +6,8 @@ ui:
   font_family: ""
   font_size: 0
   window_border: true
+  corner_radius: 6
+  see_through_lists: false
 session_tree:
   folder_expansion:
     {}
@@ -19,6 +21,8 @@ startup:
   confirm_close_connected: true
   confirm_exit: true
   new_tab_next_to_current: false
+  message_strip: top
+  message_bar: fixed
   allow_duplicate_session_tabs: false
   tab_title: name
   remember_window: true

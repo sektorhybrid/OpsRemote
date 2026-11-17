@@ -4,6 +4,7 @@
 #pragma once
 
 #include "rdpsession.h"
+#include "transfers.h"
 #include "remotescreenpage.h"
 
 #include <QPointer>
@@ -72,6 +73,7 @@ private:
     enum class BarAction { None, Save, Cancel, OpenFolder };
     void showBar(const QString &text, BarAction action, bool closable, int hideAfterMs = 0);
     void hideBar();
+    void endPaste(TransferList::State state, const QString &reason);
 
     RdpConnectionSettings m_settings;
     RdpSession *m_session = nullptr;
@@ -104,11 +106,15 @@ private:
     bool m_dropNoticeSeen = false;
     QWidget *m_bar = nullptr;
     QLabel *m_barText = nullptr;
-    QProgressBar *m_barProgress = nullptr;
+    int m_saveTransfer = 0;  // TransferList ids, 0 when none
+    int m_pasteTransfer = 0;
+    QTimer *m_pasteStallTimer = nullptr; // see endPaste()
+    QStringList m_offeredFiles; // last offered to the remote computer
     QPushButton *m_barAction = nullptr;
     QPushButton *m_barClose = nullptr;
     QTimer *m_barTimer = nullptr;
     BarAction m_barActionKind = BarAction::None;
+    bool m_barShown = false; // in the tab, or in the strip
     QString m_savedFolder;
     bool m_pointerHidden = false;
     // The scale the desktop was last sized for (see scale()).

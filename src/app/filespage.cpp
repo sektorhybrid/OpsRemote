@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "filespage.h"
+#include "statusindicators.h"
 
 #include "jumphost.h"
 
@@ -54,12 +55,18 @@ void FilesPage::build(const QString &user, const QString &host, bool log)
     m_reconnect = new QPushButton(QStringLiteral("Reconnect"), bar);
     m_reconnect->setVisible(false);
     connect(m_reconnect, &QPushButton::clicked, this, &FilesPage::start);
+    // The strip turned on or off: the button hands over, or takes over.
+    connect(TabPrompt::hub(), &TabPrompt::changed, this, [this] {
+        if (m_reconnectOffered && m_reconnect->isHidden() != TabPrompt::inStrip())
+            m_reconnect->setVisible(!TabPrompt::inStrip());
+    });
     barLayout->addWidget(m_state, 1);
     barLayout->addWidget(m_reconnect);
     layout->addWidget(bar);
 
     auto *splitter = new QSplitter(Qt::Vertical, this);
     m_panel = new SftpPanel(splitter);
+    m_panel->setOwnerPage(this);
     m_panel->setTitle(user.isEmpty() ? host : QStringLiteral("%1@%2").arg(user, host));
     m_panel->setDisconnectedText(QStringLiteral("Disconnected."));
     splitter->addWidget(m_panel);
@@ -106,18 +113,32 @@ void FilesPage::setState(const QString &text, bool error)
 {
     m_state->setText(text);
     m_state->setStyleSheet(error ? QStringLiteral("color: #c62828;") : QString());
+    m_stateError = error;
+}
+
+// Reconnect, in the tab strip when it is on, else beside the state line.
+void FilesPage::offerReconnect(bool offer)
+{
+    m_reconnectOffered = offer;
+    if (offer) {
+        TabPrompt::of(this)->set(m_state->text(), m_stateError,
+                                 {{QStringLiteral("Reconnect"), QStringLiteral("Connect again"), [this] { start(); }}});
+    } else {
+        TabPrompt::of(this)->clear();
+    }
+    m_reconnect->setVisible(offer && !TabPrompt::inStrip());
 }
 
 void FilesPage::ended(const QString &reason, bool error)
 {
     setState(reason, error);
-    m_reconnect->setVisible(true);
+    offerReconnect(true);
     m_panel->setSession(nullptr);
 }
 
 void FilesPage::start()
 {
-    m_reconnect->setVisible(false);
+    offerReconnect(false);
     if (m_ftp)
         startFtp();
     else
@@ -153,11 +174,11 @@ void FilesPage::startSsh()
     connect(m_sshSession, &SshSession::sftpReady, this, [this, server] {
         setState(QStringLiteral("Connected to %1 (files over %2).")
                      .arg(server, m_sshSession ? m_sshSession->fileProtocol() : QString()), false);
-        emit statusMessage(QStringLiteral("Connected to %1").arg(server));
+        emit statusMessage({}); // connected: an earlier disconnect reason is old news
     });
     connect(m_sshSession, &SshSession::sftpUnavailable, this, [this](const QString &error) {
         setState(error, true);
-        m_reconnect->setVisible(true);
+        offerReconnect(true);
     });
     connect(m_sshSession, &SshSession::disconnected, this, &FilesPage::ended);
     m_panel->setSession(m_sshSession);
@@ -205,8 +226,7 @@ void FilesPage::startFtp()
         m_log->appendPlainText(line);
     });
     connect(m_ftpSession, &FtpSession::statusMessage, this, [this](const QString &message) {
-        setState(message, false);
-        emit statusMessage(message);
+        setState(message, false); // the page's own status line, not the tab strip
     });
     connect(m_ftpSession, &FtpSession::connected, this, [this](const QString &protocol) {
         // An earlier status message says when only the log-on is encrypted.
@@ -215,7 +235,7 @@ void FilesPage::startFtp()
         else if (protocol != QStringLiteral("FTPS"))
             setState(QStringLiteral("Connected to %1 over plain FTP: passwords and files travel "
                                     "unencrypted.").arg(m_ftpSettings.host), true);
-        emit statusMessage(QStringLiteral("Connected to %1").arg(m_ftpSettings.host));
+        emit statusMessage({}); // connected: an earlier disconnect reason is old news
     });
     connect(m_ftpSession, &FtpSession::disconnected, this, &FilesPage::ended);
     connect(m_ftpSession, &FtpSession::loginFailed, this, [this](const QString &message) {

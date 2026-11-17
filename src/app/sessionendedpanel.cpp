@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "sessionendedpanel.h"
+#include "statusindicators.h"
 
 #include <QEvent>
 #include <QHBoxLayout>
@@ -97,5 +98,47 @@ void SessionEndedPanel::setMessage(const QString &title, const QString &detail, 
     m_title->setStyleSheet(error ? QStringLiteral("color: #c0392b;") : QString());
     m_detail->setText(detail);
     m_detail->setVisible(!detail.isEmpty());
+    m_error = error;
     adjustSize();
+    if (m_offered)
+        offerInStrip();
+}
+
+// The bar's message and buttons go to the tab strip when it is on; the bar
+// itself shows only without it. isOffered() says whether either shows.
+void SessionEndedPanel::setVisible(bool visible)
+{
+    m_offered = visible;
+    if (visible)
+        offerInStrip();
+    else if (m_style == Style::Bar && parentWidget())
+        TabPrompt::of(parentWidget())->clear();
+    QFrame::setVisible(visible && !usesStrip());
+}
+
+bool SessionEndedPanel::usesStrip() const
+{
+    return m_style == Style::Bar && parentWidget() && TabPrompt::inStrip();
+}
+
+void SessionEndedPanel::offerInStrip()
+{
+    if (m_style != Style::Bar || !parentWidget())
+        return;
+    if (!m_hubConnected) {
+        m_hubConnected = true;
+        // The strip turned on or off: the bar takes over, or hands over.
+        connect(TabPrompt::hub(), &TabPrompt::changed, this, [this] {
+            if (m_offered && isHidden() != usesStrip()) {
+                QFrame::setVisible(!usesStrip());
+                offerInStrip();
+            }
+        });
+    }
+    const QString text = m_detail->text().isEmpty() ? m_title->text()
+                                                    : QStringLiteral("%1: %2").arg(m_title->text(), m_detail->text());
+    TabPrompt::of(parentWidget())
+        ->set(text, m_error,
+              {{QStringLiteral("Reconnect"), m_reconnect->toolTip(), [this] { emit reconnectRequested(); }},
+               {QStringLiteral("Close Tab"), m_close->toolTip(), [this] { emit closeRequested(); }}});
 }

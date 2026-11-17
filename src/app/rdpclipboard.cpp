@@ -124,8 +124,11 @@ struct RdpClipboardCallbacks
         }
         respondFormatList(channel, true);
         UINT32 wanted = 0;
+        bool offerReplaced = false;
         {
             QMutexLocker locker(&clipboard->m_mutex);
+            offerReplaced = clipboard->m_offerHeld && !clipboard->m_localFiles.isEmpty();
+            clipboard->m_offerHeld = false;
             clipboard->m_remoteTextFormat = text;
             clipboard->m_remoteFilesFormat = files;
             clipboard->m_remoteFiles.clear();
@@ -134,6 +137,11 @@ struct RdpClipboardCallbacks
             else if (text && clipboard->m_shareText)
                 wanted = text;
             clipboard->m_pendingFormat = wanted;
+        }
+        if (offerReplaced) {
+            // A paste of our files there cannot go on.
+            auto *owner = clipboard->m_owner;
+            QMetaObject::invokeMethod(owner, [owner] { emit owner->localFilesWithdrawn(); }, Qt::QueuedConnection);
         }
         if (!wanted)
             return CHANNEL_RC_OK;
@@ -221,6 +229,8 @@ struct RdpClipboardCallbacks
         bool ok = false;
         {
             QMutexLocker locker(&clipboard->m_mutex);
+            // A new paste starts with this request: a stopped one is over.
+            clipboard->m_refuseFiles = false;
             if (request->requestedFormatId == CF_UNICODETEXT && clipboard->m_shareText) {
                 // UTF-16LE with a terminating NUL, Windows line ends.
                 QString text = clipboard->m_localText;
@@ -267,7 +277,8 @@ struct RdpClipboardCallbacks
         RdpClipboard::LocalFile file;
         {
             QMutexLocker locker(&clipboard->m_mutex);
-            if (!clipboard->m_shareFiles || request->listIndex >= quint32(clipboard->m_localFiles.size()))
+            if (!clipboard->m_shareFiles || clipboard->m_refuseFiles
+                || request->listIndex >= quint32(clipboard->m_localFiles.size()))
                 return respondContents(channel, request->streamId, nullptr);
             file = clipboard->m_localFiles[request->listIndex];
         }
@@ -374,6 +385,7 @@ void RdpClipboard::attach(CliprdrClientContext *channel)
     QMutexLocker locker(&m_mutex);
     m_channel = channel;
     m_ready = false;
+    m_offerHeld = false; // a new channel hears the offer again
     if (!channel)
         return;
     channel->custom = this;
@@ -414,6 +426,21 @@ void RdpClipboard::setLocal(const QString &text, const QStringList &files)
     }
     {
         QMutexLocker locker(&m_mutex);
+        const auto sameFiles = [&] {
+            if (list.size() != m_localFiles.size())
+                return false;
+            for (int index = 0; index < list.size(); ++index) {
+                if (list[index].path != m_localFiles[index].path || list[index].size != m_localFiles[index].size)
+                    return false;
+            }
+            return true;
+        };
+        // Offered already and still held by the server: nothing new to say
+        // (Wayland reports the clipboard as changed whenever the window gets
+        // the focus back, which would end a paste under way).
+        if (m_offerHeld && (m_shareText ? text : QString()) == m_localText && sameFiles())
+            return;
+        m_refuseFiles = false;
         m_localText = m_shareText ? text : QString();
         m_localFiles = list;
         m_sentOffsets = QList<quint64>(list.size(), 0);
@@ -424,12 +451,19 @@ void RdpClipboard::setLocal(const QString &text, const QStringList &files)
     sendFormatList();
 }
 
+void RdpClipboard::stopLocalFiles()
+{
+    QMutexLocker locker(&m_mutex);
+    m_refuseFiles = true;
+}
+
 void RdpClipboard::sendFormatList()
 {
     QMutexLocker channelLocker(&m_channelMutex);
     QMutexLocker locker(&m_mutex);
     if (!m_channel || !m_ready)
         return;
+    m_offerHeld = true;
     QList<CLIPRDR_FORMAT> formats;
     if (!m_localFiles.isEmpty())
         formats.append({LocalFilesFormat, const_cast<char *>(FileListFormatName)});
