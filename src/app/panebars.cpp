@@ -130,10 +130,22 @@ TabMessageStrip *PaneBars::bar(QWidget *page)
 void PaneBars::setNeeded(QWidget *page, bool needed)
 {
     auto it = m_panes.find(page);
-    if (it == m_panes.end() || it->needed == needed)
+    if (m_stopped || it == m_panes.end() || it->needed == needed)
         return;
     it->needed = needed;
     place(page);
+}
+
+void PaneBars::stop()
+{
+    m_stopped = true;
+    placed = {};
+    m_host->removeEventFilter(this);
+    for (auto it = m_panes.cbegin(); it != m_panes.cend(); ++it) {
+        it.key()->removeEventFilter(this);
+        if (it->bar)
+            it->bar->removeEventFilter(this);
+    }
 }
 
 void PaneBars::placeAll()
@@ -161,7 +173,7 @@ bool PaneBars::barShown(QWidget *page, const Pane &pane) const
 void PaneBars::place(QWidget *page)
 {
     auto it = m_panes.find(page);
-    if (it == m_panes.end() || !it->bar)
+    if (m_stopped || it == m_panes.end() || !it->bar)
         return;
     auto &pane = *it;
     const int height = pane.bar->height();

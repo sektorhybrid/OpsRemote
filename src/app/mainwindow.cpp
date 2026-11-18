@@ -1191,6 +1191,25 @@ private:
 
 } // namespace
 
+// The window's widgets, the tabs among them, are destroyed after this, while
+// the window is half gone; and as tabs go, their questions and transfers end
+// and they say so. Nothing may reach the window any more: it walked the tabs
+// being destroyed (a crash when closing with several tabs open, on Windows).
+MainWindow::~MainWindow()
+{
+    disconnect(TabPrompt::hub(), nullptr, this, nullptr);
+    disconnect(TransferList::instance(), nullptr, this, nullptr);
+    TransferList::ownerName = {};
+    m_paneBars->stop();
+    for (QWidget *area : {static_cast<QWidget *>(m_sessionTabs), static_cast<QWidget *>(m_sftpStack)}) {
+        if (!area)
+            continue;
+        disconnect(area, nullptr, this, nullptr);
+        for (auto *object : area->findChildren<QObject *>())
+            disconnect(object, nullptr, this, nullptr);
+    }
+}
+
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent),
       m_vault(stateFilePath(QStringLiteral("credentials.vault")))

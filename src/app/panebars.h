@@ -48,6 +48,9 @@ public:
     void setNeeded(QWidget *page, bool needed);
     // Places every bar again (after the current tab changed).
     void placeAll();
+    // The window is closing: nothing is placed any more (the panes and the
+    // host are being destroyed).
+    void stop();
 
 signals:
     void barCreated(QWidget *page, TabMessageStrip *bar);
@@ -76,4 +79,5 @@ private:
     QString m_mode = QStringLiteral("fixed");
     QHash<QWidget *, Pane> m_panes;
     QWidget *m_placing = nullptr; // the pane place() is moving
+    bool m_stopped = false;
 };

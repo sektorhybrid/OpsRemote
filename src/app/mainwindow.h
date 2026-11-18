@@ -138,6 +138,7 @@ public:
     bool resolveJumpHosts(const SessionDefinition &session,
                           std::vector<SshConnectionSettings> *jumps);
     explicit MainWindow(QWidget *parent = nullptr);
+    ~MainWindow() override;
 
     // Opens a quick-connect target ([protocol://][user@]host[:port]); false
     // with *error set if it cannot be read.
