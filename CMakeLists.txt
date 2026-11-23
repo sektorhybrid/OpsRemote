@@ -2,7 +2,15 @@
 # SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 cmake_minimum_required(VERSION 3.21)
 
-project(OpsRemote VERSION 0.6.5 LANGUAGES CXX)
+project(OpsRemote VERSION 0.6.6 LANGUAGES CXX)
+# A pre-release label ("beta.1", "rc.1"; empty for a release): the version
+# is then 0.6.6-beta.1 (About page, archive names, tag v0.6.6-beta.1).
+set(OPSREMOTE_VERSION_LABEL "rc.1")
+if(OPSREMOTE_VERSION_LABEL)
+    set(OPSREMOTE_FULL_VERSION "${PROJECT_VERSION}-${OPSREMOTE_VERSION_LABEL}")
+else()
+    set(OPSREMOTE_FULL_VERSION "${PROJECT_VERSION}")
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -210,6 +218,11 @@ qt_add_executable(opsremote
     src/app/jumphost.h
     src/app/windowborder.cpp
     src/app/windowborder.h
+    src/app/windowfit.cpp
+    src/app/windowfit.h
+    src/app/desktopentry.cpp
+    src/app/desktopentry.h
+    src/app/sessionthread.h
     src/app/masterpassworddialog.cpp
     src/app/masterpassworddialog.h
     src/app/preferences.cpp
@@ -231,7 +244,7 @@ qt_add_executable(opsremote
 # A GUI program on Windows: no console window behind it.
 set_target_properties(opsremote PROPERTIES WIN32_EXECUTABLE ON)
 target_compile_definitions(opsremote PRIVATE
-    OPSREMOTE_VERSION="${PROJECT_VERSION}")
+    OPSREMOTE_VERSION="${OPSREMOTE_FULL_VERSION}")
 
 target_link_libraries(opsremote PRIVATE
     Qt6::Widgets
@@ -312,6 +325,10 @@ add_custom_target(opsremote-data ALL
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         "${CMAKE_CURRENT_SOURCE_DIR}/third_party/kvantum/themes"
         "${OPSREMOTE_DATA}/Kvantum"
+    # The program's icon as a file, for the Linux taskbar entry (desktopentry.h).
+    COMMAND ${CMAKE_COMMAND} -E copy
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/app/resources/icons/opsremote-256.png"
+        "${OPSREMOTE_DATA}/opsremote.png"
     VERBATIM)
 add_dependencies(opsremote-data opsremote)
 

@@ -308,6 +308,49 @@ static void remove_other_versions(const char *runtime_root, const char *keep)
     closedir(dir);
 }
 
+// Whether a process other than this launcher runs a program from folder.
+// Unknown (no /proc) counts as yes: the copy is then kept.
+static int other_process_runs_from(const char *folder)
+{
+    DIR *proc = opendir("/proc");
+    if (!proc)
+        return 1;
+    const size_t length = strlen(folder);
+    const struct dirent *entry;
+    int found = 0;
+    while (!found && (entry = readdir(proc))) {
+        if (entry->d_name[0] < '0' || entry->d_name[0] > '9' || atoi(entry->d_name) == (int)getpid())
+            continue;
+        char link[300], target[PATH_MAX];
+        snprintf(link, sizeof link, "/proc/%s/exe", entry->d_name);
+        const ssize_t size = readlink(link, target, sizeof target - 1);
+        if (size <= 0)
+            continue;
+        target[size] = '\0';
+        found = strncmp(target, folder, length) == 0 && target[length] == '/';
+    }
+    closedir(proc);
+    return found;
+}
+
+// After OpsRemote ended in any way (closed, crashed, or killed), its unpacked
+// copy goes when the program marked it (Preferences: remove the unpacked
+// program when closing), unless another OpsRemote runs from it. Renamed
+// first, so a start meanwhile unpacks a copy of its own; a removal cut short
+// leaves a ".removing" folder that the next start's sweep deletes.
+static void remove_if_marked(const char *runtime, const char *runtime_root)
+{
+    char marker[PATH_MAX], removing[PATH_MAX];
+    join(marker, sizeof marker, runtime, "remove-on-exit");
+    if (access(marker, F_OK) != 0 || other_process_runs_from(runtime))
+        return;
+    if (snprintf(removing, sizeof removing, "%s.removing.%d", runtime, (int)getpid()) >= (int)sizeof removing)
+        return;
+    if (rename(runtime, removing) == 0)
+        remove_tree(removing);
+    rmdir(runtime_root);
+}
+
 // Ctrl+C or a termination request reaches OpsRemote, not only this launcher.
 static void pass_on(int signal_number)
 {
@@ -436,6 +479,8 @@ int main(int argc, char **argv)
     if (stat(data, &info) != 0 || !S_ISDIR(info.st_mode))
         fail(PACKAGE_DAMAGED, "the \"data\" folder");
     join(archive, sizeof archive, here, "compressed/" PLATFORM ".tar.zst");
+    // The unpacked copy (empty for an uncompressed package).
+    char runtime_root[PATH_MAX] = "", runtime[PATH_MAX] = "";
     if (access(archive, R_OK) == 0) {
         char id_file[PATH_MAX], id[128];
         join(id_file, sizeof id_file, here, "compressed/" PLATFORM ".id");
@@ -443,7 +488,7 @@ int main(int argc, char **argv)
         if (!is_safe_id(id))
             fail(PACKAGE_DAMAGED, "compressed/" PLATFORM ".id");
 
-        char runtime_root[PATH_MAX], name[96], runtime[PATH_MAX];
+        char name[96];
         join(runtime_root, sizeof runtime_root, here, "runtime");
         snprintf(name, sizeof name, PLATFORM "-%s", id);
         join(runtime, sizeof runtime, runtime_root, name);
@@ -508,6 +553,11 @@ int main(int argc, char **argv)
         remove_other_versions(old_root, "");
         rmdir(old_root);
         copy(app, sizeof app, runtime);
+        // The program marks the copy again when it should go (see
+        // remove_if_marked); one left by an earlier start is no longer meant.
+        char marker[PATH_MAX];
+        join(marker, sizeof marker, runtime, "remove-on-exit");
+        unlink(marker);
     } else {
         // An uncompressed package (make-package.sh --uncompressed).
         join(app, sizeof app, here, PLATFORM);
@@ -524,5 +574,8 @@ int main(int argc, char **argv)
     arguments[0] = script;
     for (int i = 1; i < argc; ++i)
         arguments[i] = argv[i];
-    return run_and_watch(script, arguments);
+    const int code = run_and_watch(script, arguments);
+    if (runtime[0])
+        remove_if_marked(runtime, runtime_root);
+    return code;
 }

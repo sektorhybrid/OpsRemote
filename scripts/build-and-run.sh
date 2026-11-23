@@ -4,6 +4,8 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=internal/lib/errors.sh
+source "${PROJECT_DIR}/scripts/internal/lib/errors.sh"
 BUILD_DIR="${BUILD_DIR:-${PROJECT_DIR}/build/dev}"
 BUILD_TYPE="${BUILD_TYPE:-Debug}"
 PACKAGE_DIR="${PROJECT_DIR}/dist/OpsRemote"
@@ -30,6 +32,10 @@ in one folder with a shared settings/ folder; built in Docker containers):
                              (Fedora's Qt package, rebuilt; about half an hour). Only
                              when the patches or the image's Qt version change: the
                              Windows build warns when it is needed.
+  build-qt-linux             Rebuild Qt's Linux libraries with packaging/qt-linux/patches
+                             (AlmaLinux's Qt package, rebuilt; an hour or more). Only
+                             when the patches or the image's Qt version change: the
+                             Linux build warns when it is needed.
 
 A developer build in ./build/dev, against this computer's own libraries (quick to
 rebuild, not portable):
@@ -43,7 +49,23 @@ hosts) across rebuilds.
 Environment overrides (developer build):
   BUILD_DIR   Build directory (default: ./build/dev)
   BUILD_TYPE  CMake build type (default: Debug)
+
+Before a package build, scripts/pre-package.local runs when this copy has
+one (it is not part of the repository); its failure stops the build.
+OPSREMOTE_SKIP_CHECKS=<reason> skips it, saying why.
 EOF
+}
+
+# Local checks before packaging (scripts/pre-package.local, not in the
+# repository): a failure stops the package build.
+local_checks() {
+    local hook="${PROJECT_DIR}/scripts/pre-package.local"
+    [[ -x "${hook}" ]] || return 0
+    if [[ -n "${OPSREMOTE_SKIP_CHECKS:-}" ]]; then
+        echo "==> Local checks skipped: ${OPSREMOTE_SKIP_CHECKS}"
+        return 0
+    fi
+    "${hook}" || { echo "Local checks failed: no package was built (OPSREMOTE_SKIP_CHECKS=<reason> skips them)." >&2; exit 1; }
 }
 
 build_linux_program() {
@@ -90,14 +112,15 @@ dev_run() {
 
 command="${1:-package-linux-and-run}"
 case "${command}" in
-    package-linux) build_linux_program; update_package ;;
-    package-windows) build_windows_program; update_package ;;
-    package-all) build_linux_program; build_windows_program; update_package ;;
+    package-linux) local_checks; build_linux_program; update_package ;;
+    package-windows) local_checks; build_windows_program; update_package ;;
+    package-all) local_checks; build_linux_program; build_windows_program; update_package ;;
     package-zip) zip_package ;;
     run-package) run_package ;;
-    package-linux-and-run) build_linux_program; update_package; run_package ;;
-    package-all-and-run) build_linux_program; build_windows_program; update_package; run_package ;;
+    package-linux-and-run) local_checks; build_linux_program; update_package; run_package ;;
+    package-all-and-run) local_checks; build_linux_program; build_windows_program; update_package; run_package ;;
     build-qt-windows) "${PROJECT_DIR}/scripts/internal/build-qt-windows-docker.sh" ;;
+    build-qt-linux) "${PROJECT_DIR}/scripts/internal/build-qt-linux-docker.sh" ;;
     dev-build) dev_build ;;
     dev-run) dev_run ;;
     dev-build-and-run) dev_build; dev_run ;;

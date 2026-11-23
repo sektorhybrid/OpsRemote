@@ -65,6 +65,7 @@ private:
     std::function<bool()> m_following;
     std::function<void(bool)> m_setFollowing;
     void showStatus(const QString &text);
+    void setStatusText(const QString &text); // showStatus without the log line
     void showMessage(const QString &text, bool error);
     void navigate(const QString &path);
     void refresh();

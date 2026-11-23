@@ -72,4 +72,8 @@ CMakeFiles/
 
 # Qt DLLs rebuilt with packaging/qt/patches (build-and-run.sh build-qt-windows)
 /third_party/qt-windows/
+# Qt libraries rebuilt with packaging/qt-linux/patches (build-and-run.sh build-qt-linux)
+/third_party/qt-linux/
 /scripts/release.sh
+# Local hooks of this copy (scripts/pre-package.local: checks before packaging)
+/scripts/*.local

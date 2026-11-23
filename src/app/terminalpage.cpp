@@ -500,6 +500,7 @@ void TerminalPage::showTerminalMenu(const QPoint &position, bool always)
         return;
     }
     QMenu menu(this);
+    menu.setToolTipsVisible(true);
     m_copyAction->setEnabled(!m_terminal->selectedText().isEmpty());
     menu.addAction(m_copyAction);
     menu.addAction(m_pasteAction);
@@ -546,6 +547,10 @@ void TerminalPage::showTerminalMenu(const QPoint &position, bool always)
         setMultiExecTarget(on);
         emit multiExecToggled(on);
     });
+
+    auto *reset = menu.addAction(QStringLiteral("Reset Terminal"), this, &TerminalPage::resetTerminalModes);
+    reset->setToolTip(QStringLiteral("When clicks or keys type odd characters such as ^[[M after a program ended "
+                                     "badly: switches off what it left on. The text stays."));
 
     menu.addSeparator();
     menu.addAction(m_zoomInAction);
@@ -602,6 +607,7 @@ void TerminalPage::startSsh()
 {
     if (m_endedBar)
         m_endedBar->hide();
+    resetTerminalModes(); // nothing left from the last connection
     if (m_sshSettings.username.isEmpty()) {
         beginPrompts(PromptPurpose::Username, QString(), {QStringLiteral("login as: ")}, {true});
         return;
@@ -754,6 +760,21 @@ void TerminalPage::showLocalText(const QString &text)
     normalized.replace(QLatin1Char('\n'), QStringLiteral("\r\n"));
     const auto bytes = normalized.toUtf8();
     m_terminal->receiveData(bytes.constData(), static_cast<int>(bytes.size()));
+}
+
+void TerminalPage::resetTerminalModes()
+{
+    // A program that ended without switching them off (a dropped connection,
+    // a killed vim, htop or tmux) left clicks typing "^[[M !!" and focus
+    // changes "^[[I" into the shell. Off: mouse reports (1000-1003, 1005,
+    // 1006, 1015), focus reports (1004), bracketed paste (2004), application
+    // cursor keys (1) and keypad (ESC >); back from the alternate screen
+    // without moving the cursor (1047), the cursor shown, the ASCII character
+    // set and plain text attributes.
+    static const QByteArray off = QByteArrayLiteral(
+        "\x1b[?1000l\x1b[?1001l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l"
+        "\x1b[?1004l\x1b[?2004l\x1b[?1l\x1b>\x1b[?1047l\x1b[?25h\x1b(B\x0f\x1b[0m");
+    m_terminal->receiveData(off.constData(), static_cast<int>(off.size()));
 }
 
 void TerminalPage::confirmHostKey(SshHostKeyStatus status, const QString &keyType,
@@ -960,6 +981,7 @@ TerminalPage::TerminalPage(StreamConnection *connection, const TerminalAppearanc
 void TerminalPage::startStream()
 {
     m_inputMode = InputMode::Idle;
+    resetTerminalModes(); // nothing left from the last connection
     m_endedBar->hide();
     if (m_stream->announcesStart())
         showLocalText(QStringLiteral("Connecting: %1…\n").arg(m_stream->description()));
@@ -970,6 +992,7 @@ void TerminalPage::handleStreamDisconnected(const QString &reason, bool error)
 {
     m_stream->close();
     m_inputMode = InputMode::Closed;
+    resetTerminalModes();
     showLocalText(QStringLiteral("\x1b[0m\n\x1b[1%1m%2\x1b[0m\nPress Enter to reconnect, or Esc to close the tab.\n")
                       .arg(error ? QStringLiteral(";31") : QString(), reason));
     m_endedBar->setMessage(QStringLiteral("Disconnected: %1").arg(m_stream->description()), reason,
@@ -1004,6 +1027,7 @@ void TerminalPage::handleSshDisconnected(const QString &reason, bool error)
     if (m_sftpPanel)
         m_sftpPanel->setSession(nullptr);
     m_inputMode = InputMode::Closed;
+    resetTerminalModes();
     // Reset attributes, then show the reason in bold (red for errors).
     showLocalText(QStringLiteral("\x1b[0m\n\x1b[1%1m%2\x1b[0m\nPress Enter to reconnect, or Esc to close the tab.\n")
                       .arg(error ? QStringLiteral(";31") : QString(), reason));

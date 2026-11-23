@@ -2,6 +2,8 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "vncpage.h"
+
+#include "clipboard.h"
 #include "reconnect.h"
 #include "jumphost.h"
 #include "sessionendedpanel.h"
@@ -103,20 +105,7 @@ VncPage::VncPage(const VncPageSettings &settings, QWidget *parent)
     setAttribute(Qt::WA_OpaquePaintEvent);
     setAttribute(Qt::WA_InputMethodEnabled, false);
 
-    m_overlay = new QWidget(this);
-    m_overlay->setAttribute(Qt::WA_StyledBackground);
-    m_overlay->setObjectName(QStringLiteral("vncOverlay"));
-    m_overlay->setStyleSheet(QStringLiteral("#vncOverlay { background: rgba(0, 0, 0, 170); }"));
-    auto *overlayLayout = new QVBoxLayout(m_overlay);
-    overlayLayout->addStretch();
-    m_overlayText = new QLabel(m_overlay);
-    m_overlayText->setAlignment(Qt::AlignCenter);
-    m_overlayText->setWordWrap(true);
-    m_overlayText->setStyleSheet(QStringLiteral("color: white; font-size: 11pt;"));
-    overlayLayout->addWidget(m_overlayText);
-    overlayLayout->addStretch();
-    m_endedPanel = new SessionEndedPanel(SessionEndedPanel::Style::Bar, this);
-    m_endedPanel->hide();
+    buildOverlay(QStringLiteral("vncOverlay"));
     connect(m_endedPanel, &SessionEndedPanel::reconnectRequested, this, [this] {
         m_reconnectAttempts = 0;
         start();
@@ -145,20 +134,7 @@ VncPage::VncPage(const VncPageSettings &settings, QWidget *parent)
                 emit statusMessage({}); // connected: an earlier disconnect reason is old news
                 update();
             });
-    connect(m_session, &VncSession::frameUpdated, this, [this](const QRect &area) {
-        const QRect target = targetRect();
-        QMutexLocker locker(&m_session->frameMutex());
-        const QSize frame = m_session->frame().size();
-        locker.unlock();
-        if (frame.isEmpty() || target.isEmpty())
-            return;
-        const qreal sx = qreal(target.width()) / frame.width();
-        const qreal sy = qreal(target.height()) / frame.height();
-        update(QRectF(target.left() + area.left() * sx, target.top() + area.top() * sy,
-                      area.width() * sx, area.height() * sy)
-                   .toAlignedRect()
-                   .adjusted(-1, -1, 1, 1));
-    });
+    connect(m_session, &VncSession::frameUpdated, this, &VncPage::repaintRemoteArea);
     connect(m_session, &VncSession::desktopResized, this, [this](int width, int height) {
         qInfo("VNC: desktop is %dx%d (tab %dx%d)", width, height, this->width(), this->height());
         updateCursor();
@@ -179,7 +155,9 @@ VncPage::VncPage(const VncPageSettings &settings, QWidget *parent)
         QApplication::clipboard()->setText(text);
     });
     if (m_settings.connection.options.clipboard == 1)
-        connect(QApplication::clipboard(), &QClipboard::dataChanged, this, &VncPage::offerLocalClipboard);
+        // Whatever a paste would paste here: a copy anywhere, or text only
+        // selected in OpsRemote (clipboard.h).
+        connect(Clipboard::notifier(), &Clipboard::Notifier::newestChanged, this, &VncPage::offerLocalClipboard);
     connect(m_session, &VncSession::credentialsRequired, this,
             [this](QString *username, QString *password, bool needUsername, bool *accepted) {
                 *accepted = askCredentials(username, password, needUsername);
@@ -343,20 +321,6 @@ qreal VncPage::scale() const
     return m_settings.connection.options.highDpi == 1 ? qMax<qreal>(1.0, devicePixelRatioF()) : 1.0;
 }
 
-QRect VncPage::targetRect() const
-{
-    QMutexLocker locker(&m_session->frameMutex());
-    const QSize frame = m_session->frame().size();
-    if (frame.isEmpty())
-        return QRect();
-    // Scale down to fit, never up, and centre; one remote pixel per
-    // physical pixel on high-DPI screens when asked for.
-    QSize size = (QSizeF(frame) / m_connectScale).toSize();
-    if (size.width() > width() || size.height() > height())
-        size.scale(this->size(), Qt::KeepAspectRatio);
-    return QRect(QPoint((width() - size.width()) / 2, (height() - size.height()) / 2), size);
-}
-
 bool VncPage::toRemote(const QPointF &position, int *x, int *y) const
 {
     const QRect target = targetRect();
@@ -378,41 +342,17 @@ QImage VncPage::screenshot() const
 void VncPage::paintEvent(QPaintEvent *event)
 {
     QPainter painter(this);
-    painter.fillRect(event->rect(), Qt::black);
-    const QRect target = targetRect();
-    if (target.isEmpty())
-        return;
-    QMutexLocker locker(&m_session->frameMutex());
-    painter.setRenderHint(QPainter::SmoothPixmapTransform,
-                          (QSizeF(target.size()) * devicePixelRatioF()).toSize()
-                              != m_session->frame().size());
-    painter.drawImage(target, m_session->frame());
+    paintFrame(painter, event->rect());
 }
 
-bool VncPage::event(QEvent *event)
+QMutex &VncPage::frameMutex() const
 {
-    // While connected, every key goes to the remote computer.
-    if (m_connected && event->type() == QEvent::ShortcutOverride) {
-        event->accept();
-        return true;
-    }
-#if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
-    if (event->type() == QEvent::DevicePixelRatioChange) {
-        if (m_resizeSupported)
-            m_resizeTimer->start();
-        updateCursor();
-    }
-#endif
-    if (event->type() == QEvent::Resize) {
-        if (m_overlay)
-            m_overlay->setGeometry(rect());
-        if (m_endedPanel)
-            m_endedPanel->setGeometry(0, 0, width(), m_endedPanel->sizeHint().height());
-        if (m_resizeSupported)
-            m_resizeTimer->start();
-        updateCursor();
-    }
-    return QWidget::event(event);
+    return m_session->frameMutex();
+}
+
+const QImage &VncPage::frame() const
+{
+    return m_session->frame();
 }
 
 void VncPage::keyPressEvent(QKeyEvent *event)
@@ -596,20 +536,7 @@ void VncPage::updateCursor()
         }
         return;
     }
-    const QRect target = targetRect();
-    QMutexLocker locker(&m_session->frameMutex());
-    const QSize frame = m_session->frame().size();
-    locker.unlock();
-    const qreal scale = frame.isEmpty() || target.isEmpty() ? 1.0 / m_connectScale
-                                                           : qreal(target.width()) / frame.width();
-    const qreal ratio = devicePixelRatioF();
-    const QSize size = (QSizeF(m_pointerShape.size()) * scale * ratio).toSize().expandedTo(QSize(1, 1));
-    QPixmap pixmap = QPixmap::fromImage(size == m_pointerShape.size()
-                                            ? m_pointerShape
-                                            : m_pointerShape.scaled(size, Qt::IgnoreAspectRatio,
-                                                                    Qt::SmoothTransformation));
-    pixmap.setDevicePixelRatio(ratio);
-    setCursor(QCursor(pixmap, int(m_pointerHotSpot.x() * scale), int(m_pointerHotSpot.y() * scale)));
+    showPointerShape();
 }
 
 void VncPage::offerLocalClipboard()
@@ -620,9 +547,8 @@ void VncPage::offerLocalClipboard()
     }
     if (!m_connected || m_settings.connection.options.clipboard != 1)
         return;
-    const auto *mime = QApplication::clipboard()->mimeData();
-    if (mime && mime->hasText())
-        m_session->setLocalClipboard(mime->text());
+    if (const QString text = Clipboard::textToPaste(false); !text.isEmpty())
+        m_session->setLocalClipboard(text);
 }
 
 bool VncPage::canSpanMonitors() const

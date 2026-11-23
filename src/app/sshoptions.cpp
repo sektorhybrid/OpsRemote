@@ -9,6 +9,7 @@
 #include "availabilitynote.h"
 #include "localresources.h"
 #include "sshauth.h"
+#include "windowfit.h"
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -348,8 +349,9 @@ SshOptionsEditor::SshOptionsEditor(const SshOptions &value, const SshPreferences
     m_backspace->setCurrentIndex(value.backspace == QStringLiteral("ctrl-h") ? 1 : 0);
     m_backspace->setToolTip(QStringLiteral("Match the remote system's erase character (stty -a)."));
 
-    // Related settings in light cards (formcard.h).
-    auto *page = new QVBoxLayout(this);
+    // Related settings in light cards (formcard.h), scrolling when the
+    // window is shorter than they are (windowfit.h).
+    auto *page = new QVBoxLayout(WindowFit::scrollingContent(this));
     page->setContentsMargins(0, 0, 0, 0);
     page->setSpacing(6);
     // The same cards in every session type: General, Logon, then the
@@ -366,7 +368,7 @@ SshOptionsEditor::SshOptionsEditor(const SshOptions &value, const SshPreferences
     // Off stays possible when there is no X server.
     form->addRow(QString(), new AvailabilityNote(&LocalResources::x11Problem, [this](bool available) {
         m_forwardX11->setEnabled(available || m_forwardX11->isChecked());
-    }, this));
+    }, this, AvailabilityNote::Run::Background)); // up to 0.3 s on Windows (a connection attempt)
     // Rows only a terminal uses (setFileOnly()); rows keep their numbers
     // when applyInheritance() wraps their fields.
     for (QWidget *field : {static_cast<QWidget *>(m_followTerminalFolder), static_cast<QWidget *>(m_forwardX11)}) {
@@ -379,12 +381,7 @@ SshOptionsEditor::SshOptionsEditor(const SshOptions &value, const SshPreferences
     // The session type's wait and tries, inherited until set here.
     m_reconnectDelay = reconnectDelayBox(value.reconnectDelay, m_defaults.reconnectDelay);
     m_reconnectAttempts = reconnectAttemptsBox(value.reconnectAttempts, m_defaults.reconnectAttempts);
-    form->addRow(QStringLiteral("Wait:"), m_reconnectDelay);
-    form->addRow(QStringLiteral("Tries:"), m_reconnectAttempts);
-    for (QWidget *box : {static_cast<QWidget *>(m_reconnectDelay), static_cast<QWidget *>(m_reconnectAttempts)}) {
-        box->setEnabled(m_autoReconnect->isChecked());
-        connect(m_autoReconnect, &QCheckBox::toggled, box, &QWidget::setEnabled);
-    }
+    addReconnectRows(form, m_autoReconnect, m_reconnectDelay, m_reconnectAttempts);
     form = addFormCard(page, QStringLiteral("Logon"), this);
     form->addRow(QStringLiteral("Private key:"), identityRow);
     form->addRow(QStringLiteral("Certificate:"), certificateRow);

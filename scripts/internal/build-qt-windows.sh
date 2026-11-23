@@ -10,6 +10,8 @@
 set -euo pipefail
 
 SRC=/src
+# shellcheck source=lib/errors.sh
+source "${SRC}/scripts/internal/lib/errors.sh"
 OWNER="${OWNER:-0:0}"
 version="$(rpm -q --qf '%{VERSION}-%{RELEASE}' mingw64-qt6-qtbase)"
 out="${SRC}/third_party/qt-windows/${version}"
@@ -19,6 +21,7 @@ changed=(Qt6Core.dll)
 echo "==> Qt base ${version}: fetching Fedora's source package"
 dnf -q -y install rpm-build dnf-plugins-core >/dev/null
 work="$(mktemp -d)"
+on_exit_remove "${work}"
 cd "${work}"
 dnf -q download --source "mingw-qt6-qtbase-${version}"
 rpm -i --define "_topdir ${work}/rpmbuild" mingw-qt6-qtbase-*.src.rpm
@@ -43,14 +46,14 @@ echo "==> Building (64-bit only; this takes a while)"
 # Fedora's install and packaging steps (which expect the 32-bit build too)
 # are not needed.
 rpmbuild -bc --nocheck --define "_topdir ${work}/rpmbuild" --define 'mingw_build_win32 0' \
-    "${spec}" > "${work}/build.log" 2>&1 || { tail -n 60 "${work}/build.log"; exit 1; }
+    "${spec}" > "${work}/build.log" 2>&1 || { tail -n 60 "${work}/build.log" >&2; die "the Qt build failed (the end of its log is above)"; }
 
 echo "==> Keeping the changed DLLs in third_party/qt-windows/${version}"
-built="$(find "${work}/rpmbuild/BUILD" -type d -name build_win64 | head -n 1)"
+built="$(find "${work}/rpmbuild/BUILD" -type d -name build_win64 | awk 'NR == 1')"
 [[ -n "${built}" ]] || { echo "The 64-bit build folder is missing." >&2; exit 1; }
 mkdir -p "${out}/bin"
 for dll in "${changed[@]}"; do
-    found="$(find "${built}" -name "${dll}" | head -n 1)"
+    found="$(find "${built}" -name "${dll}" | awk 'NR == 1')"
     [[ -n "${found}" ]] || { echo "${dll} is missing from the build." >&2; exit 1; }
     install -m 0644 "${found}" "${out}/bin/${dll}"
     x86_64-w64-mingw32-strip --strip-unneeded "${out}/bin/${dll}"
@@ -61,5 +64,4 @@ done
     (cd "${SRC}" && sha256sum packaging/qt/patches/*.patch)
 } > "${out}/BUILT-FROM.txt"
 chown -R "${OWNER}" "${SRC}/third_party/qt-windows"
-rm -rf "${work}"
 echo "==> Done: ${out}"

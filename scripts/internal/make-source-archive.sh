@@ -15,8 +15,12 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=lib/errors.sh
+source "${PROJECT_DIR}/scripts/internal/lib/errors.sh"
 REF="${1:-HEAD}"
-VERSION="$(sed -n 's/^project(OpsRemote VERSION \([0-9.]*\).*/\1/p' "${PROJECT_DIR}/CMakeLists.txt")"
+# shellcheck source=lib/version.sh
+source "${PROJECT_DIR}/scripts/internal/lib/version.sh"
+VERSION="$(opsremote_version "${PROJECT_DIR}")"
 NAME="OpsRemote-${VERSION}-source"
 OUT="${PROJECT_DIR}/dist/${NAME}.tar.xz"
 
@@ -26,11 +30,11 @@ fi
 
 # An ARG value from the Dockerfiles (the same in both when shared).
 arg() {
-    sed -n "s/^ARG $1=//p" "${PROJECT_DIR}"/packaging/*/Dockerfile | head -n 1
+    sed -n "s/^ARG $1=//p" "${PROJECT_DIR}"/packaging/*/Dockerfile | awk 'NR == 1'
 }
 
 work="$(mktemp -d)"
-trap 'rm -rf "${work}"' EXIT
+on_exit_remove "${work}"
 mkdir -p "${work}/${NAME}/upstream"
 
 echo "==> OpsRemote at ${REF}"
@@ -52,6 +56,9 @@ libssh="$(arg LIBSSH_VERSION)"
 utf8proc="$(arg UTF8PROC_VERSION)"
 libcbor="$(arg LIBCBOR_VERSION)"
 libfido2="$(arg LIBFIDO2_VERSION)"
+openssl="$(arg OPENSSL_VERSION)"
+fetch "https://github.com/openssl/openssl/releases/download/openssl-${openssl}/openssl-${openssl}.tar.gz" \
+    "$(arg OPENSSL_SHA256)" "openssl-${openssl}.tar.gz"
 fetch "https://github.com/FreeRDP/FreeRDP/releases/download/${freerdp}/freerdp-${freerdp}.tar.gz" \
     "$(arg FREERDP_SHA256)" "freerdp-${freerdp}.tar.gz"
 fetch "https://github.com/facebook/zstd/releases/download/v${zstd}/zstd-${zstd}.tar.gz" \

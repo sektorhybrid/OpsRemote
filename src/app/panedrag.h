@@ -26,7 +26,9 @@ class TerminalPage;
 // strip past the tabs: a tab of its own. Esc cancels.
 //
 // No system drag and drop: the widget pressed keeps getting the pointer's
-// moves while the button is held, and they are taken from it here.
+// moves while the button is held, and they are taken from it here. Picked
+// up (the Move menu) no button is held: the pointer is followed by a timer
+// and a click drops it.
 class PaneDrag final : public QObject
 {
     Q_OBJECT
@@ -53,8 +55,16 @@ public:
     // Whether a tab's page can be dragged out of the tab strip.
     std::function<bool(QWidget *tabPage)> movable;
 
+    // Tabs can be pulled down out of the tab strip.
+    bool pullTabs = true;
+    // A tab held over opens after ms; below 0 never.
+    void setOpenTab(int ms);
+
     // Starts dragging (the mouse button is down): until it is let go.
     void start(QWidget *dragged);
+    // Starts moving without a button held: until a click (right click or
+    // Esc cancels).
+    void pickUp(QWidget *dragged);
     bool dragging() const { return m_dragged; }
     // What letting go at global would do, shown as the coloured part (also
     // for tests); nothing when it can't go there.
@@ -74,6 +84,10 @@ private:
     QPointer<QWidget> m_indicator;
     QPointer<QLabel> m_picture;
     QTimer m_openTab; // a tab held over opens
+    bool m_openTabs = true;
+    QTimer m_follow;          // picked up: follows the pointer
+    bool m_pickedUp = false;
+    bool m_eatRelease = false; // the click that dropped it
     int m_overTab = -1;
     // A tab pressed in the tab strip, to drag it out when pulled down.
     int m_pressedTab = -1;

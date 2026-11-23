@@ -1,5 +1,4 @@
-diff --git a/CMakeLists.txt b/CMakeLists.txt
-index b507aff..a330a03 100644
+diff -ru --unidirectional-new-file -x .git -x OPSREMOTE-CHANGES.md -x OPSREMOTE-CHANGES.patch a/CMakeLists.txt b/CMakeLists.txt
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -1,3 +1,4 @@
@@ -7,7 +6,7 @@ index b507aff..a330a03 100644
  cmake_minimum_required(VERSION 3.18.0 FATAL_ERROR)
  # CMP0000: Call the cmake_minimum_required() command at the beginning of the top-level
  # CMakeLists.txt file even before calling the project() command.
-@@ -17,6 +18,10 @@ option(BUILD_EXAMPLE "Build example application. Default OFF." OFF)
+@@ -17,6 +18,10 @@
  option(QTERMWIDGET_USE_UTEMPTER "Uses libutempter on Linux or libulog on FreeBSD for login records." OFF)
  option(QTERMWIDGET_BUILD_PYTHON_BINDING "Build python binding" OFF)
  option(USE_UTF8PROC "Use libutf8proc for better Unicode support. Default OFF" OFF)
@@ -18,7 +17,7 @@ index b507aff..a330a03 100644
  
  
  # just change version for releases
-@@ -108,6 +113,15 @@ set(UI
+@@ -108,6 +113,15 @@
      lib/SearchBar.ui
  )
  
@@ -34,8 +33,7 @@ index b507aff..a330a03 100644
  # for distribution
  set(HDRS_DISTRIB
      lib/qtermwidget.h
-diff --git a/lib/BlockArray.cpp b/lib/BlockArray.cpp
-index bd413a1..b67c95e 100644
+diff -ru --unidirectional-new-file -x .git -x OPSREMOTE-CHANGES.md -x OPSREMOTE-CHANGES.patch a/lib/BlockArray.cpp b/lib/BlockArray.cpp
 --- a/lib/BlockArray.cpp
 +++ b/lib/BlockArray.cpp
 @@ -1,3 +1,4 @@
@@ -65,7 +63,7 @@ index bd413a1..b67c95e 100644
  static int blocksize = 0;
  
  BlockArray::BlockArray()
-@@ -151,12 +159,24 @@ const Block * BlockArray::at(size_t i)
+@@ -151,12 +159,24 @@
      Q_ASSERT(j < size);
      unmap();
  
@@ -90,7 +88,7 @@ index bd413a1..b67c95e 100644
  
      lastmap = block;
      lastmap_index = i;
-@@ -167,10 +187,14 @@ const Block * BlockArray::at(size_t i)
+@@ -167,10 +187,14 @@
  void BlockArray::unmap()
  {
      if (lastmap) {
@@ -105,8 +103,57 @@ index bd413a1..b67c95e 100644
      }
      lastmap = nullptr;
      lastmap_index = size_t(-1);
-diff --git a/lib/History.cpp b/lib/History.cpp
-index cdc5e0a..4248938 100644
+diff -ru --unidirectional-new-file -x .git -x OPSREMOTE-CHANGES.md -x OPSREMOTE-CHANGES.patch a/lib/Filter.cpp b/lib/Filter.cpp
+--- a/lib/Filter.cpp
++++ b/lib/Filter.cpp
+@@ -1,3 +1,4 @@
++// Modified for OpsRemote by Thanos Athanasopoulos, 2026 (see OPSREMOTE-CHANGES.md).
+ /*
+     Copyright 2007-2008 by Robert Knight <robertknight@gmail.com>
+ 
+@@ -119,8 +120,13 @@
+ void FilterChain::process()
+ {
+     QListIterator<Filter*> iter(*this);
+-    while (iter.hasNext())
+-        iter.next()->process();
++    while (iter.hasNext()) {
++        auto *filter = iter.next();
++        if (!_linksEnabled && (qobject_cast<UrlFilter *>(filter) || qobject_cast<HyperlinkFilter *>(filter)))
++            filter->reset();
++        else
++            filter->process();
++    }
+ }
+ void FilterChain::clear()
+ {
+diff -ru --unidirectional-new-file -x .git -x OPSREMOTE-CHANGES.md -x OPSREMOTE-CHANGES.patch a/lib/Filter.h b/lib/Filter.h
+--- a/lib/Filter.h
++++ b/lib/Filter.h
+@@ -1,3 +1,4 @@
++// Modified for OpsRemote by Thanos Athanasopoulos, 2026 (see OPSREMOTE-CHANGES.md).
+ /*
+     Copyright 2007-2008 by Robert Knight <robertknight@gmail.com>
+ 
+@@ -435,6 +436,8 @@
+      * Processes each filter in the chain
+      */
+     void process();
++    void setLinksEnabled(bool enabled) { _linksEnabled = enabled; }
++    bool linksEnabled() const { return _linksEnabled; }
+ 
+     /** Sets the buffer for each filter in the chain to process. */
+     void setBuffer(const QString* buffer , const QList<int>* linePositions);
+@@ -452,6 +455,8 @@
+     /** Returns a list of all hotspots at the given line in all the chain's filters */
+     QList<Filter::HotSpot> hotSpotsAtLine(int line) const;
+ 
++private:
++    bool _linksEnabled = true;
+ };
+ 
+ /** A filter chain which processes character images from terminal displays */
+diff -ru --unidirectional-new-file -x .git -x OPSREMOTE-CHANGES.md -x OPSREMOTE-CHANGES.patch a/lib/History.cpp b/lib/History.cpp
 --- a/lib/History.cpp
 +++ b/lib/History.cpp
 @@ -1,3 +1,4 @@
@@ -124,7 +171,7 @@ index cdc5e0a..4248938 100644
  #include <unistd.h>
  #include <cerrno>
  
-@@ -113,6 +116,11 @@ void HistoryFile::map()
+@@ -113,6 +116,11 @@
  {
      Q_ASSERT( fileMap == nullptr );
  
@@ -136,7 +183,7 @@ index cdc5e0a..4248938 100644
      fileMap = (char*)mmap( nullptr , length , PROT_READ , MAP_PRIVATE , ion , 0 );
  
      //if mmap'ing fails, fall back to the read-lseek combination
-@@ -122,12 +130,15 @@ void HistoryFile::map()
+@@ -122,12 +130,15 @@
              fileMap = nullptr;
              //qDebug() << __FILE__ << __LINE__ << ": mmap'ing history failed.  errno = " << errno;
      }
@@ -152,8 +199,7 @@ index cdc5e0a..4248938 100644
  
      fileMap = nullptr;
  }
-diff --git a/lib/History.h b/lib/History.h
-index 155bb7f..d5ad1a3 100644
+diff -ru --unidirectional-new-file -x .git -x OPSREMOTE-CHANGES.md -x OPSREMOTE-CHANGES.patch a/lib/History.h b/lib/History.h
 --- a/lib/History.h
 +++ b/lib/History.h
 @@ -1,3 +1,4 @@
@@ -175,7 +221,7 @@ index 155bb7f..d5ad1a3 100644
  
  namespace Konsole
  {
-@@ -297,16 +302,27 @@ public:
+@@ -297,16 +302,27 @@
  
    CompactHistoryBlock(){
      blockLength = 4096*64; // 256kb
@@ -203,8 +249,7 @@ index 155bb7f..d5ad1a3 100644
    }
  
    virtual unsigned int remaining(){ return blockStart+blockLength-tail;}
-diff --git a/lib/Pty.h b/lib/Pty.h
-index 5e5c476..eb5c1ca 100644
+diff -ru --unidirectional-new-file -x .git -x OPSREMOTE-CHANGES.md -x OPSREMOTE-CHANGES.patch a/lib/Pty.h b/lib/Pty.h
 --- a/lib/Pty.h
 +++ b/lib/Pty.h
 @@ -1,3 +1,4 @@
@@ -225,17 +270,15 @@ index 5e5c476..eb5c1ca 100644
  // Qt
  #include <QStringList>
  #include <QVector>
-@@ -218,4 +225,6 @@ Q_OBJECT
+@@ -218,4 +225,6 @@
  
  }
  
 +#endif // _WIN32
 +
  #endif // PTY_H
-diff --git a/lib/PtyWindows.cpp b/lib/PtyWindows.cpp
-new file mode 100644
-index 0000000..6c86983
---- /dev/null
+diff -ru --unidirectional-new-file -x .git -x OPSREMOTE-CHANGES.md -x OPSREMOTE-CHANGES.patch a/lib/PtyWindows.cpp b/lib/PtyWindows.cpp
+--- a/lib/PtyWindows.cpp
 +++ b/lib/PtyWindows.cpp
 @@ -0,0 +1,38 @@
 +/*
@@ -276,10 +319,8 @@ index 0000000..6c86983
 +void Pty::sendData(const char *, int)
 +{
 +}
-diff --git a/lib/PtyWindows.h b/lib/PtyWindows.h
-new file mode 100644
-index 0000000..11433d5
---- /dev/null
+diff -ru --unidirectional-new-file -x .git -x OPSREMOTE-CHANGES.md -x OPSREMOTE-CHANGES.patch a/lib/PtyWindows.h b/lib/PtyWindows.h
+--- a/lib/PtyWindows.h
 +++ b/lib/PtyWindows.h
 @@ -0,0 +1,77 @@
 +/*
@@ -359,8 +400,7 @@ index 0000000..11433d5
 +}
 +
 +#endif // PTYWINDOWS_H
-diff --git a/lib/Session.cpp b/lib/Session.cpp
-index 734673e..5a9d666 100644
+diff -ru --unidirectional-new-file -x .git -x OPSREMOTE-CHANGES.md -x OPSREMOTE-CHANGES.patch a/lib/Session.cpp b/lib/Session.cpp
 --- a/lib/Session.cpp
 +++ b/lib/Session.cpp
 @@ -1,3 +1,4 @@
@@ -385,7 +425,7 @@ index 734673e..5a9d666 100644
  //#include "kptyprocess.h"
  #include "TerminalCharacterDecoder.h"
  #include "TerminalDisplay.h"
-@@ -579,7 +590,15 @@ bool Session::sendSignal(int signal)
+@@ -579,7 +590,15 @@
          return false;
      }
  
@@ -401,11 +441,15 @@ index 734673e..5a9d666 100644
  
       if ( result == 0 )
       {
-diff --git a/lib/TerminalDisplay.cpp b/lib/TerminalDisplay.cpp
-index c29b3ff..6f4aad7 100644
+diff -ru --unidirectional-new-file -x .git -x OPSREMOTE-CHANGES.md -x OPSREMOTE-CHANGES.patch a/lib/TerminalDisplay.cpp b/lib/TerminalDisplay.cpp
 --- a/lib/TerminalDisplay.cpp
 +++ b/lib/TerminalDisplay.cpp
-@@ -27,7 +27,12 @@
+@@ -1,3 +1,4 @@
++// Modified for OpsRemote by Thanos Athanasopoulos, 2026 (see OPSREMOTE-CHANGES.md).
+ /*
+     This file is part of Konsole, a terminal emulator for KDE.
+ 
+@@ -27,7 +28,12 @@
  #include <QAbstractButton>
  #include <QApplication>
  #include <QBoxLayout>
@@ -418,8 +462,13 @@ index c29b3ff..6f4aad7 100644
  #include <QKeyEvent>
  #include <QEvent>
  #include <QTime>
-@@ -3166,6 +3171,13 @@ void TerminalDisplay::emitSelection(bool useXselection,bool appendReturn)
-       useXselection = false;
+@@ -3161,8 +3167,18 @@
+       return;
+ 
+   // Paste Clipboard by simulating keypress events
++  // Windows and macOS have no X11 primary selection: use the clipboard there.
++  if (useXselection && !QApplication::clipboard()->supportsSelection())
++      useXselection = false;
    QString text = QApplication::clipboard()->text(useXselection ? QClipboard::Selection :
                                                                   QClipboard::Clipboard);
 +  pasteText(text, appendReturn);
@@ -432,7 +481,7 @@ index c29b3ff..6f4aad7 100644
    if ( ! text.isEmpty() )
    {
      text.replace(QLatin1String("\r\n"), QLatin1String("\n"));
-@@ -3180,6 +3192,13 @@ void TerminalDisplay::emitSelection(bool useXselection,bool appendReturn)
+@@ -3177,6 +3193,13 @@
          if (!multilineConfirmation(text)) {
              return;
          }
@@ -446,7 +495,7 @@ index c29b3ff..6f4aad7 100644
      }
  
      bracketText(text);
-@@ -3226,27 +3245,58 @@ void TerminalDisplay::bracketText(QString& text) const
+@@ -3223,27 +3246,58 @@
      }
  }
  
@@ -524,7 +573,7 @@ index c29b3ff..6f4aad7 100644
  }
  
  void TerminalDisplay::setSelection(const QString& t)
-@@ -3255,6 +3305,10 @@ void TerminalDisplay::setSelection(const QString& t)
+@@ -3252,6 +3306,10 @@
      {
          QApplication::clipboard()->setText(t, QClipboard::Selection);
      }
@@ -535,11 +584,31 @@ index c29b3ff..6f4aad7 100644
  }
  
  void TerminalDisplay::copyClipboard()
-diff --git a/lib/TerminalDisplay.h b/lib/TerminalDisplay.h
-index 0c881b8..206aca9 100644
+@@ -3773,8 +3831,15 @@
+ 
+ void TerminalDisplay::setMargin(int i)
+ {
++    // OpsRemote addition: laid out again at once (columns, lines and the
++    // program's terminal size), as on a resize; before, a new padding showed
++    // only in new terminals.
++    if (i == _topBaseMargin && i == _leftBaseMargin)
++        return;
+     _topBaseMargin = i;
+     _leftBaseMargin = i;
++    propagateSize();
++    update();
+ }
+ 
+ AutoScrollHandler::AutoScrollHandler(QWidget* parent)
+diff -ru --unidirectional-new-file -x .git -x OPSREMOTE-CHANGES.md -x OPSREMOTE-CHANGES.patch a/lib/TerminalDisplay.h b/lib/TerminalDisplay.h
 --- a/lib/TerminalDisplay.h
 +++ b/lib/TerminalDisplay.h
-@@ -211,6 +211,9 @@ public:
+@@ -1,3 +1,4 @@
++// Modified for OpsRemote by Thanos Athanasopoulos, 2026 (see OPSREMOTE-CHANGES.md).
+ /*
+     Copyright 2007-2008 by Robert Knight <robertknight@gmail.com>
+     Copyright 1997,1998 by Lars Doelle <lars.doelle@on-line.de>
+@@ -211,6 +212,9 @@
      uint lineSpacing() const;
  
      void emitSelection(bool useXselection,bool appendReturn);
@@ -549,7 +618,7 @@ index 0c881b8..206aca9 100644
  
      /** change and wrap text corresponding to paste mode **/
      void bracketText(QString& text) const;
-@@ -431,6 +434,9 @@ public:
+@@ -431,6 +435,9 @@
      void setMotionAfterPasting(MotionAfterPasting action);
      int motionAfterPasting();
      void setConfirmMultilinePaste(bool confirmMultilinePaste);
@@ -559,7 +628,7 @@ index 0c881b8..206aca9 100644
      void setTrimPastedTrailingNewlines(bool trimPastedTrailingNewlines);
  
      /** Show destination URL tooltips when hovering link hotspots. */
-@@ -595,6 +601,9 @@ signals:
+@@ -595,6 +602,9 @@
  
     // qtermwidget signals
  	void copyAvailable(bool);
@@ -569,7 +638,7 @@ index 0c881b8..206aca9 100644
  	void termGetFocus();
  	void termLostFocus();
  
-@@ -730,7 +739,8 @@ private:
+@@ -730,7 +740,8 @@
      void scrollImage(int lines , const QRect& region);
  
      // shows the multiline prompt
@@ -579,7 +648,7 @@ index 0c881b8..206aca9 100644
  
      void calcGeometry();
      void propagateSize();
-@@ -884,6 +894,7 @@ private:
+@@ -884,6 +895,7 @@
  
      MotionAfterPasting mMotionAfterPasting;
      bool _confirmMultilinePaste;
@@ -587,8 +656,25 @@ index 0c881b8..206aca9 100644
      bool _trimPastedTrailingNewlines;
      bool _linkTooltipsEnabled;
      QTimer* _linkTooltipTimer;
-diff --git a/lib/qtermwidget.cpp b/lib/qtermwidget.cpp
-index 9705e8f..701de32 100644
+diff -ru --unidirectional-new-file -x .git -x OPSREMOTE-CHANGES.md -x OPSREMOTE-CHANGES.patch a/lib/Vt102Emulation.cpp b/lib/Vt102Emulation.cpp
+--- a/lib/Vt102Emulation.cpp
++++ b/lib/Vt102Emulation.cpp
+@@ -1,3 +1,4 @@
++// Modified for OpsRemote by Thanos Athanasopoulos, 2026 (see OPSREMOTE-CHANGES.md).
+ /*
+     This file is part of Konsole, an X terminal.
+ 
+@@ -1455,6 +1456,9 @@
+   resetMode(MODE_AppKeyPad);  saveMode(MODE_AppKeyPad);
+   resetMode(MODE_NewLine);
+   setMode(MODE_Ansi);
++  // OpsRemote addition: focus reports (?1004) end with a reset too; left on,
++  // every focus change typed "^[[I" / "^[[O" into the shell.
++  _reportFocusEvents = false;
+ }
+ 
+ void Vt102Emulation::setMode(int m)
+diff -ru --unidirectional-new-file -x .git -x OPSREMOTE-CHANGES.md -x OPSREMOTE-CHANGES.patch a/lib/qtermwidget.cpp b/lib/qtermwidget.cpp
 --- a/lib/qtermwidget.cpp
 +++ b/lib/qtermwidget.cpp
 @@ -1,3 +1,4 @@
@@ -596,7 +682,7 @@ index 9705e8f..701de32 100644
  /*  Copyright (C) 2008 e_k (e_k@users.sourceforge.net)
  
      This library is free software; you can redistribute it and/or
-@@ -326,6 +327,9 @@ void QTermWidget::init(int startnow)
+@@ -326,6 +327,9 @@
      connect(m_impl->m_session, SIGNAL(silence()), this, SIGNAL(silence()));
      connect(m_impl->m_session, &Session::profileChangeCommandReceived, this, &QTermWidget::profileChanged);
      connect(m_impl->m_session, &Session::receivedData, this, &QTermWidget::receivedData);
@@ -606,7 +692,7 @@ index 9705e8f..701de32 100644
  
      // That's OK, FilterChain's dtor takes care of filters.
      // OSC-8 hyperlinks take priority over regex URL detection when both match.
-@@ -363,6 +367,9 @@ void QTermWidget::init(int startnow)
+@@ -363,6 +367,9 @@
      this->setFocusProxy(m_impl->m_terminalDisplay);
      connect(m_impl->m_terminalDisplay, SIGNAL(copyAvailable(bool)),
              this, SLOT(selectionChanged(bool)));
@@ -616,7 +702,7 @@ index 9705e8f..701de32 100644
      connect(m_impl->m_terminalDisplay, SIGNAL(termGetFocus()),
              this, SIGNAL(termGetFocus()));
      connect(m_impl->m_terminalDisplay, SIGNAL(termLostFocus()),
-@@ -384,6 +391,9 @@ void QTermWidget::init(int startnow)
+@@ -384,6 +391,9 @@
      m_impl->m_session->addView(m_impl->m_terminalDisplay);
  
      connect(m_impl->m_session, SIGNAL(resizeRequest(QSize)), this, SLOT(setSize(QSize)));
@@ -626,7 +712,7 @@ index 9705e8f..701de32 100644
      connect(m_impl->m_session, SIGNAL(finished()), this, SLOT(sessionFinished()));
      connect(m_impl->m_session, &Session::titleChanged, this, &QTermWidget::titleChanged);
      connect(m_impl->m_session, &Session::currentDirectoryChanged, this, &QTermWidget::currentDirectoryChanged);
-@@ -604,6 +614,18 @@ void QTermWidget::pasteSelection()
+@@ -604,6 +614,23 @@
      m_impl->m_terminalDisplay->pasteSelection();
  }
  
@@ -642,10 +728,15 @@ index 9705e8f..701de32 100644
 +    m_impl->m_terminalDisplay->pasteText(text, false);
 +}
 +
- bool QTermWidget::terminalUsesMouse() const
++bool QTermWidget::terminalUsesMouse() const
++{
++    return m_impl->m_terminalDisplay->usesMouse();
++}
++
+ void QTermWidget::setZoom(int step)
  {
-     return m_impl->m_terminalDisplay->usesMouse();
-@@ -769,6 +791,12 @@ int QTermWidget::getPtySlaveFd() const
+     QFont font = m_impl->m_terminalDisplay->getVTFont();
+@@ -764,6 +791,12 @@
      return m_impl->m_session->getPtySlaveFd();
  }
  
@@ -658,8 +749,30 @@ index 9705e8f..701de32 100644
  QString QTermWidget::getPtyName() const
  {
      return m_impl->m_session->getPtyName();
-diff --git a/lib/qtermwidget.h b/lib/qtermwidget.h
-index 3d4e834..1129799 100644
+@@ -858,6 +891,22 @@
+     m_impl->m_terminalDisplay->setTrimPastedTrailingNewlines(trimPastedTrailingNewlines);
+ }
+ 
++void QTermWidget::setLinksEnabled(bool enabled)
++{
++    auto *display = m_impl->m_terminalDisplay;
++    if (display->filterChain()->linksEnabled() == enabled)
++        return;
++    display->filterChain()->setLinksEnabled(enabled);
++    display->processFilters();
++    if (!enabled)
++        display->setLinkTooltipsEnabled(false);
++}
++
++bool QTermWidget::linksEnabled() const
++{
++    return m_impl->m_terminalDisplay->filterChain()->linksEnabled();
++}
++
+ void QTermWidget::setOsc8HyperlinksEnabled(bool enabled)
+ {
+     if (auto* filter = m_impl->m_terminalDisplay->filterChain()->getHyperlinkFilter()) {
+diff -ru --unidirectional-new-file -x .git -x OPSREMOTE-CHANGES.md -x OPSREMOTE-CHANGES.patch a/lib/qtermwidget.h b/lib/qtermwidget.h
 --- a/lib/qtermwidget.h
 +++ b/lib/qtermwidget.h
 @@ -1,3 +1,4 @@
@@ -667,7 +780,7 @@ index 3d4e834..1129799 100644
  /*  Copyright (C) 2008 e_k (e_k@users.sourceforge.net)
  
      This library is free software; you can redistribute it and/or
-@@ -66,6 +67,14 @@ public:
+@@ -66,6 +67,14 @@
       */
      void startTerminalTeletype() override;
  
@@ -682,7 +795,16 @@ index 3d4e834..1129799 100644
      int getShellPID() override;
  
      /**
-@@ -282,6 +291,8 @@ public:
+@@ -266,6 +275,8 @@
+     void setConfirmMultilinePaste(bool confirmMultilinePaste) override;
+     void setTrimPastedTrailingNewlines(bool trimPastedTrailingNewlines) override;
+ 
++    void setLinksEnabled(bool enabled) override;
++    bool linksEnabled() const override;
+     void setOsc8HyperlinksEnabled(bool enabled) override;
+     bool osc8HyperlinksEnabled() const override;
+     void setLinkTooltipsEnabled(bool enabled) override;
+@@ -280,6 +291,8 @@
  signals:
      void finished();
      void copyAvailable(bool);
@@ -691,7 +813,7 @@ index 3d4e834..1129799 100644
  
      void termGetFocus();
      void termLostFocus();
-@@ -302,6 +313,13 @@ signals:
+@@ -300,6 +313,13 @@
       */
      void sendData(const char *,int);
  
@@ -705,7 +827,7 @@ index 3d4e834..1129799 100644
      void profileChanged(const QString & profile);
  
      void titleChanged();
-@@ -318,6 +336,13 @@ signals:
+@@ -316,6 +336,13 @@
       */
      void receivedData(const QString &text);
  
@@ -719,7 +841,7 @@ index 3d4e834..1129799 100644
  public slots:
      // Copy selection to clipboard
      void copyClipboard();
-@@ -328,6 +353,12 @@ public slots:
+@@ -326,6 +353,15 @@
      // Paste selection to terminal
      void pasteSelection();
  
@@ -729,6 +851,26 @@ index 3d4e834..1129799 100644
 +    // editable.
 +    void setEditMultilinePaste(bool edit);
 +
-     // True while the program in the terminal has asked for mouse events.
-     bool terminalUsesMouse() const;
++    // True while the program in the terminal has asked for mouse events.
++    bool terminalUsesMouse() const;
++
+     // Set zoom
+     void zoomIn();
+     void zoomOut();
+diff -ru --unidirectional-new-file -x .git -x OPSREMOTE-CHANGES.md -x OPSREMOTE-CHANGES.patch a/lib/qtermwidget_interface.h b/lib/qtermwidget_interface.h
+--- a/lib/qtermwidget_interface.h
++++ b/lib/qtermwidget_interface.h
+@@ -1,3 +1,4 @@
++// Modified for OpsRemote by Thanos Athanasopoulos, 2026 (see OPSREMOTE-CHANGES.md).
+ /*  Copyright (C) 2022 Francesc Martinez (info@francescmm.com)
  
+     This library is free software; you can redistribute it and/or
+@@ -98,6 +99,8 @@
+    virtual void setBoldIntense(bool boldIntense) = 0;
+    virtual void setConfirmMultilinePaste(bool confirmMultilinePaste) = 0;
+    virtual void setTrimPastedTrailingNewlines(bool trimPastedTrailingNewlines) = 0;
++   virtual void setLinksEnabled(bool enabled) = 0;
++   virtual bool linksEnabled() const = 0;
+    virtual void setOsc8HyperlinksEnabled(bool enabled) = 0;
+    virtual bool osc8HyperlinksEnabled() const = 0;
+    virtual void setLinkTooltipsEnabled(bool enabled) = 0;

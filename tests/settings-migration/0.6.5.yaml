@@ -1,0 +1,23 @@
+# Settings files of OpsRemote 0.6.5 (settings version 5), one case each
+# (see 0.6.1.yaml).
+
+runtime-off:
+  # remove_runtime_on_exit as 0.6.5 saved it by default: off.
+  settings_version: 5
+  backup:
+    backup_on_start: true
+    remove_runtime_on_exit: false
+  startup:
+    single_instance: true
+
+runtime-on:
+  # Turned on by hand.
+  settings_version: 5
+  backup:
+    remove_runtime_on_exit: true
+
+runtime-missing:
+  # No backup section (never saved): the new default applies.
+  settings_version: 5
+  startup:
+    single_instance: true

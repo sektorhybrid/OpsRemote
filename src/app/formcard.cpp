@@ -3,6 +3,8 @@
 
 #include "formcard.h"
 
+#include "windowfit.h"
+
 #include <QAbstractItemView>
 #include <QHeaderView>
 #include <QTableView>
@@ -10,6 +12,8 @@
 #include <QFormLayout>
 #include <QFrame>
 #include <QLabel>
+#include <QScrollArea>
+#include <QTabWidget>
 
 namespace {
 
@@ -31,6 +35,15 @@ QFrame *card(const QString &title, QWidget *parent, QVBoxLayout **inside)
 }
 
 } // namespace
+
+QVBoxLayout *addCardTab(QTabWidget *tabs, const QString &title, QWidget *parent)
+{
+    auto *page = new QWidget(parent);
+    auto *layout = new QVBoxLayout(page);
+    layout->setSpacing(6);
+    tabs->addTab(WindowFit::scrollablePage(page), title);
+    return layout;
+}
 
 QFormLayout *addFormCard(QBoxLayout *page, const QString &title, QWidget *parent)
 {

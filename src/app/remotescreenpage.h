@@ -10,13 +10,17 @@
 
 class QKeyEvent;
 class QLabel;
+class QMutex;
+class QPainter;
 class QTabWidget;
 class QTimer;
+class SessionEndedPanel;
 
 // What remote screen tabs (RDP, VNC) have in common: full screen in a window
 // of their own (Ctrl+Alt+Enter), key combinations the local system would
-// otherwise catch (Send Keys), a screenshot, and closing the tab after the
-// session ended.
+// otherwise catch (Send Keys), a screenshot, closing the tab after the
+// session ended, and drawing the remote picture: scaled to fit, with its
+// pointer, the overlay while connecting and the bar once it ended.
 class RemoteScreenPage : public QWidget
 {
     Q_OBJECT
@@ -69,6 +73,45 @@ protected:
 
     // OPSREMOTE_TEST_MONITORS=N (testing): N monitors side by side.
     static int testMonitorCount();
+
+    // The session's picture; read frame() only with frameMutex() locked.
+    virtual QMutex &frameMutex() const = 0;
+    virtual const QImage &frame() const = 0;
+    // The mouse pointer for the page's state (showPointerShape() for the
+    // server's shape).
+    virtual void updateCursor() = 0;
+
+    // While connected every key goes to the remote computer (no shortcuts);
+    // a new size or screen scale places the overlays, restarts the desktop
+    // resize (m_resizeTimer) and rescales the pointer.
+    bool event(QEvent *event) override;
+    // The dimmed overlay (m_overlay, m_overlayText; name: its object name)
+    // and the bar shown once the session ended (m_endedPanel), hidden.
+    void buildOverlay(const QString &name);
+    // Where the picture goes: scaled down to fit, never up, and centred; one
+    // remote pixel per physical pixel on high-DPI screens when the session
+    // asked for that (m_connectScale).
+    QRect targetRect() const;
+    // A remote area that changed, repainted where it shows.
+    void repaintRemoteArea(const QRect &area);
+    // The picture, on black.
+    void paintFrame(QPainter &painter, const QRect &dirty);
+    // The server's pointer shape, scaled like the desktop when it is shown
+    // smaller.
+    void showPointerShape();
+
+    QWidget *m_overlay = nullptr;
+    QLabel *m_overlayText = nullptr;
+    SessionEndedPanel *m_endedPanel = nullptr;
+    bool m_connected = false;
+    // The server can follow the tab's size; m_resizeTimer waits until the
+    // tab stops changing size before asking (the page creates it).
+    bool m_resizeSupported = false;
+    QTimer *m_resizeTimer = nullptr;
+    QImage m_pointerShape;
+    QPoint m_pointerHotSpot;
+    // The scale the desktop was last sized for.
+    qreal m_connectScale = 1.0;
 
 private:
     QTabWidget *tabWidget() const;

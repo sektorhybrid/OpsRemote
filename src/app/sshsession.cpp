@@ -383,7 +383,9 @@ private:
     enum class FolderStage { Opening, Executing, Reading };
     ssh_channel m_folderChannel = nullptr;
     QTimer *m_folderPoll = nullptr;
+    QTimer *m_folderDeadline = nullptr;
     QElapsedTimer m_folderElapsed;
+    static constexpr int FolderQueryMs = 3000; // a folder query's time limit
     FolderStage m_folderStage = FolderStage::Opening;
     QByteArray m_folderCommand;
     QByteArray m_folderOutput;
@@ -2219,6 +2221,9 @@ void SshWorker::closeForward(QTcpSocket *socket)
 
 void SshWorker::readAvailable()
 {
+    // A folder query under way (queryShellFolder): its answer may be in.
+    if (m_folderChannel)
+        pumpShellFolder();
     if (!m_newAgentChannels.isEmpty())
         startAgentForwards();
     if (!m_agentForwards.isEmpty())
@@ -2527,20 +2532,29 @@ void SshWorker::queryDropFolder()
     startFolderPoll();
 }
 
+// The query moves on when the server answers (readAvailable(), from the
+// socket's notifier, pumps it). A slow tick covers what libssh buffered
+// without a new socket notification; the deadline ends a query the server
+// never answers, also while no packets come at all.
 void SshWorker::startFolderPoll()
 {
     if (!m_folderPoll) {
         m_folderPoll = new QTimer(this);
-        m_folderPoll->setInterval(20);
+        m_folderPoll->setInterval(100);
         connect(m_folderPoll, &QTimer::timeout, this, [this] {
-            pumpShellFolder();
             // Query replies can buffer terminal data without another socket
-            // notification. Drain it after restoring the session's mode.
+            // notification; readAvailable() drains it and pumps the query.
             if (m_session && !m_finished)
                 readAvailable();
+            else
+                pumpShellFolder();
         });
+        m_folderDeadline = new QTimer(this);
+        m_folderDeadline->setSingleShot(true);
+        connect(m_folderDeadline, &QTimer::timeout, this, [this] { finishShellFolder(false); });
     }
     m_folderPoll->start();
+    m_folderDeadline->start(FolderQueryMs);
     pumpShellFolder();
 }
 
@@ -2571,7 +2585,9 @@ void SshWorker::pumpShellFolder()
     const int blocking = ssh_is_blocking(m_session);
     ssh_set_blocking(m_session, 0);
     const auto restore = qScopeGuard([this, blocking] { ssh_set_blocking(m_session, blocking); });
-    if (m_folderElapsed.elapsed() >= 3000) {
+    // Also checked here: other work on this thread can hold the deadline's
+    // timer back.
+    if (m_folderElapsed.elapsed() >= FolderQueryMs) {
         finishShellFolder(false);
         return;
     }
@@ -2622,6 +2638,8 @@ void SshWorker::finishShellFolder(bool report)
 {
     if (m_folderPoll)
         m_folderPoll->stop();
+    if (m_folderDeadline)
+        m_folderDeadline->stop();
     if (!m_folderChannel)
         return;
     const int blocking = ssh_is_blocking(m_session);

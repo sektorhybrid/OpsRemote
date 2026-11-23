@@ -5,6 +5,8 @@
 
 #include <QString>
 
+class QCheckBox;
+class QFormLayout;
 class QSpinBox;
 namespace YAML { class Node; }
 
@@ -35,3 +37,6 @@ QString reconnectAttemptText(int attempt, int attempts);
 // window), the lowest value is the inherited one: 0 s, and -1 tries.
 QSpinBox *reconnectDelayBox(int value, int inheritedDelay = -1);
 QSpinBox *reconnectAttemptsBox(int value, int inheritedAttempts = -2);
+// Wait and Tries rows under the switch that turns reconnecting on, usable
+// only while it is on.
+void addReconnectRows(QFormLayout *form, QCheckBox *autoReconnect, QSpinBox *delay, QSpinBox *attempts);

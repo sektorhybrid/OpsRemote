@@ -21,6 +21,7 @@
 #include "proxy.h"
 #include "sshauth.h"
 #include "automation.h"
+#include "desktopentry.h"
 #include "scripts.h"
 #include "localsessions.h"
 #include "vncoptions.h"
@@ -1465,6 +1466,20 @@ void PreferencesWindow::buildStartupPage()
                         activation, QStringLiteral("activation raise focus busy cursor pointer wayland gnome"));
         connectToggle(activation, &StartupPreferences::waylandActivation);
     }
+    if (Platform::has(Platform::Feature::DesktopEntry)) {
+        auto *taskbar = toggle(current.taskbarIcon);
+        startup->addRow(QStringLiteral("Show the OpsRemote icon in the taskbar"),
+                        QStringLiteral("Keeps a hidden launcher entry for this copy in your desktop's "
+                                       "applications folder (%1.desktop, not listed in menus), so the "
+                                       "taskbar and dock show OpsRemote's icon. Nothing is written when "
+                                       "that folder is missing or read-only; off removes the entry.")
+                            .arg(QLatin1String(DesktopEntry::Id)),
+                        taskbar, QStringLiteral("icon taskbar dock desktop file launcher gear gnome kde"));
+        connect(taskbar, &QAbstractButton::toggled, this, [update](bool on) {
+            update([on](StartupPreferences &p) { p.taskbarIcon = on; });
+            qInfo("taskbar icon: %s", qUtf8Printable(DesktopEntry::update(on)));
+        });
+    }
 
     auto *closing = page->addCard(QStringLiteral("When OpsRemote closes"));
     auto *exit = toggle(current.confirmExit);
@@ -1489,33 +1504,6 @@ void PreferencesWindow::buildStartupPage()
                  QStringLiteral("Otherwise new tabs open at the end."), nextTo,
                  QStringLiteral("position order"));
     connectToggle(nextTo, &StartupPreferences::newTabNextToCurrent);
-    auto *strip = choiceBox({{QStringLiteral("top"), QStringLiteral("Top")},
-                             {QStringLiteral("bottom"), QStringLiteral("Bottom")},
-                             {QStringLiteral("off"), QStringLiteral("Off")}},
-                            current.messageStrip);
-    tabs->addRow(QStringLiteral("Pane bar"),
-                 QStringLiteral("A bar at the top or bottom of each terminal and remote screen (each pane of a "
-                                "split tab too) with its questions, messages and transfers. Every message also "
-                                "goes to Messages at the bottom right, with where it came from. Off: no bars; "
-                                "questions show inside the tab."),
-                 strip, QStringLiteral("status notice message band strip bar top bottom pane"));
-    auto *barMode = choiceBox({{QStringLiteral("fixed"), QStringLiteral("Always shown")},
-                               {QStringLiteral("auto"), QStringLiteral("Only when needed")}},
-                              current.messageBar);
-    tabs->addRow(QStringLiteral("Show the pane bar"),
-                 QStringLiteral("Always shown: every pane keeps its bar, empty when there is nothing to say, so "
-                                "nothing ever moves. Only when needed: the bar comes with a message, question or "
-                                "transfer and goes again; it pushes a terminal down, and covers the top edge of a "
-                                "remote screen (which keeps its size)."),
-                 barMode, QStringLiteral("status bar fixed always auto push cover overlay"));
-    barMode->setEnabled(current.messageStrip != QStringLiteral("off"));
-    connect(strip, &QComboBox::activated, this, [update, strip, barMode] {
-        update([&](StartupPreferences &p) { p.messageStrip = strip->currentData().toString(); });
-        barMode->setEnabled(strip->currentData().toString() != QStringLiteral("off"));
-    });
-    connect(barMode, &QComboBox::activated, this, [update, barMode] {
-        update([&](StartupPreferences &p) { p.messageBar = barMode->currentData().toString(); });
-    });
     auto *duplicates = toggle(current.allowDuplicateSessionTabs);
     tabs->addRow(QStringLiteral("Allow the same saved session in multiple tabs"),
                  QStringLiteral("Off: opening an already-open saved session selects its tab. "
@@ -1529,6 +1517,111 @@ void PreferencesWindow::buildStartupPage()
                  closeConnected, QStringLiteral("confirm disconnect"));
     connectToggle(closeConnected, &StartupPreferences::confirmCloseConnected);
     buildTabActivityCard(page);
+
+    // Workspace → Panes: the bar on each pane, and moving terminals.
+    page = addPage(QStringLiteral("panes"), QStringLiteral("Panes"), QStringLiteral("view-split-left-right"),
+                   QStyle::SP_TitleBarNormalButton);
+    auto *bar = page->addCard(QStringLiteral("Pane bar"));
+    auto *strip = choiceBox({{QStringLiteral("top"), QStringLiteral("Top")},
+                             {QStringLiteral("bottom"), QStringLiteral("Bottom")},
+                             {QStringLiteral("off"), QStringLiteral("Off")}},
+                            current.messageStrip);
+    bar->addRow(QStringLiteral("Place"),
+                 QStringLiteral("A bar at the top or bottom of each terminal and remote screen (each pane of a "
+                                "split tab too) with its questions, messages and transfers. Every message also "
+                                "goes to Messages at the bottom right, with where it came from. Off: no bars; "
+                                "questions show inside the tab."),
+                 strip, QStringLiteral("status notice message band strip bar top bottom pane"));
+    auto *barMode = choiceBox({{QStringLiteral("fixed"), QStringLiteral("Always shown")},
+                               {QStringLiteral("auto"), QStringLiteral("Only when needed")}},
+                              current.messageBar);
+    bar->addRow(QStringLiteral("Show the pane bar"),
+                 QStringLiteral("Always shown: every pane keeps its bar, empty when there is nothing to say, so "
+                                "nothing ever moves. Only when needed: the bar comes with a message, question or "
+                                "transfer and goes again; it pushes a terminal down, and covers the top edge of a "
+                                "remote screen (which keeps its size)."),
+                 barMode, QStringLiteral("status bar fixed always auto push cover overlay"));
+    barMode->setEnabled(current.messageStrip != QStringLiteral("off"));
+    connect(strip, &QComboBox::activated, this, [update, strip, barMode] {
+        update([&](StartupPreferences &p) { p.messageStrip = strip->currentData().toString(); });
+        barMode->setEnabled(strip->currentData().toString() != QStringLiteral("off"));
+    });
+    connect(barMode, &QComboBox::activated, this, [update, barMode] {
+        update([&](StartupPreferences &p) { p.messageBar = barMode->currentData().toString(); });
+    });
+    auto *parts = choiceBox({{QStringLiteral("fixed"), QStringLiteral("Fixed, with dividers")},
+                             {QStringLiteral("used"), QStringLiteral("Only when used")}},
+                            current.paneBarParts);
+    bar->addRow(QStringLiteral("Parts of the bar"),
+                QStringLiteral("Fixed: the handle, the message and the transfer each keep their own place, "
+                               "between dividers, so nothing shifts when a transfer starts (on a narrow pane the "
+                               "message gets about half the width). Only when used: the message takes the whole "
+                               "width until a transfer starts."),
+                parts, QStringLiteral("divider separator transfer message layout parts"));
+    parts->setEnabled(current.messageStrip != QStringLiteral("off"));
+    connect(parts, &QComboBox::activated, this, [update, parts] {
+        update([&](StartupPreferences &p) { p.paneBarParts = parts->currentData().toString(); });
+    });
+    connect(strip, &QComboBox::activated, this,
+            [strip, parts] { parts->setEnabled(strip->currentData().toString() != QStringLiteral("off")); });
+
+    auto *moving = page->addCard(QStringLiteral("Moving terminals"));
+    auto *move = toggle(current.moveTerminals);
+    moving->addRow(QStringLiteral("Move terminals"),
+                   QStringLiteral("Drag a terminal to another place in its tab, to another tab or to a tab of its "
+                                  "own. Off: no handle, no grip and no Move menu; terminals stay where they are."),
+                   move, QStringLiteral("move drag drop rearrange split handle grip"));
+    auto *dragBy = choiceBox({{QStringLiteral("bar"), QStringLiteral("The whole bar")},
+                              {QStringLiteral("handle"), QStringLiteral("Only the handle")}},
+                             current.moveDragBy);
+    moving->addRow(QStringLiteral("Drag a terminal by"),
+                   QStringLiteral("The handle is the dots at the left end of the pane bar. With no bar (Off, or "
+                                  "hidden while there is nothing to show), the grip at the terminal's top edge "
+                                  "is used either way."),
+                   dragBy, QStringLiteral("drag handle bar grip"));
+    auto *click = choiceBox({{QStringLiteral("nothing"), QStringLiteral("Does nothing")},
+                             {QStringLiteral("menu"), QStringLiteral("Opens the Move menu")}},
+                            current.moveHandleClick);
+    moving->addRow(QStringLiteral("Clicking the handle"),
+                   QStringLiteral("The Move menu: Move to a New Tab, Move Next To a tab, and Pick Up and Move (the "
+                                  "terminal follows the pointer, a click drops it, Esc cancels). The terminal's "
+                                  "right-click menu has it too, under Move."),
+                   click, QStringLiteral("click menu move pick up"));
+    auto *pullOut = toggle(current.movePullTabs);
+    moving->addRow(QStringLiteral("Pull tabs out of the tab strip"),
+                   QStringLiteral("Pull a tab down out of the strip to move it whole (a split tab keeps its "
+                                  "arrangement). Off: dragging a tab only reorders the tabs."),
+                   pullOut, QStringLiteral("tab pull drag out strip"));
+    auto *openHeld = toggle(current.moveOpenTab);
+    moving->addRow(QStringLiteral("Open a tab held over while dragging"),
+                   QStringLiteral("To drop the terminal into that tab's panes."), openHeld,
+                   QStringLiteral("hover open tab switch"));
+    auto *openAfter = new QSpinBox;
+    openAfter->setRange(100, 3000);
+    openAfter->setSingleStep(100);
+    openAfter->setSuffix(QStringLiteral(" ms"));
+    openAfter->setValue(current.moveOpenTabMs);
+    moving->addRow(QStringLiteral("Open it after"), QString(), openAfter, QStringLiteral("delay wait hover"));
+    const auto followMove = [=](bool on) {
+        for (QWidget *row : {static_cast<QWidget *>(dragBy), static_cast<QWidget *>(click),
+                             static_cast<QWidget *>(pullOut), static_cast<QWidget *>(openHeld)})
+            row->setEnabled(on);
+        openAfter->setEnabled(on && openHeld->isChecked());
+    };
+    followMove(current.moveTerminals);
+    connect(move, &QCheckBox::toggled, this, followMove);
+    connect(openHeld, &QCheckBox::toggled, this, [=](bool on) { openAfter->setEnabled(on && move->isChecked()); });
+    connectToggle(move, &StartupPreferences::moveTerminals);
+    connectToggle(pullOut, &StartupPreferences::movePullTabs);
+    connectToggle(openHeld, &StartupPreferences::moveOpenTab);
+    connect(dragBy, &QComboBox::activated, this, [update, dragBy] {
+        update([&](StartupPreferences &p) { p.moveDragBy = dragBy->currentData().toString(); });
+    });
+    connect(click, &QComboBox::activated, this, [update, click] {
+        update([&](StartupPreferences &p) { p.moveHandleClick = click->currentData().toString(); });
+    });
+    connect(openAfter, &QSpinBox::valueChanged, this,
+            [update](int ms) { update([&](StartupPreferences &p) { p.moveOpenTabMs = ms; }); });
 
     buildMouseClipboardPage();
 }
@@ -2017,7 +2110,7 @@ void PreferencesWindow::buildSshPage()
     bindToggle(this, forwardX11, update, &SshPreferences::forwardX11);
     keys->addWideRow(new AvailabilityNote(&LocalResources::x11Problem, [forwardX11](bool available) {
         forwardX11->setEnabled(available || forwardX11->isChecked());
-    }), QStringLiteral("x11 xorg display"));
+    }, nullptr, AvailabilityNote::Run::Background), QStringLiteral("x11 xorg display"));
     if (Platform::has(Platform::Feature::PageantAgent)) {
         auto *agent = choiceBox({{QStringLiteral("auto"), QStringLiteral("Automatic")},
                                  {QStringLiteral("openssh"), QStringLiteral("OpenSSH agent")},
@@ -2214,7 +2307,7 @@ void addProgramRow(SettingsCard *card, const QString &name, const QString &value
         return containerProgram(name).isEmpty()
                    ? QStringLiteral("%1 is not installed here (or not on the PATH).").arg(name)
                    : QString();
-    }, {}), name);
+    }, {}, nullptr, AvailabilityNote::Run::Background), name);
 }
 
 void updateContainers(const std::function<void(ContainerPreferences &)> &change)
@@ -2316,7 +2409,8 @@ void PreferencesWindow::buildWslPage()
                      enabled, QStringLiteral("wsl linux ubuntu distribution"));
     connect(enabled, &QCheckBox::toggled, this,
             [](bool on) { updateContainers([on](ContainerPreferences &v) { v.wsl.enabled = on; }); });
-    sessions->addWideRow(new AvailabilityNote([] { return localSessionProblem(QStringLiteral("WSL")); }, {}),
+    sessions->addWideRow(new AvailabilityNote([] { return localSessionProblem(QStringLiteral("WSL")); }, {},
+                                              nullptr, AvailabilityNote::Run::Background),
                          QStringLiteral("wsl install"));
     auto *distribution = new QLineEdit(current.wsl.distribution);
     distribution->setPlaceholderText(QStringLiteral("WSL's default"));
@@ -2363,7 +2457,7 @@ void PreferencesWindow::buildKeysPage()
     bindToggle(this, useSecurityKeys, update, &SshPreferences::securityKeys);
     securityKeys->addWideRow(new AvailabilityNote(&securityKeyProblem, [useSecurityKeys](bool available) {
         useSecurityKeys->setEnabled(available || useSecurityKeys->isChecked());
-    }), QStringLiteral("fido fido2 yubikey"));
+    }, nullptr, AvailabilityNote::Run::Background), QStringLiteral("fido fido2 yubikey"));
     auto *openKeys = new QPushButton(QStringLiteral("SSH Keys…"));
     connect(openKeys, &QPushButton::clicked, m_mainWindow, &MainWindow::showKeyManager);
     securityKeys->addRow(QStringLiteral("Create and import"),
@@ -2414,7 +2508,7 @@ void PreferencesWindow::buildKerberosPage()
     logon->addWideRow(new AvailabilityNote(&kerberosProblem, [kerberos, delegate](bool available) {
         kerberos->setEnabled(available || kerberos->isChecked());
         delegate->setEnabled(available && kerberos->isChecked());
-    }), QStringLiteral("kerberos gssapi"));
+    }, nullptr, AvailabilityNote::Run::Background), QStringLiteral("kerberos gssapi"));
 
     auto *ticket = page->addCard(QStringLiteral("Your ticket"));
     auto *status = new QLabel(QStringLiteral("Not checked yet."));
@@ -3674,15 +3768,17 @@ void PreferencesWindow::buildDataPage()
     });
     auto *removeRuntime = toggle(current.removeRuntimeOnExit);
     locations->addRow(QStringLiteral("Remove the unpacked program when closing"),
-                      QStringLiteral("Deletes runtime after OpsRemote closes, unless another "
-                                     "window still uses it. Every start then unpacks it again, which "
-                                     "takes a few seconds (longer on slow USB sticks). Settings are "
-                                     "never affected."),
+                      QStringLiteral("Deletes runtime after OpsRemote closes, also after a crash or "
+                                     "when it was ended by force, unless another window still uses "
+                                     "it. Every start then unpacks it again, which takes a few seconds "
+                                     "(longer on slow USB sticks); a copy left behind is checked and "
+                                     "repaired. Settings are never affected."),
                       removeRuntime, QStringLiteral("runtime cache clean delete traces exit"));
     connect(removeRuntime, &QCheckBox::toggled, this, [](bool on) {
         auto value = loadBackupPreferences();
         value.removeRuntimeOnExit = on;
         saveBackupPreferences(value);
+        markRuntimeForRemoval(on);
     });
 
     auto *keep = spinBox(1, 100, current.keep, QStringLiteral(" backups"));

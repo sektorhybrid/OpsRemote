@@ -16,5 +16,7 @@ files to state. The complete diff against upstream is in
 | `lib/Session.cpp` | Ends a session without POSIX signals on Windows. |
 | `lib/qtermwidget.h`, `lib/qtermwidget.cpp` | API additions: feed output from an external transport (SSH), a signal when the screen size changes, `userTyped()`, emitted for typing also when a local program runs in a pseudo-terminal (for broadcast and multi-exec), `selectionFinished()` when a selection is finished, `setEditMultilinePaste()`, and `pasteText()`, which pastes a given text as the clipboard is pasted. |
 | `lib/TerminalDisplay.h`, `lib/TerminalDisplay.cpp` | The multi-line paste confirmation is a resizable window showing the whole text, in place of a fixed-size message box; the text can be edited there before it is pasted ("Edit the text", or `setEditMultilinePaste()` to open it editable). `selectionFinished()` is emitted when a selection is finished (mouse released, double- or triple-click), and `pasteText()` pastes any text the way the clipboard is pasted. |
+| `lib/Filter.h`, `lib/Filter.cpp`, `lib/qtermwidget_interface.h` | Links (web addresses and OSC 8 hyperlinks) can be switched off: `setLinksEnabled()` / `linksEnabled()`, so the link filters find nothing while off. |
+| `lib/Vt102Emulation.cpp` | A terminal reset also switches off focus reports (mode 1004); before, they stayed on after a reset. |
 
 Changed places in the sources are marked "OpsRemote addition".

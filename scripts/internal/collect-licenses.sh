@@ -18,8 +18,10 @@ BUNDLE="$1"
 PLATFORM="$2"
 SYSROOT="${3:-}"
 PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=lib/errors.sh
+source "${PROJECT_DIR}/scripts/internal/lib/errors.sh"
 OUT="${BUNDLE}/licenses"
-DISTRIBUTION="$( . /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-}" || true)"
+DISTRIBUTION="$( . /etc/os-release && echo "${PRETTY_NAME:-}")"
 
 rm -rf "${OUT}"
 mkdir -p "${OUT}"
@@ -34,17 +36,21 @@ copy_package() {
     fi
     # The exact source package, for SOURCES.txt (see the written offer there).
     rpm -q --queryformat '%{NAME}-%{VERSION}-%{RELEASE}  (source: %{SOURCERPM})\n' "${package}" \
-        >> "${OUT}/.packages" 2>/dev/null || true
+        >> "${OUT}/.packages"
+    local declared listed
+    declared="$(rpm -qL "${package}")"
+    # 1: the package declares no licence files.
+    capture listed 1 -- grep -v '^(contains no files)$' <<< "${declared}"
     while IFS= read -r file; do
         [[ -f "${file}" ]] || continue
         mkdir -p "${OUT}/${package}"
         cp "${file}" "${OUT}/${package}/"
-    done < <(rpm -qL "${package}" 2>/dev/null | grep -v '^(contains no files)$' || true)
+    done <<< "${listed}"
     if [[ -d "${OUT}/${package}" ]]; then
         return 0
     fi
-    source="$(rpm -q --queryformat '%{SOURCERPM}\n' "${package}" 2>/dev/null | head -n 1 \
-                | sed -E 's/-[^-]+-[^-]+\.src\.rpm$//' || true)"
+    source="$(source_package_of "${package}")"
+    source="$(sed -E 's/-[^-]+-[^-]+\.src\.rpm$//' <<< "${source}")"
     for folder in "/usr/share/licenses/${package}" "/usr/share/doc/${package}" \
                   ${source:+"/usr/share/licenses/${source}" "/usr/share/doc/${source}"}; do
         [[ -d "${folder}" ]] || continue
@@ -67,40 +73,65 @@ copy_package() {
     fi
 }
 
+# The source package (name-version-release.src.rpm) a package was built from.
+source_package_of() {
+    local sources
+    sources="$(rpm -q --queryformat '%{SOURCERPM}\n' "$1")"
+    echo "${sources%%$'\n'*}"
+}
+
 # The build images leave out documentation, and some packages declare no
 # licence files; their source package (downloaded from the distribution)
 # has them.
 from_source_package() {
     local package="$1" source work archive
-    source="$(rpm -q --queryformat '%{SOURCERPM}\n' "${package}" 2>/dev/null | head -n 1 || true)"
+    source="$(source_package_of "${package}")"
     [[ -n "${source}" ]] || return 0
     work="$(mktemp -d)"
+    on_exit_remove "${work}"
     # The build runs as the calling user, so dnf gets a writable home for its
     # cache; </dev/null keeps it off the file list this runs inside of.
+    # The download is optional (it needs the network): its failure is
+    # reported, and the package's information is written instead.
     if (cd "${work}" && HOME="${work}" dnf -q download --source "${source%.src.rpm}" \
-            </dev/null >/dev/null 2>&1); then
-        (cd "${work}" && rpm2cpio ./*.src.rpm | cpio -idm --quiet 2>/dev/null) || true
+            </dev/null >"${work}/download.log" 2>&1); then
+        (cd "${work}" && rpm2cpio ./*.src.rpm | cpio -idm --quiet)
         mkdir -p "${work}/unpacked"
-        for archive in "${work}"/*.tar.* "${work}"/*.tgz; do
-            [[ -f "${archive}" ]] && tar -C "${work}/unpacked" -xf "${archive}" 2>/dev/null || true
+        for archive in "${work}"/*; do
+            # Source archives only, not their signatures (.asc, .sig).
+            if [[ "${archive}" =~ \.(tar\.(gz|xz|bz2|zst)|tgz)$ ]]; then
+                tar -C "${work}/unpacked" -xf "${archive}"
+            fi
         done
         while IFS= read -r -d '' file; do
             mkdir -p "${OUT}/${package}"
-            cp -n "${file}" "${OUT}/${package}/" || true
+            # The first of several files with one name is kept.
+            [[ -e "${OUT}/${package}/$(basename "${file}")" ]] || cp "${file}" "${OUT}/${package}/"
         done < <(find "${work}" -maxdepth 3 -type f \( -iname '*licen[cs]e*' -o -iname 'copying*' \
                     -o -iname 'notice*' -o -iname 'copyright*' \) ! -name '*.spec' -print0)
+    else
+        echo "skipped: the source package of ${package} (dnf download failed: $(tail -n 1 "${work}/download.log"))" >&2
     fi
-    rm -rf "${work}"
 }
 
-# The package (rpm) a bundled file came from, if any.
+# The package (rpm) a bundled file came from, if any. A packaged file our
+# own build replaced (OpenSSL on Windows) is not that package's: its digest
+# no longer matches, and its licence comes from /opt/licenses instead.
 owner_of() {
-    # rpm reports "not owned" on standard output, with a failure status.
-    local owner
-    if owner="$(rpm -qf --queryformat '%{NAME}\n' "$1" 2>/dev/null)"; then
-        echo "${owner}" | head -n 1
+    local owner changes
+    # rpm -qf: 1 is "not owned by any package": built from source, or
+    # OpsRemote's own (any other failure stops the script).
+    capture owner 1 -- rpm -qf --queryformat '%{NAME}\n' "$1"
+    if ((TOLERATED_STATUS == 1)); then
+        return 0
     fi
-    return 0
+    # rpm -V: 1 is "changes found". A file our own build replaced (OpenSSL on
+    # Windows) is not the package's: its licence comes from /opt/licenses.
+    capture changes 1 -- rpm -Vf "$1"
+    if awk -v file="$1" '$1 ~ /^..5/ && $NF == file { found = 1 } END { exit !found }' <<< "${changes}"; then
+        return 0
+    fi
+    echo "${owner%%$'\n'*}"
 }
 
 # Where a bundled file came from in the build image.
@@ -140,10 +171,14 @@ while IFS= read -r -d '' file; do
 done < <(find "${BUNDLE}" -type f \( -name '*.so*' -o -iname '*.dll' \) -print0)
 
 # Built from source in the image (FreeRDP, libvncserver, zstd, and on
-# Windows libssh and utf8proc).
+# Windows OpenSSL, libssh and utf8proc).
 if [[ -d /opt/licenses ]]; then
     cp -r /opt/licenses/. "${OUT}/"
 fi
+
+# LibVNCServer carries upstream fixes applied by OpsRemote: its change note.
+mkdir -p "${OUT}/libvncserver"
+cp "${PROJECT_DIR}/packaging/libvncserver/OPSREMOTE-CHANGES.md" "${OUT}/libvncserver/"
 
 # QTermWidget, built from third_party/ with OpsRemote's changes.
 mkdir -p "${OUT}/qtermwidget"

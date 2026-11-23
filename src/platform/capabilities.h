@@ -19,6 +19,7 @@ enum class Feature {
     PageantAgent,           // the SSH agent can be PuTTY's Pageant
     WaylandActivation,      // raising windows needs a Wayland activation token
     SelectionClipboard,     // text only selected in other programs (X11/Wayland primary selection)
+    DesktopEntry,           // the taskbar shows an app's icon from its desktop file (freedesktop.org)
 };
 
 // Why the feature is missing on this computer, or an empty string when it

@@ -51,6 +51,7 @@
 #include "tunnels.h"
 #include "wakeonlan.h"
 #include "windowborder.h"
+#include "windowfit.h"
 #include "masterpassworddialog.h"
 #include "preferenceswindow.h"
 #include "rdppage.h"
@@ -1478,20 +1479,33 @@ MainWindow::MainWindow(QWidget *parent)
     // Terminals and whole tabs dragged to other places (see PaneDrag): a pane
     // by its bar or grip, a tab pulled down out of the tab strip.
     m_paneDrag = new PaneDrag(sessionTabs);
-    m_paneBars->movable = [](QWidget *page) { return qobject_cast<TerminalPage *>(page) != nullptr; };
-    m_paneDrag->movable = [](QWidget *page) {
-        return qobject_cast<TerminalPage *>(page) != nullptr || qobject_cast<SplitTab *>(page) != nullptr;
+    // Moving can be switched off (Preferences → Workspace → Panes).
+    m_paneBars->movable = [this](QWidget *page) {
+        return m_startup.moveTerminals && qobject_cast<TerminalPage *>(page) != nullptr;
+    };
+    m_paneDrag->movable = [this](QWidget *page) {
+        return m_startup.moveTerminals
+            && (qobject_cast<TerminalPage *>(page) != nullptr || qobject_cast<SplitTab *>(page) != nullptr);
     };
     m_paneDrag->canDrop = [this](QWidget *dragged, TerminalPage *target) { return canDropOn(dragged, target); };
     m_paneDrag->panesOf = [this](QWidget *tab) { return terminalPagesIn(tab); };
     m_paneDrag->activePaneOf = [this](QWidget *tab) { return activeTerminal(tab); };
     m_paneDrag->dropped = [this](QWidget *dragged, const PaneDrag::Drop &drop) { moveDropped(dragged, drop); };
     connect(m_paneBars, &PaneBars::dragRequested, m_paneDrag, &PaneDrag::start);
+    connect(m_paneBars, &PaneBars::menuRequested, this, [this](QWidget *page, const QPoint &global) {
+        auto *pane = qobject_cast<TerminalPage *>(page);
+        if (!pane)
+            return;
+        QMenu menu(this);
+        fillMoveMenu(&menu, pane);
+        menu.exec(global);
+    });
     // Questions about a transfer name its tab ("smoke@host › Pane 2").
     TransferList::ownerName = [this](QWidget *owner) { return paneLabel(owner); };
     m_paneBars->floats = [](QWidget *page) { return qobject_cast<RemoteScreenPage *>(page) != nullptr; };
     m_paneBars->placed = [sessionTabs] { sessionTabs->raiseCorners(); };
     m_paneBars->setPlace(m_startup.messageStrip, m_startup.messageBar);
+    applyMoveSettings();
     TabPrompt::setInStrip(m_paneBars->shown());
     connect(m_paneBars, &PaneBars::barCreated, this, [this](QWidget *page, TabMessageStrip *bar) {
         const QPointer<QWidget> pane(page);
@@ -3038,7 +3052,7 @@ void MainWindow::editFolderSettings(QTreeWidgetItem *folder)
     kerberosForm->addRow(kerberosNote);
     kerberosForm->addRow(new AvailabilityNote(&kerberosProblem, [kerberos](bool available) {
         kerberos->setEnabled(available || kerberos->currentData().isValid());
-    }, kerberosPage));
+    }, kerberosPage, AvailabilityNote::Run::Background));
     tabs->addTab(kerberosPage, QStringLiteral("Kerberos"));
     auto *automation = new AutomationEditor(
         automationFromText(folder->data(0, FolderAutomationRole).toString()),
@@ -4418,7 +4432,7 @@ TerminalAppearanceEditor *MainWindow::addTerminalAppearanceGroup(
             }
         }
         if (auto *dialog = tabs->window())
-            QTimer::singleShot(0, dialog, [dialog] { dialog->adjustSize(); });
+            QTimer::singleShot(0, dialog, [dialog] { WindowFit::adjustSize(dialog); });
     };
     // After the shared tabs (Wake-on-LAN, Jump host, Proxy) have moved to the
     // new protocol's tabs, which happens later in the same change.
@@ -4619,7 +4633,7 @@ FtpOptionsEditor *MainWindow::addFtpOptionsGroup(QFormLayout *form, QComboBox *p
     auto updateVisible = [protocolCombo, group] {
         group->setVisible(protocolCombo->currentText() == QStringLiteral("FTP"));
         if (auto *dialog = group->window())
-            QTimer::singleShot(0, dialog, [dialog] { dialog->adjustSize(); });
+            QTimer::singleShot(0, dialog, [dialog] { WindowFit::adjustSize(dialog); });
     };
     connect(protocolCombo, &QComboBox::currentTextChanged, group, updateVisible);
     updateVisible();
@@ -4658,7 +4672,7 @@ XdmcpOptionsEditor *MainWindow::addXdmcpOptionsGroup(QFormLayout *form, QComboBo
     auto updateVisible = [protocolCombo, group] {
         group->setVisible(protocolCombo->currentText() == QStringLiteral("XDMCP"));
         if (auto *dialog = group->window())
-            QTimer::singleShot(0, dialog, [dialog] { dialog->adjustSize(); });
+            QTimer::singleShot(0, dialog, [dialog] { WindowFit::adjustSize(dialog); });
     };
     connect(protocolCombo, &QComboBox::currentTextChanged, group, updateVisible);
     updateVisible();
@@ -4679,7 +4693,7 @@ VncOptionsEditor *MainWindow::addVncOptionsGroup(QFormLayout *form, QComboBox *p
     auto updateVisible = [protocolCombo, group] {
         group->setVisible(protocolCombo->currentText() == QStringLiteral("VNC"));
         if (auto *dialog = group->window())
-            QTimer::singleShot(0, dialog, [dialog] { dialog->adjustSize(); });
+            QTimer::singleShot(0, dialog, [dialog] { WindowFit::adjustSize(dialog); });
     };
     connect(protocolCombo, &QComboBox::currentTextChanged, group, updateVisible);
     updateVisible();
@@ -5454,7 +5468,7 @@ RdpOptionsEditor *MainWindow::addRdpOptionsGroup(QFormLayout *form, QComboBox *p
     auto updateVisible = [protocolCombo, group] {
         group->setVisible(protocolCombo->currentText() == QStringLiteral("RDP"));
         if (auto *dialog = group->window())
-            QTimer::singleShot(0, dialog, [dialog] { dialog->adjustSize(); });
+            QTimer::singleShot(0, dialog, [dialog] { WindowFit::adjustSize(dialog); });
     };
     connect(protocolCombo, &QComboBox::currentTextChanged, group, updateVisible);
     updateVisible();
@@ -5979,8 +5993,18 @@ void MainWindow::setStartupPreferences(const StartupPreferences &preferences)
     m_startup = preferences;
     saveStartupPreferences(preferences);
     m_paneBars->setPlace(m_startup.messageStrip, m_startup.messageBar);
+    applyMoveSettings();
     TabPrompt::setInStrip(m_paneBars->shown());
     updatePaneBars();
+}
+
+void MainWindow::applyMoveSettings()
+{
+    m_paneBars->setFixedParts(m_startup.paneBarParts == QStringLiteral("fixed"));
+    m_paneBars->setMoveStyle(m_startup.moveDragBy == QStringLiteral("handle"),
+                             m_startup.moveHandleClick == QStringLiteral("menu"));
+    m_paneDrag->pullTabs = m_startup.moveTerminals && m_startup.movePullTabs;
+    m_paneDrag->setOpenTab(m_startup.moveOpenTab ? m_startup.moveOpenTabMs : -1);
 }
 
 // The host has its own column (Preferences → Appearance → Session list).
@@ -6030,8 +6054,10 @@ void MainWindow::connectTerminalPage(TerminalPage *page)
             split->setActivePane(page);
         return true;
     };
-    connect(page, &TerminalPage::splitMenuRequested, this, [this, makeActive](QMenu *menu) {
+    connect(page, &TerminalPage::splitMenuRequested, this, [this, makeActive, page](QMenu *menu) {
         addSplitMenus(menu, makeActive);
+        if (m_startup.moveTerminals)
+            fillMoveMenu(menu->addMenu(QStringLiteral("Move")), page);
     });
     connect(page, &TerminalPage::duplicateRequested, this, [this, page, makeActive] {
         if (makeActive())
@@ -6209,6 +6235,10 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
             bar->setGeometry(m_sidePanelInset, bar->y(), right + 1 - m_sidePanelInset, bar->height());
         }
     }
+    // Its tabs changed size (look, font, a tab shown or hidden): the panel
+    // stays at least as wide as all of them, whatever its fit setting.
+    if (event->type() == QEvent::LayoutRequest && m_leftTabs && watched == m_leftTabs)
+        updateSidePanelMinimum();
     if (event->type() == QEvent::MouseButtonDblClick && m_leftTabs
         && watched == qobject_cast<QSplitter *>(m_leftTabs->parentWidget())->handle(1)) {
         fitSidePanelToContents();
@@ -6887,14 +6917,23 @@ void MainWindow::fitSidePanelToContents()
         setSidePanelWidth(width);
 }
 
+// The side panel is at least as wide as all of Sessions | Files | Commands |
+// Scripts, so its tab bar never needs scroll buttons: with "Always fit the
+// panel to the list" off, a remembered or dragged width can be narrower than
+// a look's tabs.
+void MainWindow::updateSidePanelMinimum()
+{
+    const int minimum = qMax(220, m_sidePanelInset + m_leftTabs->tabBar()->sizeHint().width() + 4);
+    if (m_leftTabs->minimumWidth() != minimum)
+        m_leftTabs->setMinimumWidth(minimum);
+}
+
 void MainWindow::setSidePanelWidth(int width)
 {
     auto *splitter = qobject_cast<QSplitter *>(m_leftTabs->parentWidget());
     if (!splitter)
         return;
-    // At least as wide as all of Sessions | Files | Commands | Scripts, so the
-    // tab bar never needs its scroll buttons.
-    width = qMax(width, m_sidePanelInset + m_leftTabs->tabBar()->sizeHint().width() + 4);
+    // Never narrower than its tabs (updateSidePanelMinimum).
     const int total = splitter->contentsRect().width();
     const int wanted = qBound(m_leftTabs->minimumWidth(), width, qMax(m_leftTabs->minimumWidth(), total / 2));
     auto sizes = splitter->sizes();
@@ -7281,6 +7320,42 @@ bool MainWindow::canDropOn(QWidget *dragged, TerminalPage *target) const
     if (!dragged || !target || dragged == target || dragged->isAncestorOf(target))
         return false;
     return qobject_cast<TerminalPage *>(dragged) || qobject_cast<SplitTab *>(dragged);
+}
+
+// The Move menu of a pane (its handle's, its right-click menu's): into a
+// tab of its own, next to another tab's active pane, or picked up to be
+// dropped where the pointer clicks.
+void MainWindow::fillMoveMenu(QMenu *menu, TerminalPage *page)
+{
+    const QPointer<TerminalPage> pane(page);
+    auto *newTab = menu->addAction(QIcon::fromTheme(QStringLiteral("tab-new")), QStringLiteral("Move to a New Tab"),
+                                   this, [this, pane] {
+                                       if (pane)
+                                           moveDropped(pane, PaneDrag::Drop{true});
+                                   });
+    // A tab of its own already.
+    newTab->setEnabled(m_sessionTabs->indexOf(page) < 0);
+    auto *next = menu->addMenu(QStringLiteral("Move Next To"));
+    const int own = tabIndexOf(page);
+    for (int index = 0; index < m_sessionTabs->count(); ++index) {
+        auto *target = activeTerminal(m_sessionTabs->widget(index));
+        if (index == own || !canDropOn(page, target))
+            continue;
+        next->addAction(m_sessionTabs->tabIcon(index), m_sessionTabs->tabText(index), this,
+                        [this, pane, target = QPointer<TerminalPage>(target)] {
+                            if (pane && target)
+                                moveDropped(pane, PaneDrag::Drop{false, -1, target, Qt::Horizontal, false});
+                        });
+    }
+    next->setEnabled(!next->isEmpty());
+    menu->addSeparator();
+    menu->addAction(QStringLiteral("Pick Up and Move"), this, [this, pane] {
+        // After the menu has closed.
+        QTimer::singleShot(0, this, [this, pane] {
+            if (pane)
+                m_paneDrag->pickUp(pane);
+        });
+    });
 }
 
 // Moves a dragged pane, or a whole tab (a terminal or a split tab), to

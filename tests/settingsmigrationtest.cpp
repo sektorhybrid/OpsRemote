@@ -174,6 +174,18 @@ int main(int argc, char **argv)
         check("0.6.5-dev/mouse", "other settings kept",
               is(s["behaviour"]["bell"], std::string("sound")) && is(s["startup"]["tab_title"], std::string("both")));
     });
+    run(cases, "0.6.5.yaml", "runtime-off", [](const YAML::Node &s, const QStringList &) {
+        check("0.6.5/runtime-off", "the old default, off, becomes on",
+              is(s["backup"]["remove_runtime_on_exit"], true));
+        check("0.6.5/runtime-off", "other settings kept",
+              is(s["backup"]["backup_on_start"], true) && is(s["startup"]["single_instance"], true));
+    });
+    run(cases, "0.6.5.yaml", "runtime-on", [](const YAML::Node &s, const QStringList &) {
+        check("0.6.5/runtime-on", "on stays on", is(s["backup"]["remove_runtime_on_exit"], true));
+    });
+    run(cases, "0.6.5.yaml", "runtime-missing", [](const YAML::Node &s, const QStringList &) {
+        check("0.6.5/runtime-missing", "nothing written: the default (on) applies", !s["backup"]);
+    });
     run(cases, "current-and-newer.yaml", "newer", [](const YAML::Node &s, const QStringList &report) {
         check("current-and-newer/newer", "left as it is", is(s["settings_version"], 99) && is(s["behaviour"]["copy_on_select"], true)
                                             && is(s["behaviour"]["something_new"], 1));

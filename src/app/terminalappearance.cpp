@@ -8,6 +8,7 @@
 #include "inheritance.h"
 #include "terminalappearance.h"
 #include "preferences.h"
+#include "windowfit.h"
 
 #include <QApplication>
 #include <QCheckBox>
@@ -217,7 +218,8 @@ TerminalAppearanceEditor::TerminalAppearanceEditor(const TerminalAppearance &val
     QVBoxLayout *cards = nullptr;
     QFormLayout *form = nullptr;
     if (overrideMode) {
-        cards = new QVBoxLayout(this);
+        // Scrolls when the session window is shorter (windowfit.h).
+        cards = new QVBoxLayout(WindowFit::scrollingContent(this));
         cards->setContentsMargins(0, 0, 0, 0);
         cards->setSpacing(6);
         form = addFormCard(cards, QStringLiteral("General"), this);

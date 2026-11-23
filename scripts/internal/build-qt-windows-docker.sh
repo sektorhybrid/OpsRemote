@@ -7,9 +7,12 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=lib/errors.sh
+source "${PROJECT_DIR}/scripts/internal/lib/errors.sh"
 IMAGE="${IMAGE:-opsremote-bundle-windows}"
 
-docker build -t "${IMAGE}" "${PROJECT_DIR}/packaging/windows"
+# packaging/ is the context: the images share files (packaging/libvncserver).
+docker build -t "${IMAGE}" -f "${PROJECT_DIR}/packaging/windows/Dockerfile" "${PROJECT_DIR}/packaging"
 # As root: it installs the build's dependencies; the result is given back to
 # the user who runs this.
 docker run --rm -e OWNER="$(id -u):$(id -g)" -v "${PROJECT_DIR}:/src" -w /src \

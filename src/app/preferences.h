@@ -45,6 +45,19 @@ struct StartupPreferences
     bool newTabNextToCurrent = false;
     QString messageStrip = QStringLiteral("top"); // top, bottom, off: each pane's bar with its messages and transfers
     QString messageBar = QStringLiteral("fixed"); // fixed: always there; auto: only when there is something (PaneBars)
+    // fixed: the handle, the message and the transfer keep their places
+    // (dividers); used: the transfer part only while transferring.
+    QString paneBarParts = QStringLiteral("fixed");
+    // Moving terminals to other places (PaneDrag): on/off; dragged by the
+    // whole bar ("bar") or only its handle ("handle"); a click on the handle
+    // does "nothing" or opens the Move "menu"; tabs pulled out of the strip;
+    // a tab held over while dragging opens after moveOpenTabMs.
+    bool moveTerminals = true;
+    QString moveDragBy = QStringLiteral("bar");
+    QString moveHandleClick = QStringLiteral("nothing");
+    bool movePullTabs = true;
+    bool moveOpenTab = true;
+    int moveOpenTabMs = 500;
     // Off: choosing an already-open saved session focuses its existing tab.
     // On: every Open command starts an independent tab/connection.
     bool allowDuplicateSessionTabs = false;
@@ -57,6 +70,9 @@ struct StartupPreferences
     // (xdg-activation). Off: GNOME shows its busy pointer for several
     // seconds after each request, that is after most menus and dialogs.
     bool waylandActivation = false;
+    // Linux: keep a hidden desktop file so the taskbar shows OpsRemote's
+    // icon (desktopentry.h).
+    bool taskbarIcon = true;
 
     bool operator==(const StartupPreferences &) const = default;
 };
@@ -261,7 +277,7 @@ struct BackupPreferences
     int keep = 10;
     // Delete the unpacked program (runtime/...) when OpsRemote
     // closes; the next start unpacks it again.
-    bool removeRuntimeOnExit = false;
+    bool removeRuntimeOnExit = true;
 
     bool operator==(const BackupPreferences &) const = default;
 };
@@ -389,8 +405,13 @@ bool restoreBackup(const QString &name, QString *error = nullptr);
 
 // Removes the unpacked program folder this process runs from, if it runs
 // from <portable home>/runtime/<name> and no other process uses that copy.
-// Call when exiting; on Windows a hidden helper deletes it shortly after.
+// Call when exiting; on Windows the launcher deletes it once this has ended.
 void scheduleRuntimeRemoval();
+// Marks (or unmarks) the unpacked copy this process runs from for the
+// launcher, which waits for the program and removes a marked copy however it
+// ended: closed, crashed or killed (unless another OpsRemote runs from it).
+// Called at start and when the setting changes; nothing for other copies.
+void markRuntimeForRemoval(bool on);
 
 // Saved session IDs reopened by onStartup == "restore", and the window geometry.
 QStringList loadOpenSessions();

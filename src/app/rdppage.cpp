@@ -2,6 +2,8 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "rdppage.h"
+
+#include "clipboard.h"
 #include "statusindicators.h"
 #include "transfers.h"
 #include "filedialogs.h"
@@ -102,23 +104,7 @@ RdpPage::RdpPage(const RdpConnectionSettings &settings, QWidget *parent)
     setAttribute(Qt::WA_OpaquePaintEvent);
     setAttribute(Qt::WA_InputMethodEnabled, false);
 
-    m_overlay = new QWidget(this);
-    m_overlay->setAttribute(Qt::WA_StyledBackground);
-    m_overlay->setObjectName(QStringLiteral("rdpOverlay"));
-    // Only the overlay itself is dimmed; its buttons keep the normal style.
-    m_overlay->setStyleSheet(QStringLiteral("#rdpOverlay { background: rgba(0, 0, 0, 170); }"));
-    auto *overlayLayout = new QVBoxLayout(m_overlay);
-    overlayLayout->addStretch();
-    m_overlayText = new QLabel(m_overlay);
-    m_overlayText->setAlignment(Qt::AlignCenter);
-    m_overlayText->setWordWrap(true);
-    m_overlayText->setStyleSheet(QStringLiteral("background: transparent; color: white; font-size: 11pt;"));
-    overlayLayout->addWidget(m_overlayText);
-    overlayLayout->addStretch();
-    // Once the session has ended: a bar across the top of the tab, in the
-    // same place as on terminal tabs.
-    m_endedPanel = new SessionEndedPanel(SessionEndedPanel::Style::Bar, this);
-    m_endedPanel->hide();
+    buildOverlay(QStringLiteral("rdpOverlay"));
     connect(m_endedPanel, &SessionEndedPanel::reconnectRequested, this, &RdpPage::start);
     connect(m_endedPanel, &SessionEndedPanel::closeRequested, this, &RdpPage::requestClose);
 
@@ -210,7 +196,9 @@ RdpPage::RdpPage(const RdpConnectionSettings &settings, QWidget *parent)
     connect(m_session, &RdpSession::statusMessage, this, [this](const QString &message) {
         showOverlay(message, false);
     });
-    connect(QApplication::clipboard(), &QClipboard::dataChanged, this, &RdpPage::offerLocalClipboard);
+    // Whatever a paste would paste here: a copy anywhere, or text only
+    // selected in OpsRemote (clipboard.h).
+    connect(Clipboard::notifier(), &Clipboard::Notifier::newestChanged, this, &RdpPage::offerLocalClipboard);
     connect(m_session, &RdpSession::remoteClipboardText, this, [this](const QString &text) {
         // Copied on the remote computer: this computer can paste it now.
         ++m_ignoreClipboardChanges;
@@ -318,21 +306,7 @@ RdpPage::RdpPage(const RdpConnectionSettings &settings, QWidget *parent)
         emit statusMessage({}); // connected: an earlier disconnect reason is old news
         update();
     });
-    connect(m_session, &RdpSession::frameUpdated, this, [this](const QRect &area) {
-        const QRect target = targetRect();
-        QMutexLocker locker(&m_session->frameMutex());
-        const QSize frame = m_session->frame().size();
-        locker.unlock();
-        if (frame.isEmpty() || target.isEmpty())
-            return;
-        // Map the dirty remote rectangle to the scaled widget rectangle.
-        const qreal sx = qreal(target.width()) / frame.width();
-        const qreal sy = qreal(target.height()) / frame.height();
-        update(QRectF(target.left() + area.left() * sx, target.top() + area.top() * sy,
-                      area.width() * sx, area.height() * sy)
-                   .toAlignedRect()
-                   .adjusted(-1, -1, 1, 1));
-    });
+    connect(m_session, &RdpSession::frameUpdated, this, &RdpPage::repaintRemoteArea);
     connect(m_session, &RdpSession::desktopResized, this, [this](int width, int height) {
         qInfo("RDP: desktop resized to %dx%d (tab %dx%d, scale %.2f)", width, height, this->width(),
               this->height(), m_connectScale);
@@ -524,18 +498,14 @@ void RdpPage::showOverlay(const QString &text, bool ended, bool error)
     update();
 }
 
-QRect RdpPage::targetRect() const
+QMutex &RdpPage::frameMutex() const
 {
-    QMutexLocker locker(&m_session->frameMutex());
-    const QSize frame = m_session->frame().size();
-    if (frame.isEmpty())
-        return QRect();
-    // Scale down to fit, never up, and centre. On high-DPI screens one remote
-    // pixel is one physical pixel when the session asked for that.
-    QSize size = (QSizeF(frame) / m_connectScale).toSize();
-    if (size.width() > width() || size.height() > height())
-        size.scale(this->size(), Qt::KeepAspectRatio);
-    return QRect(QPoint((width() - size.width()) / 2, (height() - size.height()) / 2), size);
+    return m_session->frameMutex();
+}
+
+const QImage &RdpPage::frame() const
+{
+    return m_session->frame();
 }
 
 bool RdpPage::toRemote(const QPointF &position, int *x, int *y) const
@@ -555,45 +525,14 @@ bool RdpPage::toRemote(const QPointF &position, int *x, int *y) const
 void RdpPage::paintEvent(QPaintEvent *event)
 {
     QPainter painter(this);
-    const QRect target = targetRect();
-    painter.fillRect(event->rect(), Qt::black);
-    if (target.isEmpty())
-        return;
-    painter.setRenderHint(QPainter::SmoothPixmapTransform,
-                          (QSizeF(target.size()) * devicePixelRatioF()).toSize()
-                              != m_session->frame().size());
-    QMutexLocker locker(&m_session->frameMutex());
-    painter.drawImage(target, m_session->frame());
+    paintFrame(painter, event->rect());
 }
 
 bool RdpPage::event(QEvent *event)
 {
-    // While connected, every key goes to the remote computer, including keys
-    // that would otherwise trigger application shortcuts or move the focus.
-    if (m_connected && event->type() == QEvent::ShortcutOverride) {
-        event->accept();
-        return true;
-    }
-#if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
-    if (event->type() == QEvent::DevicePixelRatioChange) {
-        // Moved to a screen with another scale: resize the desktop to match.
-        if (m_resizeSupported)
-            m_resizeTimer->start();
-        updateCursor();
-    }
-#endif
-    if (event->type() == QEvent::Resize) {
-        if (m_overlay)
-            m_overlay->setGeometry(rect());
-        if (m_bar)
-            m_bar->setGeometry(0, 0, width(), m_bar->sizeHint().height());
-        if (m_endedPanel)
-            m_endedPanel->setGeometry(0, 0, width(), m_endedPanel->sizeHint().height());
-        if (m_resizeSupported)
-            m_resizeTimer->start();
-        updateCursor();
-    }
-    return QWidget::event(event);
+    if (event->type() == QEvent::Resize && m_bar)
+        m_bar->setGeometry(0, 0, width(), m_bar->sizeHint().height());
+    return RemoteScreenPage::event(event);
 }
 
 void RdpPage::sendKeyEvent(QKeyEvent *event, bool down)
@@ -810,21 +749,7 @@ void RdpPage::updateCursor()
         unsetCursor();
         return;
     }
-    const QRect target = targetRect();
-    QMutexLocker locker(&m_session->frameMutex());
-    const QSize frame = m_session->frame().size();
-    locker.unlock();
-    // Widget units per remote pixel; the pixmap is made in physical pixels.
-    const qreal scale = frame.isEmpty() || target.isEmpty() ? 1.0 / m_connectScale
-                                                           : qreal(target.width()) / frame.width();
-    const qreal ratio = devicePixelRatioF();
-    const QSize size = (QSizeF(m_pointerShape.size()) * scale * ratio).toSize().expandedTo(QSize(1, 1));
-    QPixmap pixmap = QPixmap::fromImage(size == m_pointerShape.size()
-                                            ? m_pointerShape
-                                            : m_pointerShape.scaled(size, Qt::IgnoreAspectRatio,
-                                                                    Qt::SmoothTransformation));
-    pixmap.setDevicePixelRatio(ratio);
-    setCursor(QCursor(pixmap, int(m_pointerHotSpot.x() * scale), int(m_pointerHotSpot.y() * scale)));
+    showPointerShape();
 }
 
 // What a clipboard holds, to tell a real new copy from a repeated notice.
@@ -846,10 +771,10 @@ void RdpPage::offerLocalClipboard()
     }
     if (!m_connected)
         return;
-    const auto *mime = QApplication::clipboard()->mimeData();
-    if (!mime)
-        return;
-    if (m_dropOffered) {
+    // Null with nothing copied yet: text only selected in OpsRemote is
+    // offered all the same.
+    const QMimeData *mime = QApplication::clipboard()->mimeData();
+    if (m_dropOffered && mime) {
         const auto now = clipboardSignature(mime);
         if (!m_dropNoticeSeen || now == m_clipboardAtDrop) {
             // Not a new copy: the dropped files stay offered.
@@ -860,7 +785,7 @@ void RdpPage::offerLocalClipboard()
         m_dropOffered = false;
     }
     QStringList files;
-    if (m_settings.options.clipboardFiles == 1 && mime->hasUrls()) {
+    if (mime && m_settings.options.clipboardFiles == 1 && mime->hasUrls()) {
         for (const auto &url : mime->urls()) {
             if (url.isLocalFile())
                 files.append(url.toLocalFile());
@@ -870,8 +795,12 @@ void RdpPage::offerLocalClipboard()
     if (m_pasteTransfer && files != m_offeredFiles)
         endPaste(TransferList::State::Failed,
                  QStringLiteral("The copy on the remote computer stopped: a new copy here replaced the files."));
+    // A selection made after the files were copied is the newest: its text.
+    const QString text = Clipboard::textToPaste(false);
+    if (!files.isEmpty() && mime && text != mime->text())
+        files.clear();
     m_offeredFiles = files;
-    m_session->setLocalClipboard(files.isEmpty() ? mime->text() : QString(), files);
+    m_session->setLocalClipboard(files.isEmpty() ? text : QString(), files);
 }
 
 void RdpPage::dragEnterEvent(QDragEnterEvent *event)

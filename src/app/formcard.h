@@ -8,12 +8,19 @@
 class QAbstractItemView;
 class QBoxLayout;
 class QFormLayout;
+class QTabWidget;
+class QVBoxLayout;
 class QWidget;
 
 // Related settings of a session window grouped in a light card: a thin
 // rounded frame with a small title, adding little width or height.
 // Returns the card's form, to add the rows to.
 QFormLayout *addFormCard(QBoxLayout *page, const QString &title, QWidget *parent);
+
+// A tab of cards in tabs (RDP's and VNC's Connection, Display…), scrolling
+// when its window is shorter (windowfit.h); returns the layout to add the
+// cards to. Finish it with addStretch() once they are in.
+QVBoxLayout *addCardTab(QTabWidget *tabs, const QString &title, QWidget *parent);
 
 // The same card around a whole editor (its own layout inside); returns the card.
 QWidget *addWidgetCard(QBoxLayout *page, const QString &title, QWidget *content);

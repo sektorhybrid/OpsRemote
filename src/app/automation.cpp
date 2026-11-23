@@ -4,6 +4,7 @@
 #include "automation.h"
 #include "formcard.h"
 #include "preferences.h"
+#include "windowfit.h"
 
 #include <QComboBox>
 #include <QFormLayout>
@@ -505,7 +506,8 @@ AutomationEditor::AutomationEditor(const AutomationOptions &value, const QString
                                    const QStringList &scripts, QWidget *parent)
     : QWidget(parent)
 {
-    auto *layout = new QVBoxLayout(this);
+    // Two tables: scrolls when the window is shorter (windowfit.h).
+    auto *layout = new QVBoxLayout(WindowFit::scrollingContent(this));
     auto *form = new QFormLayout;
     m_mode = new QComboBox(this);
     m_mode->addItem(inheritLabel, QString());

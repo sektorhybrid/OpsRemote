@@ -50,6 +50,12 @@ QString problem(Feature feature)
 #else
         return QStringLiteral("Only Wayland desktops need it.");
 #endif
+    case Feature::DesktopEntry:
+#ifdef Q_OS_LINUX
+        return {};
+#else
+        return QStringLiteral("Only Linux desktops take an app's icon from a desktop file.");
+#endif
     case Feature::SelectionClipboard:
 #if defined(Q_OS_WIN) || defined(Q_OS_MACOS)
         return QStringLiteral("This system has no selection clipboard.");

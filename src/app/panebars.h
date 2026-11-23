@@ -42,6 +42,12 @@ public:
     // one by the grip shown when the pointer rests at their top edge.
     std::function<bool(QWidget *)> movable;
 
+    // How bars are dragged and look (Preferences → Workspace → Panes): only
+    // by the handle; a click on the handle asks for the Move menu; the
+    // transfer part kept in place.
+    void setMoveStyle(bool handleOnly, bool handleMenu);
+    void setFixedParts(bool fixed);
+
     // page's bar, made on first use.
     TabMessageStrip *bar(QWidget *page);
     // Whether page has something to show ("auto" shows its bar only then).
@@ -56,6 +62,8 @@ signals:
     void barCreated(QWidget *page, TabMessageStrip *bar);
     // page's bar (or grip) was pressed and moved: page is being dragged.
     void dragRequested(QWidget *page);
+    // page's handle was clicked: its Move menu, at global.
+    void menuRequested(QWidget *page, const QPoint &global);
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -80,4 +88,7 @@ private:
     QHash<QWidget *, Pane> m_panes;
     QWidget *m_placing = nullptr; // the pane place() is moving
     bool m_stopped = false;
+    bool m_handleOnly = false;
+    bool m_handleMenu = false;
+    bool m_fixedParts = true;
 };

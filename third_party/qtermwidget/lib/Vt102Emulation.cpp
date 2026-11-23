@@ -1,3 +1,4 @@
+// Modified for OpsRemote by Thanos Athanasopoulos, 2026 (see OPSREMOTE-CHANGES.md).
 /*
     This file is part of Konsole, an X terminal.
 
@@ -1455,6 +1456,9 @@ void Vt102Emulation::resetModes()
   resetMode(MODE_AppKeyPad);  saveMode(MODE_AppKeyPad);
   resetMode(MODE_NewLine);
   setMode(MODE_Ansi);
+  // OpsRemote addition: focus reports (?1004) end with a reset too; left on,
+  // every focus change typed "^[[I" / "^[[O" into the shell.
+  _reportFocusEvents = false;
 }
 
 void Vt102Emulation::setMode(int m)

@@ -48,7 +48,6 @@ signals:
     void passwordSaveRequested(const QString &password);
 
 protected:
-    bool event(QEvent *event) override;
     void paintEvent(QPaintEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
     void keyReleaseEvent(QKeyEvent *event) override;
@@ -64,19 +63,20 @@ protected:
     void sendKey(Key key, bool down) override;
     bool canSpanMonitors() const override;
     void fullScreenToggled() override;
+    QMutex &frameMutex() const override;
+    const QImage &frame() const override;
+    void updateCursor() override;
 
 private:
     void start();
     void startVnc(const QString &host, quint16 port);
     void stopTunnel();
     void showOverlay(const QString &text, bool ended, bool error = false);
-    QRect targetRect() const;
     bool toRemote(const QPointF &position, int *x, int *y) const;
     void sendPointer(const QPointF &position);
     void releaseAllKeys();
     void requestTabSize();
     qreal scale() const;
-    void updateCursor();
     void offerLocalClipboard();
     bool askCredentials(QString *username, QString *password, bool needUsername);
 
@@ -84,22 +84,13 @@ private:
     VncSession *m_session = nullptr;
     QPointer<JumpChain> m_tunnel;
     QElapsedTimer m_lastRefresh;
-    QWidget *m_overlay = nullptr;
-    QLabel *m_overlayText = nullptr;
-    SessionEndedPanel *m_endedPanel = nullptr;
-    bool m_connected = false;
     bool m_started = false;
     bool m_wasConnected = false;
-    bool m_resizeSupported = false;
     int m_reconnectAttempts = 0;
-    QTimer *m_resizeTimer = nullptr;
     // Pressed keys (by native scan code or Qt key) and the keysym sent, so
     // the release sends the same one.
     QHash<quint32, quint32> m_pressedKeys;
     int m_buttons = 0;
     int m_wheelRemainder = 0;
-    QImage m_pointerShape;
-    QPoint m_pointerHotSpot;
     int m_ignoreClipboardChanges = 0;
-    qreal m_connectScale = 1.0;
 };

@@ -1,3 +1,4 @@
+// Modified for OpsRemote by Thanos Athanasopoulos, 2026 (see OPSREMOTE-CHANGES.md).
 /*
     This file is part of Konsole, a terminal emulator for KDE.
 

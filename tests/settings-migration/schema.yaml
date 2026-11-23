@@ -1,4 +1,4 @@
-settings_version: 5
+settings_version: 6
 ui:
   style: system
   color_theme: system
@@ -23,11 +23,19 @@ startup:
   new_tab_next_to_current: false
   message_strip: top
   message_bar: fixed
+  pane_bar_parts: fixed
+  move_terminals: true
+  move_drag_by: bar
+  move_handle_click: nothing
+  move_pull_tabs: true
+  move_open_tab: true
+  move_open_tab_ms: 500
   allow_duplicate_session_tabs: false
   tab_title: name
   remember_window: true
   single_instance: true
   wayland_activation: false
+  taskbar_icon: true
   open_sessions:
     []
   window_geometry: ""
@@ -140,7 +148,7 @@ presentation:
 backup:
   backup_on_start: true
   keep: 10
-  remove_runtime_on_exit: false
+  remove_runtime_on_exit: true
 run_command:
   parallel: 5
   timeout_seconds: 60

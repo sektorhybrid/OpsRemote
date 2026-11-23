@@ -32,14 +32,14 @@ package carries the full licence texts in `licenses/<platform>/`.
 
 | Component | Licence | Use |
 |---|---|---|
-| [Qt 6](https://www.qt.io) (Base, SVG, Serial Port, Wayland, image formats) | LGPL-3.0 | User interface. On Windows, `Qt6Core.dll` is **modified** by Thanos Athanasopoulos (2026): Fedora's MinGW Qt base package rebuilt with the patches in [packaging/qt/patches](packaging/qt/patches) (a fix for a fault each time a thread ends; see the patch). |
-| [FreeRDP](https://www.freerdp.com) 3.32.2 | Apache-2.0 | Remote desktop (RDP) |
-| [LibVNCServer](https://libvnc.github.io)'s libvncclient 0.9.15 | GPL-2.0-or-later | VNC |
+| [Qt 6](https://www.qt.io) (Base, SVG, Serial Port, Wayland, image formats) | LGPL-3.0 | User interface. On Windows, `Qt6Core.dll` is **modified** by Thanos Athanasopoulos (2026): Fedora's MinGW Qt base package rebuilt with the patches in [packaging/qt/patches](packaging/qt/patches) (a fix for a fault each time a thread ends; see the patch). On Linux, `libQt6Core` and `libQt6Network` are **modified** the same way: AlmaLinux's Qt base package rebuilt with Qt's published security fixes, listed in [packaging/qt-linux/OPSREMOTE-CHANGES.md](packaging/qt-linux/OPSREMOTE-CHANGES.md). |
+| [FreeRDP](https://www.freerdp.com) 3.33.1 | Apache-2.0 | Remote desktop (RDP) |
+| [LibVNCServer](https://libvnc.github.io)'s libvncclient 0.9.15, **modified**: three upstream security fixes applied ([packaging/libvncserver](packaging/libvncserver/OPSREMOTE-CHANGES.md)) | GPL-2.0-or-later | VNC |
 | [libssh](https://www.libssh.org) 0.12.2 | LGPL-2.1-or-later | SSH and SFTP |
 | [libfido2](https://developers.yubico.com/libfido2/) (1.17.0 on Windows) | BSD-2-Clause | FIDO2 security keys for SSH |
-| [libcbor](https://github.com/PJK/libcbor) (0.13.0 on Windows) | MIT | Used by libfido2 |
+| [libcbor](https://github.com/PJK/libcbor) (0.14.1 on Windows) | MIT | Used by libfido2 |
 | [MIT Kerberos](https://web.mit.edu/kerberos/) (Linux) | MIT-style (see `licenses/`) | Kerberos (GSSAPI) logons for SSH |
-| [OpenSSL](https://www.openssl.org) 3 | Apache-2.0 | TLS and cryptography |
+| [OpenSSL](https://www.openssl.org) 3 (3.5.9 on Windows, built from the release; Linux: AlmaLinux's) | Apache-2.0 | TLS and cryptography |
 | [libsodium](https://libsodium.org) | ISC | Credential vault encryption |
 | [yaml-cpp](https://github.com/jbeder/yaml-cpp) | MIT | Settings files |
 | [zstd](https://facebook.github.io/zstd/) 1.5.7 | BSD-3-Clause | Unpacking the program at startup |
@@ -62,6 +62,9 @@ package carries the full licence texts in `licenses/<platform>/`.
 - **Patched Qt (Windows):** Fedora's source package for the Qt version shown
   in `DISTRIBUTION-PACKAGES.txt`, plus the patches in `packaging/qt/patches`,
   rebuilt by `scripts/internal/build-qt-windows.sh`.
+- **Patched Qt (Linux):** AlmaLinux's source package for the Qt version shown
+  in `DISTRIBUTION-PACKAGES.txt`, plus the patches in `packaging/qt-linux/patches`,
+  rebuilt by `scripts/internal/build-qt-linux.sh`.
 - **Libraries from distribution packages** (Qt, OpenSSL and the rest): each
   package lists them with their exact source packages in
   `licenses/<platform>/DISTRIBUTION-PACKAGES.txt`. Their sources are published

@@ -115,6 +115,10 @@ TabMessageStrip *PaneBars::bar(QWidget *page)
         if (movable && movable(page))
             emit dragRequested(page);
     });
+    connect(pane.bar, &TabMessageStrip::handleClicked, this, [this, page](const QPoint &global) {
+        if (movable && movable(page))
+            emit menuRequested(page, global);
+    });
     connect(page, &QObject::destroyed, this, [this, page] {
         const auto pane = m_panes.take(page);
         if (pane.bar)
@@ -125,6 +129,19 @@ TabMessageStrip *PaneBars::bar(QWidget *page)
     emit barCreated(page, pane.bar);
     place(page);
     return pane.bar;
+}
+
+void PaneBars::setMoveStyle(bool handleOnly, bool handleMenu)
+{
+    m_handleOnly = handleOnly;
+    m_handleMenu = handleMenu;
+    placeAll();
+}
+
+void PaneBars::setFixedParts(bool fixed)
+{
+    m_fixedParts = fixed;
+    placeAll();
 }
 
 void PaneBars::setNeeded(QWidget *page, bool needed)
@@ -196,6 +213,9 @@ void PaneBars::place(QWidget *page)
         return;
     }
     const bool shownBar = barShown(page, pane);
+    pane.bar->setMovable(movable && movable(page));
+    pane.bar->setMoveStyle(m_handleOnly, m_handleMenu);
+    pane.bar->setFixedParts(m_fixedParts);
     placeGrip(page, pane, !shownBar);
     if (!shownBar) {
         pane.bar->hide();

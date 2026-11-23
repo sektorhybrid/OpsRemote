@@ -1,69 +1,26 @@
 # Building OpsRemote
 
-Back to the [README](../README.md). Where settings are kept: [Portable data](portable-data.md).
+Back to the [README](../README.md). Licences: [THIRD_PARTY.md](../THIRD_PARTY.md). Where settings are kept: [Portable data](portable-data.md).
 
-## Build and run on Linux
+## What you need
 
-Requirements: CMake 3.21+, a C++20 compiler, Qt 6 Widgets (6.4+), yaml-cpp, libsodium, and libssh 0.12+ (Arch: `libssh`; Debian/Ubuntu: `libssh-dev`; Fedora: `libssh-devel`).
+- Linux with **Docker**. The packages are built in containers, so they run on many Linux distributions and on Windows.
+- For a quick local build only: CMake 3.21+, a C++20 compiler, Qt 6 Widgets (6.4+), yaml-cpp, libsodium and libssh 0.12+.
 
-The helper script builds the portable package `dist/OpsRemote/`, with Linux and Windows in one folder and one shared `settings/` folder (Docker is required), then launches it:
+## Build
 
 ```sh
-./scripts/build-and-run.sh
+./scripts/build-and-run.sh package-all         # Linux and Windows, into dist/OpsRemote/
+./scripts/build-and-run.sh run-package         # start the Linux version
+./scripts/build-and-run.sh dev-build-and-run   # a quick local build in build/dev (not portable)
 ```
 
-The commands say what is built and what is run:
+`./scripts/build-and-run.sh --help` lists every command.
 
-| Command | What it does |
-|---|---|
-| `package-linux` | Builds the Linux program and updates the package (keeps the last Windows build) |
-| `package-windows` | Builds the Windows program and updates the package (keeps the last Linux build) |
-| `package-all` | Builds both programs and updates the package |
-| `package-zip` | Packs the current package as `dist/OpsRemote-<arch>-<systems>-<version>.tar.gz` (for example `OpsRemote-x86_64-linux-windows-0.6.5.tar.gz`) and `.zip` for handing out (the version is in `CMakeLists.txt`), without your settings and backups |
-| `run-package` | Starts the package's Linux version |
-| `package-linux-and-run` | `package-linux`, then `run-package` (the default) |
-| `package-all-and-run` | `package-all`, then `run-package` |
-| `build-qt-windows` | Rebuilds Qt's Windows DLLs with the patches in `packaging/qt/patches` (about half an hour). Only needed when those patches or the Windows image's Qt version change; the Windows build warns when it is |
-| `dev-build`, `dev-run`, `dev-build-and-run` | A quick developer build in `./build/dev` against this computer's libraries (not portable) |
+The result, `dist/OpsRemote/`, is one folder with both programs and one shared `settings/` folder. It runs on:
+- 64-bit Linux with glibc 2.34 or newer: RHEL, Alma and Rocky 9, Ubuntu 22.04+, Debian 12+, and current Fedora and Arch;
+- 64-bit Windows 10 (1809) or 11.
 
-### Portable bundle
+## Libraries and their sources
 
-`./scripts/internal/make-bundle-docker.sh` builds a self-contained folder, `build/stage/OpsRemote-linux-<arch>/`, plus a `.tar.gz` of it, inside an AlmaLinux 9 container (Docker required). Qt, libssh, OpenSSL, yaml-cpp, libsodium, ICU, and the Qt plugins are bundled in `lib/`. Copy or extract it anywhere and run `./opsremote.sh`.
-
-The target system needs to provide:
-
-- glibc 2.34 or newer: RHEL/Alma/Rocky 9, Ubuntu 22.04+, Debian 12+, and current Fedora and Arch;
-- an X11 or Wayland desktop;
-- the system font and graphics libraries.
-
-`./scripts/internal/make-bundle-windows-docker.sh` cross-compiles the Windows bundle, `build/stage/OpsRemote-windows-x86_64/`, plus a `.zip` of it, with MinGW-w64 in a Fedora container. Run `OpsRemote.exe` from the extracted folder on 64-bit Windows 10 (1809) or 11. Local terminals are not available on Windows yet; SSH sessions, SFTP, and the vault are.
-
-`./scripts/internal/test-bundle-docker.sh` checks the result on Ubuntu 22.04, Debian 12, Fedora 42, AlmaLinux 9, and Arch. `./scripts/internal/make-bundle.sh` builds the same bundle directly on the host, but then it needs the host's glibc version.
-
-Use `./scripts/build-and-run.sh --help` to see options. For example, set `BUILD_TYPE=Release` or `BUILD_DIR=/tmp/opsremote-build` before invoking the script to override the defaults.
-
-## Scripts
-
-`scripts/build-and-run.sh` is the only script you need: it builds (Linux, Windows, or both) and runs the package. The steps it calls, and maintenance helpers (bundle and package assembly, Docker wrappers, the distribution test matrix, colour scheme and icon theme updates, the test VM deploy), live in `scripts/internal/`.
-
-## Project layout
-
-| Folder | Contents |
-|---|---|
-| `src/app/` | Application source, the same on every system |
-| `src/platform/` | Operating-system services, one file per system (see below) |
-| `third_party/` | Bundled QTermWidget, Kvantum, colour schemes, and icon themes |
-| `packaging/` | Docker images and launchers |
-| `scripts/` | `build-and-run.sh`; helpers in `scripts/internal/` |
-| `build/` | Build trees, all disposable: `dev/` (developer build), `linux/` and `windows/` (package builds), `linux-host/`, `asan/`, and `stage/` (the per-platform bundles and tools the package is assembled from) |
-| `dist/` | Only the release: `dist/OpsRemote/`, plus `OpsRemote-<arch>-<systems>-<version>.tar.gz` and `.zip` after `package-zip` |
-
-## Code for one operating system
-
-Code that differs between systems goes in one of three places, by what it does:
-
-1. **Calls the system's own APIs, or is more than about 15 lines** → `src/platform/`: one header, plus one source file per system (`name_windows.cpp`, `name_unix.cpp`, `name_libsecret.cpp`...). `CMakeLists.txt` compiles only the files for the system being built. Now: `appdirs` (portable folder, replacing files in one step), `systemcredentials` (Windows Credential Manager, libsecret), `processinfo` (another process's folder and command line, programs running from a folder), `pageant` (PuTTY's agent on Windows) and `conpty` (local terminals on Windows; on Linux QTermWidget has its own).
-2. **Decides whether a feature exists on this system** → `Platform::has(Platform::Feature::…)` or `Platform::problem(…)` (the reason, for a disabled control or a message) from `src/platform/capabilities.h`. New features that only some systems have get an entry there.
-3. **Anything else** (a shortcut, a label, a one-line difference) → a plain `#ifdef Q_OS_…` where it is used.
-
-The test `platform-includes` (run by `ctest`) fails when a file in `src/app` includes an operating-system header (`windows.h`, `unistd.h`, `dlfcn.h`, `sys/…`) and is not on the list in `tests/platform-includes.cmake`, which gives each listed file's reason.
+Some libraries are built from their official releases inside the build images. Their versions and checksums are in `packaging/linux/Dockerfile` and `packaging/windows/Dockerfile`. Where OpsRemote changes another project's code, the change is listed in that project's `third_party/<name>/OPSREMOTE-CHANGES.md` (with the full diff) or in `packaging/qt/patches/` (Qt for Windows), `packaging/qt-linux/` (Qt for Linux) and `packaging/libvncserver/` (LibVNC). Rebuilding Qt (`./scripts/build-and-run.sh build-qt-windows` or `build-qt-linux`) is only needed after changing those patches or the build images' Qt version; the package build warns when it is. Each release also has a source archive with all of these sources.

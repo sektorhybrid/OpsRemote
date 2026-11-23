@@ -7,6 +7,8 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=lib/errors.sh
+source "${PROJECT_DIR}/scripts/internal/lib/errors.sh"
 BUILD_DIR="${BUILD_DIR:-${PROJECT_DIR}/build/windows}"
 DIST_DIR="${DIST_DIR:-${PROJECT_DIR}/build/stage}"
 BUNDLE_NAME="OpsRemote-windows-x86_64"
@@ -66,6 +68,7 @@ echo "==> Assembling ${BUNDLE}"
 # Keep the user's state from an earlier build of this bundle.
 saved_state=""
 if [[ -d "${BUNDLE}/settings" ]]; then
+    # Not on_exit_remove: after a failure it still holds the user's settings.
     saved_state="$(mktemp -d "${DIST_DIR}/.state.XXXXXX")"
     mv "${BUNDLE}/settings" "${saved_state}/settings"
 fi
@@ -79,7 +82,7 @@ fi
 cp "${BUILD_DIR}/opsremote.exe" "${BUNDLE}/OpsRemote.exe"
 cp "${BUILD_DIR}/third_party/qtermwidget/libqtermwidget6.dll" "${BUNDLE}/"
 cp -r "${BUILD_DIR}/data/qtermwidget" "${BUILD_DIR}/data/color-schemes" "${BUILD_DIR}/data/icons" \
-    "${BUILD_DIR}/data/Kvantum" \
+    "${BUILD_DIR}/data/Kvantum" "${BUILD_DIR}/data/opsremote.png" \
     "${BUNDLE}/data/"
 
 plugin_files=()
@@ -103,7 +106,7 @@ bundle_dependencies "${BUNDLE}/OpsRemote.exe" "${BUNDLE}/libqtermwidget6.dll" "$
 qt_package="$(rpm -q --qf '%{VERSION}-%{RELEASE}' mingw64-qt6-qtbase)"
 patched_qt="${PROJECT_DIR}/third_party/qt-windows/${qt_package}"
 patches_now="$(cd "${PROJECT_DIR}" && sha256sum packaging/qt/patches/*.patch)"
-if [[ -d "${patched_qt}/bin" ]] && [[ "$(tail -n +2 "${patched_qt}/BUILT-FROM.txt" 2>/dev/null)" == "${patches_now}" ]]; then
+if [[ -d "${patched_qt}/bin" && -f "${patched_qt}/BUILT-FROM.txt" ]] && [[ "$(tail -n +2 "${patched_qt}/BUILT-FROM.txt")" == "${patches_now}" ]]; then
     echo "==> Using the patched Qt DLLs of ${qt_package}"
     cp "${patched_qt}"/bin/*.dll "${BUNDLE}/"
 else
@@ -157,8 +160,7 @@ system_dlls="$(find "${BUNDLE}" -type f \( -iname '*.exe' -o -iname '*.dll' \) -
     | while read -r dll; do
           [[ -n "$(find "${BUNDLE}" -maxdepth 1 -iname "${dll}" -print -quit)" ]] || echo "${dll}"
       done | sort -fu | tr '\n' ' ')"
-qt_version="$(grep -ho 'set(PACKAGE_VERSION "[0-9.]*")' "${SYSROOT}"/lib/cmake/Qt6/Qt6ConfigVersion*.cmake \
-    2>/dev/null | head -n 1 | grep -o '[0-9][0-9.]*' || true)"
+qt_version="$(rpm -q --qf '%{VERSION}' mingw64-qt6-qtbase)"
 
 sed 's/$/\r/' > "${BUNDLE}/README.txt" <<EOF
 OpsRemote for Windows (x86_64)

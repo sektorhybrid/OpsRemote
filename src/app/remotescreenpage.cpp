@@ -3,11 +3,17 @@
 
 #include "remotescreenpage.h"
 
+#include "sessionendedpanel.h"
+
 #include <QCursor>
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QLabel>
+#include <QMutexLocker>
+#include <QPaintEvent>
+#include <QPainter>
+#include <QPixmap>
 #include <QPushButton>
 #include <QScreen>
 #include <QTabWidget>
@@ -260,4 +266,113 @@ void RemoteScreenPage::showFullScreenBar()
     m_fullScreenBar->show();
     m_fullScreenBar->raise();
     m_fullScreenBarTimer->start();
+}
+
+bool RemoteScreenPage::event(QEvent *event)
+{
+    // While connected, every key goes to the remote computer, including keys
+    // that would otherwise trigger application shortcuts or move the focus.
+    if (m_connected && event->type() == QEvent::ShortcutOverride) {
+        event->accept();
+        return true;
+    }
+#if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
+    if (event->type() == QEvent::DevicePixelRatioChange) {
+        // Moved to a screen with another scale: resize the desktop to match.
+        if (m_resizeSupported && m_resizeTimer)
+            m_resizeTimer->start();
+        updateCursor();
+    }
+#endif
+    if (event->type() == QEvent::Resize) {
+        if (m_overlay)
+            m_overlay->setGeometry(rect());
+        if (m_endedPanel)
+            m_endedPanel->setGeometry(0, 0, width(), m_endedPanel->sizeHint().height());
+        if (m_resizeSupported && m_resizeTimer)
+            m_resizeTimer->start();
+        updateCursor();
+    }
+    return QWidget::event(event);
+}
+
+void RemoteScreenPage::buildOverlay(const QString &name)
+{
+    m_overlay = new QWidget(this);
+    m_overlay->setAttribute(Qt::WA_StyledBackground);
+    m_overlay->setObjectName(name);
+    // Only the overlay itself is dimmed; its buttons keep the normal style.
+    m_overlay->setStyleSheet(QStringLiteral("#%1 { background: rgba(0, 0, 0, 170); }").arg(name));
+    auto *overlayLayout = new QVBoxLayout(m_overlay);
+    overlayLayout->addStretch();
+    m_overlayText = new QLabel(m_overlay);
+    m_overlayText->setAlignment(Qt::AlignCenter);
+    m_overlayText->setWordWrap(true);
+    m_overlayText->setStyleSheet(QStringLiteral("background: transparent; color: white; font-size: 11pt;"));
+    overlayLayout->addWidget(m_overlayText);
+    overlayLayout->addStretch();
+    // Once the session has ended: a bar across the top of the tab, in the
+    // same place as on terminal tabs.
+    m_endedPanel = new SessionEndedPanel(SessionEndedPanel::Style::Bar, this);
+    m_endedPanel->hide();
+}
+
+QRect RemoteScreenPage::targetRect() const
+{
+    QMutexLocker locker(&frameMutex());
+    const QSize frame = this->frame().size();
+    if (frame.isEmpty())
+        return QRect();
+    QSize size = (QSizeF(frame) / m_connectScale).toSize();
+    if (size.width() > width() || size.height() > height())
+        size.scale(this->size(), Qt::KeepAspectRatio);
+    return QRect(QPoint((width() - size.width()) / 2, (height() - size.height()) / 2), size);
+}
+
+void RemoteScreenPage::repaintRemoteArea(const QRect &area)
+{
+    const QRect target = targetRect();
+    QMutexLocker locker(&frameMutex());
+    const QSize frame = this->frame().size();
+    locker.unlock();
+    if (frame.isEmpty() || target.isEmpty())
+        return;
+    // The remote rectangle mapped to the scaled one in the page.
+    const qreal sx = qreal(target.width()) / frame.width();
+    const qreal sy = qreal(target.height()) / frame.height();
+    update(QRectF(target.left() + area.left() * sx, target.top() + area.top() * sy, area.width() * sx,
+                  area.height() * sy)
+               .toAlignedRect()
+               .adjusted(-1, -1, 1, 1));
+}
+
+void RemoteScreenPage::paintFrame(QPainter &painter, const QRect &dirty)
+{
+    painter.fillRect(dirty, Qt::black);
+    const QRect target = targetRect();
+    if (target.isEmpty())
+        return;
+    QMutexLocker locker(&frameMutex());
+    painter.setRenderHint(QPainter::SmoothPixmapTransform,
+                          (QSizeF(target.size()) * devicePixelRatioF()).toSize() != frame().size());
+    painter.drawImage(target, frame());
+}
+
+void RemoteScreenPage::showPointerShape()
+{
+    const QRect target = targetRect();
+    QMutexLocker locker(&frameMutex());
+    const QSize frame = this->frame().size();
+    locker.unlock();
+    // Widget units per remote pixel; the pixmap is made in physical pixels.
+    const qreal scale = frame.isEmpty() || target.isEmpty() ? 1.0 / m_connectScale
+                                                           : qreal(target.width()) / frame.width();
+    const qreal ratio = devicePixelRatioF();
+    const QSize size = (QSizeF(m_pointerShape.size()) * scale * ratio).toSize().expandedTo(QSize(1, 1));
+    QPixmap pixmap = QPixmap::fromImage(size == m_pointerShape.size()
+                                            ? m_pointerShape
+                                            : m_pointerShape.scaled(size, Qt::IgnoreAspectRatio,
+                                                                    Qt::SmoothTransformation));
+    pixmap.setDevicePixelRatio(ratio);
+    setCursor(QCursor(pixmap, int(m_pointerHotSpot.x() * scale), int(m_pointerHotSpot.y() * scale)));
 }

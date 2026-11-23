@@ -7,6 +7,8 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=lib/errors.sh
+source "${PROJECT_DIR}/scripts/internal/lib/errors.sh"
 BUILD_DIR="${BUILD_DIR:-${PROJECT_DIR}/build/linux-host}"
 DIST_DIR="${DIST_DIR:-${PROJECT_DIR}/build/stage}"
 BUNDLE_NAME="OpsRemote-linux-$(uname -m)"
@@ -94,7 +96,7 @@ is_system_library() {
 # Copies every non-system shared library that the given ELF files depend on
 # into lib/, keeping the soname as the file name.
 bundle_dependencies() {
-    local elf name path
+    local elf name path rpath
     for elf in "$@"; do
         while read -r name path; do
             if [[ "${path}" == "not" ]]; then
@@ -109,7 +111,8 @@ bundle_dependencies() {
             # A built-in absolute search path (libpulse's points to
             # /usr/lib64/pulseaudio) would find the system's copies first:
             # the bundle's lib/ takes its place.
-            if patchelf --print-rpath "${BUNDLE}/lib/${name}" 2>/dev/null | grep -q '^/\|:/'; then
+            rpath="$(patchelf --print-rpath "${BUNDLE}/lib/${name}")"
+            if [[ "${rpath}" == /* || "${rpath}" == *:/* ]]; then
                 patchelf --set-rpath '$ORIGIN' "${BUNDLE}/lib/${name}"
             fi
         done < <(ldd "${elf}" | awk '/=>/ { sub(".*/", "", $1); print $1, $3 }')
@@ -124,6 +127,7 @@ echo "==> Assembling ${BUNDLE}"
 # Keep the user's state from an earlier build of this bundle: settings/
 # (sessions, preferences, vault, known hosts), and anything an older version
 # left in data/ for the application to migrate. Everything else is rebuilt.
+# Not on_exit_remove: after a failure it still holds the user's settings.
 saved_state="$(mktemp -d "${DIST_DIR}/.state.XXXXXX")"
 for folder in settings data; do
     if [[ -d "${BUNDLE}/${folder}" ]]; then
@@ -145,7 +149,7 @@ install -m 0755 "${BUILD_DIR}/opsremote" "${BUNDLE}/opsremote"
 cp -L "${BUILD_DIR}/third_party/qtermwidget/libqtermwidget6.so.2" "${BUNDLE}/lib/"
 # Only the shipped terminal resources; never sessions, settings, or vaults.
 cp -r "${BUILD_DIR}/data/qtermwidget" "${BUILD_DIR}/data/color-schemes" "${BUILD_DIR}/data/icons" \
-    "${BUILD_DIR}/data/Kvantum" \
+    "${BUILD_DIR}/data/Kvantum" "${BUILD_DIR}/data/opsremote.png" \
     "${BUNDLE}/data/"
 
 qt_plugin_dir="$(query_qt QT_INSTALL_PLUGINS)"
@@ -181,7 +185,34 @@ plugin_files+=("${BUNDLE}/lib/libsecret-1.so.0")
 bundle_dependencies "${BUNDLE}/opsremote" "${BUNDLE}/lib/libqtermwidget6.so.2" \
     "${plugin_files[@]}"
 strip --strip-unneeded "${BUNDLE}/opsremote" "${BUNDLE}/lib/libqtermwidget6.so.2"
+# Qt libraries rebuilt with Qt's security fixes (packaging/qt-linux/patches),
+# made by ./scripts/build-and-run.sh build-qt-linux for this exact Qt version.
+qt_package="$(rpm -q --qf '%{VERSION}-%{RELEASE}' qt6-qtbase)"
+patched_qt="${PROJECT_DIR}/third_party/qt-linux/${qt_package}"
+patches_now="$(cd "${PROJECT_DIR}" && sha256sum packaging/qt-linux/patches/*.patch)"
+patched_used=0
+if [[ -d "${patched_qt}/lib" && -f "${patched_qt}/BUILT-FROM.txt" ]] \
+    && [[ "$(tail -n +2 "${patched_qt}/BUILT-FROM.txt")" == "${patches_now}" ]]; then
+    echo "==> Using the patched Qt libraries of ${qt_package}"
+    cp "${patched_qt}"/lib/*.so.6 "${BUNDLE}/lib/"
+    # Built before build-qt-linux.sh removed the build folder's search path:
+    # without it, the program's own search path finds lib/.
+    for library in "${patched_qt}"/lib/*.so.6; do
+        patchelf --remove-rpath "${BUNDLE}/lib/$(basename "${library}")"
+    done
+    patched_used=1
+else
+    {
+        echo "WARNING: no patched Qt libraries for Qt ${qt_package} and the current patches."
+        echo "  The package gets AlmaLinux's Qt without Qt's security fixes (see packaging/qt-linux)."
+        echo "  Run once: ./scripts/build-and-run.sh build-qt-linux"
+    } >&2
+fi
 "${PROJECT_DIR}/scripts/internal/collect-licenses.sh" "${BUNDLE}" linux
+if ((patched_used)); then
+    mkdir -p "${BUNDLE}/licenses/qt6-qtbase"
+    cp "${PROJECT_DIR}/packaging/qt-linux/OPSREMOTE-CHANGES.md" "${BUNDLE}/licenses/qt6-qtbase/"
+fi
 
 # The combined package's launcher decompresses with this zstd (built in the
 # Docker image), so it needs none on the host.
@@ -349,10 +380,11 @@ fi
 
 # The oldest glibc the bundle can run on is the newest symbol version any
 # bundled file requires.
-glibc_required="$(find "${BUNDLE}" -type f \( -name '*.so*' -o -name opsremote \) \
-    -exec objdump -T {} + 2>/dev/null | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -n 1 || true)"
+symbols="$(find "${BUNDLE}" -type f \( -name '*.so*' -o -name opsremote \) -exec objdump -T {} +)"
+glibc_required="$(awk 'match($0, /GLIBC_[0-9.]+/) { print substr($0, RSTART, RLENGTH) }' <<< "${symbols}" \
+    | sort -Vu | tail -n 1)"
 system_libraries="$(find "${BUNDLE}" -type f \( -name '*.so*' -o -name opsremote \) \
-    -exec readelf -d {} + 2>/dev/null | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p' | sort -u \
+    -exec readelf -d {} + | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p' | sort -u \
     | while read -r name; do if is_system_library "${name}"; then echo "${name}"; fi; done \
     | tr '\n' ' ')"
 

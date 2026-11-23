@@ -12,7 +12,7 @@ namespace YAML { class Node; }
 // renamed, moved, split, or its values change, a step that rewrites the old
 // form into the new one is added in settingsmigrations.cpp and this number
 // goes up. Files without the key are version 0 (0.6.1 and earlier).
-constexpr int CurrentSettingsVersion = 5;
+constexpr int CurrentSettingsVersion = 6;
 
 // Held while settings.yaml is read, changed and written back, so that two
 // OpsRemote programs on the same settings (Single instance off, or the Linux

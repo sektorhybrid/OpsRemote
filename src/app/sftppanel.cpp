@@ -383,7 +383,8 @@ SftpPanel::SftpPanel(QWidget *parent)
     connect(m_view, &QWidget::customContextMenuRequested, this, &SftpPanel::showContextMenu);
 
     setSession(nullptr);
-    showStatus(QStringLiteral("Connecting…"));
+    // Waiting for its tab's connection: shown, not logged (no connection yet).
+    setStatusText(QStringLiteral("Connecting…"));
     refreshIcons();
 }
 
@@ -459,6 +460,7 @@ void SftpPanel::followFolder(const QString &path)
 
 void SftpPanel::setSession(RemoteFileSession *session)
 {
+    const bool hadSession = m_session;
     if (m_session)
         disconnect(m_session, nullptr, this, nullptr);
     m_session = session;
@@ -469,7 +471,12 @@ void SftpPanel::setSession(RemoteFileSession *session)
                                                          m_refreshButton, m_pathEdit})
         widget->setEnabled(false);
     if (!session) {
-        showStatus(m_disconnectedText);
+        // Only a connection that ended is worth a log line; placeholders
+        // (no tab, a tab without files) are not.
+        if (hadSession)
+            showStatus(m_disconnectedText);
+        else
+            setStatusText(m_disconnectedText);
         return;
     }
 
@@ -508,6 +515,11 @@ void SftpPanel::setSession(RemoteFileSession *session)
 void SftpPanel::showStatus(const QString &text)
 {
     qInfo("SFTP: %s", qUtf8Printable(text));
+    setStatusText(text);
+}
+
+void SftpPanel::setStatusText(const QString &text)
+{
     m_view->clear();
     m_statusLabel->setText(text);
     m_statusLabel->show();

@@ -37,7 +37,11 @@ protected:
     // All monitors: when the options ask for it and the server takes several.
     bool canSpanMonitors() const override;
     void fullScreenToggled() override;
+    QMutex &frameMutex() const override;
+    const QImage &frame() const override;
+    void updateCursor() override;
 
+    // Also places the clipboard bar on a new size.
     bool event(QEvent *event) override;
     void paintEvent(QPaintEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
@@ -57,7 +61,6 @@ private:
     void start();
     // ended: the session is over; offers Reconnect and Close Tab.
     void showOverlay(const QString &text, bool ended, bool error = false);
-    QRect targetRect() const;
     bool toRemote(const QPointF &position, int *x, int *y) const;
     void sendKeyEvent(QKeyEvent *event, bool down);
     void sendButton(Qt::MouseButton button, bool down, const QPointF &position);
@@ -66,7 +69,6 @@ private:
     // Remote pixels per widget unit: the device pixel ratio with high DPI.
     qreal scale() const;
     QList<QRect> monitorLayout() const;
-    void updateCursor();
     // Clipboard sharing (see RdpOptions::clipboardText/clipboardFiles).
     void offerLocalClipboard();
     // The bar at the top of the tab for clipboard file transfers.
@@ -77,23 +79,13 @@ private:
 
     RdpConnectionSettings m_settings;
     RdpSession *m_session = nullptr;
-    QWidget *m_overlay = nullptr;
-    QLabel *m_overlayText = nullptr;
-    SessionEndedPanel *m_endedPanel = nullptr;
-    bool m_connected = false;
     QPointer<JumpChain> m_jumpChain;
     bool m_started = false;
-    bool m_resizeSupported = false;
-    // Waits until the tab stops changing size before resizing the desktop.
-    QTimer *m_resizeTimer = nullptr;
     QTimer *m_resizeRetryTimer = nullptr;
     QSize m_requestedSize;
     int m_resizeRetries = 0;
     QSet<quint32> m_pressedKeys;
     int m_wheelRemainder = 0;
-    // The remote pointer shape, scaled with the desktop when shown smaller.
-    QImage m_pointerShape;
-    QPoint m_pointerHotSpot;
     int m_ignoreClipboardChanges = 0;
     // After files were dropped: what the local clipboard held then. Until it
     // really changes, the dropped files stay on the remote clipboard (on
@@ -117,7 +109,5 @@ private:
     bool m_barShown = false; // in the tab, or in the strip
     QString m_savedFolder;
     bool m_pointerHidden = false;
-    // The scale the desktop was last sized for (see scale()).
-    qreal m_connectScale = 1.0;
     QString m_graphicsMode;
 };

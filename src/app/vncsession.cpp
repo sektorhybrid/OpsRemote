@@ -3,6 +3,8 @@
 
 #include "vncsession.h"
 
+#include "sessionthread.h"
+
 #include <QMetaObject>
 #include <QTimer>
 
@@ -299,18 +301,7 @@ void VncSession::disconnectFromHost()
 void VncSession::retire()
 {
     disconnectFromHost();
-    // Nobody listens any more; delete once the worker has returned.
-    disconnect(this, nullptr, nullptr, nullptr);
-    setParent(nullptr);
-    auto *poll = new QTimer(this);
-    connect(poll, &QTimer::timeout, this, [this] {
-        if (!m_finished)
-            return;
-        if (m_thread.joinable())
-            m_thread.join();
-        deleteLater();
-    });
-    poll->start(100);
+    deleteWhenThreadEnds(this, m_thread, m_finished);
 }
 
 void VncSession::run(VncConnectionSettings settings)

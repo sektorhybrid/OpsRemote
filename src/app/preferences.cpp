@@ -730,12 +730,21 @@ StartupPreferences loadStartupPreferences()
     readChoice(node, "message_strip", value.messageStrip,
                {QStringLiteral("top"), QStringLiteral("bottom"), QStringLiteral("off")});
     readChoice(node, "message_bar", value.messageBar, {QStringLiteral("fixed"), QStringLiteral("auto")});
+    readChoice(node, "pane_bar_parts", value.paneBarParts, {QStringLiteral("fixed"), QStringLiteral("used")});
+    read(node, "move_terminals", value.moveTerminals);
+    readChoice(node, "move_drag_by", value.moveDragBy, {QStringLiteral("bar"), QStringLiteral("handle")});
+    readChoice(node, "move_handle_click", value.moveHandleClick, {QStringLiteral("nothing"), QStringLiteral("menu")});
+    read(node, "move_pull_tabs", value.movePullTabs);
+    read(node, "move_open_tab", value.moveOpenTab);
+    read(node, "move_open_tab_ms", value.moveOpenTabMs);
+    value.moveOpenTabMs = std::clamp(value.moveOpenTabMs, 100, 3000);
     read(node, "allow_duplicate_session_tabs", value.allowDuplicateSessionTabs);
     readChoice(node, "tab_title", value.tabTitle,
                {QStringLiteral("name"), QStringLiteral("userhost"), QStringLiteral("both")});
     read(node, "remember_window", value.rememberWindow);
     read(node, "single_instance", value.singleInstance);
     read(node, "wayland_activation", value.waylandActivation);
+    read(node, "taskbar_icon", value.taskbarIcon);
     return value;
 }
 
@@ -762,11 +771,19 @@ void saveStartupPreferences(const StartupPreferences &value)
     node["new_tab_next_to_current"] = value.newTabNextToCurrent;
     node["message_strip"] = value.messageStrip.toStdString();
     node["message_bar"] = value.messageBar.toStdString();
+    node["pane_bar_parts"] = value.paneBarParts.toStdString();
+    node["move_terminals"] = value.moveTerminals;
+    node["move_drag_by"] = value.moveDragBy.toStdString();
+    node["move_handle_click"] = value.moveHandleClick.toStdString();
+    node["move_pull_tabs"] = value.movePullTabs;
+    node["move_open_tab"] = value.moveOpenTab;
+    node["move_open_tab_ms"] = value.moveOpenTabMs;
     node["allow_duplicate_session_tabs"] = value.allowDuplicateSessionTabs;
     node["tab_title"] = value.tabTitle.toStdString();
     node["remember_window"] = value.rememberWindow;
     node["single_instance"] = value.singleInstance;
     node["wayland_activation"] = value.waylandActivation;
+    node["taskbar_icon"] = value.taskbarIcon;
     saveSection("startup", node);
 }
 
@@ -941,13 +958,35 @@ void saveShortcuts(const QHash<QString, QKeySequence> &shortcuts)
     saveSection("shortcuts", node);
 }
 
-void scheduleRuntimeRemoval()
+// The unpacked copy this process runs from, or empty when it is not one
+// (an installed, uncompressed or development copy is never removed).
+static QString unpackedCopyFolder()
 {
     const QString folder = QDir::cleanPath(QCoreApplication::applicationDirPath());
     const QString runtimeRoot = QDir::cleanPath(QDir(portableHome()).filePath(QStringLiteral("runtime")));
-    // Only an unpacked copy made by the launcher, never an installed or
-    // uncompressed program.
-    if (QFileInfo(folder).dir().absolutePath() != runtimeRoot || ProcessInfo::otherProcessRunsFrom(folder))
+    return QFileInfo(folder).dir().absolutePath() == runtimeRoot ? folder : QString();
+}
+
+void markRuntimeForRemoval(bool on)
+{
+    const QString folder = unpackedCopyFolder();
+    if (folder.isEmpty())
+        return;
+    const QString marker = QDir(folder).filePath(QStringLiteral("remove-on-exit"));
+    if (!on) {
+        QFile::remove(marker);
+        return;
+    }
+    QFile file(marker);
+    if (!file.open(QIODevice::WriteOnly))
+        qInfo("runtime: could not mark %s for removal: %s", qUtf8Printable(folder),
+              qUtf8Printable(file.errorString()));
+}
+
+void scheduleRuntimeRemoval()
+{
+    const QString folder = unpackedCopyFolder();
+    if (folder.isEmpty() || ProcessInfo::otherProcessRunsFrom(folder))
         return;
 #ifdef Q_OS_WIN
     // A running program's files cannot be deleted on Windows: the launcher,
@@ -966,6 +1005,6 @@ void scheduleRuntimeRemoval()
     if (QDir().rename(folder, removing))
         QDir(removing).removeRecursively();
     // The runtime folder too, unless another version is unpacked there.
-    QDir().rmdir(runtimeRoot);
+    QDir().rmdir(QFileInfo(folder).dir().absolutePath());
 #endif
 }

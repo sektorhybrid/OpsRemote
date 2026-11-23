@@ -85,6 +85,10 @@ public:
     // Multi-exec: typing into one chosen terminal goes to all chosen ones.
     // A chosen terminal has an accent bar along its top.
     void setMultiExecTarget(bool on);
+    // Switches off what a program on the other side left on (mouse and focus
+    // reports, bracketed paste, application keys, the alternate screen); the
+    // text stays. Done when a session ends or (re)connects, and from the menu.
+    void resetTerminalModes();
     bool isMultiExecTarget() const { return m_multiExecTarget; }
     // A login script and triggers (see AutomationRunner), started on each
     // connect; values fill {password}, {user} and {host}.

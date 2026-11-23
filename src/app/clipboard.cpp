@@ -12,6 +12,7 @@
 #include <QPlainTextEdit>
 #include <QTextBlock>
 #include <QTextEdit>
+#include <QTimer>
 
 namespace Clipboard {
 
@@ -35,11 +36,22 @@ Memory &memory()
     static Memory value;
     static const bool watching = [] {
         auto *clipboard = QApplication::clipboard();
-        QObject::connect(clipboard, &QClipboard::dataChanged, qApp,
-                         [] { value.clipboardAt = QDateTime::currentMSecsSinceEpoch(); });
-        QObject::connect(clipboard, &QClipboard::selectionChanged, qApp, [clipboard] {
-            if (!clipboard->ownsSelection())
-                value.otherSelectionAt = QDateTime::currentMSecsSinceEpoch();
+        QObject::connect(clipboard, &QClipboard::dataChanged, qApp, [] {
+            value.clipboardAt = QDateTime::currentMSecsSinceEpoch();
+            emit notifier()->newestChanged();
+        });
+        // Another program's selection changes with every move of a drag:
+        // announced once it has rested a moment.
+        auto *settled = new QTimer(qApp);
+        settled->setSingleShot(true);
+        settled->setInterval(300);
+        QObject::connect(settled, &QTimer::timeout, qApp, [] { emit notifier()->newestChanged(); });
+        QObject::connect(clipboard, &QClipboard::selectionChanged, qApp, [clipboard, settled] {
+            if (clipboard->ownsSelection())
+                return;
+            value.otherSelectionAt = QDateTime::currentMSecsSinceEpoch();
+            if (current.otherProgramsSelection)
+                settled->start();
         });
         return true;
     }();
@@ -87,7 +99,9 @@ void selectionFinished(const QString &text)
     remembered.ownText = text;
     remembered.ownAt = QDateTime::currentMSecsSinceEpoch();
     if (current.copyOnSelect)
-        QApplication::clipboard()->setText(text);
+        QApplication::clipboard()->setText(text); // announced as a clipboard change
+    else
+        emit notifier()->newestChanged();
 }
 
 QString textToPaste(bool middleClick)

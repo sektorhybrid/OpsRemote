@@ -3,6 +3,8 @@
 
 #include "reconnect.h"
 
+#include <QCheckBox>
+#include <QFormLayout>
 #include <QSpinBox>
 
 #include <yaml-cpp/yaml.h>
@@ -84,4 +86,14 @@ QSpinBox *reconnectAttemptsBox(int value, int inheritedAttempts)
     box->setValue(value);
     box->setToolTip(QStringLiteral("How many tries before giving up; 0: keep trying"));
     return box;
+}
+
+void addReconnectRows(QFormLayout *form, QCheckBox *autoReconnect, QSpinBox *delay, QSpinBox *attempts)
+{
+    form->addRow(QStringLiteral("Wait:"), delay);
+    form->addRow(QStringLiteral("Tries:"), attempts);
+    for (QWidget *box : {static_cast<QWidget *>(delay), static_cast<QWidget *>(attempts)}) {
+        box->setEnabled(autoReconnect->isChecked());
+        QObject::connect(autoReconnect, &QCheckBox::toggled, box, &QWidget::setEnabled);
+    }
 }

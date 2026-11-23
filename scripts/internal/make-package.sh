@@ -16,6 +16,8 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=lib/errors.sh
+source "${PROJECT_DIR}/scripts/internal/lib/errors.sh"
 DIST_DIR="${DIST_DIR:-${PROJECT_DIR}/dist}"
 # The platform bundles and tools the package is assembled from.
 STAGE_DIR="${STAGE_DIR:-${PROJECT_DIR}/build/stage}"
@@ -52,6 +54,7 @@ fi
 echo "==> Assembling ${PACKAGE} (${platforms[*]})"
 # Keep the shared user state (and the unpacked runtimes, which are reused
 # when unchanged) from an earlier package.
+# Not on_exit_remove: after a failure it still holds the user's settings.
 saved_state="$(mktemp -d "${DIST_DIR}/.state.XXXXXX")"
 for item in "${KEPT_FOLDERS[@]}" runtime; do
     [[ -d "${PACKAGE}/${item}" ]] && mv "${PACKAGE}/${item}" "${saved_state}/${item}"
@@ -174,7 +177,9 @@ Included: ${platforms[*]}
 EOF
 
 # Where the source of everything in this package is (GPLv3 section 6).
-version="$(sed -n 's/^project(OpsRemote VERSION \([0-9.]*\).*/\1/p' "${PROJECT_DIR}/CMakeLists.txt")"
+# shellcheck source=lib/version.sh
+source "${PROJECT_DIR}/scripts/internal/lib/version.sh"
+version="$(opsremote_version "${PROJECT_DIR}")"
 sed 's/$/\r/' > "${PACKAGE}/SOURCES.txt" <<SOURCES
 Source code of OpsRemote ${version} and of everything in this package
 

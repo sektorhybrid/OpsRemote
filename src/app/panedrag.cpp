@@ -56,6 +56,26 @@ PaneDrag::PaneDrag(QTabWidget *tabs) : QObject(tabs), m_tabs(tabs)
             m_tabs->setCurrentIndex(m_overTab);
     });
     m_tabs->tabBar()->installEventFilter(this);
+    m_follow.setInterval(16);
+    connect(&m_follow, &QTimer::timeout, this, [this] {
+        if (m_dragged)
+            hover(QCursor::pos());
+    });
+}
+
+void PaneDrag::setOpenTab(int ms)
+{
+    m_openTabs = ms >= 0;
+    m_openTab.setInterval(qMax(ms, 0));
+}
+
+void PaneDrag::pickUp(QWidget *dragged)
+{
+    start(dragged);
+    if (m_dragged != dragged)
+        return;
+    m_pickedUp = true;
+    m_follow.start();
 }
 
 QWidget *PaneDrag::window() const
@@ -124,7 +144,7 @@ std::optional<PaneDrag::Drop> PaneDrag::hover(const QPoint &global)
     }
     if (overTab != m_overTab) {
         m_overTab = overTab;
-        if (overTab >= 0 && overTab != m_tabs->currentIndex())
+        if (overTab >= 0 && overTab != m_tabs->currentIndex() && m_openTabs)
             m_openTab.start();
         else
             m_openTab.stop();
@@ -188,9 +208,12 @@ void PaneDrag::finish(const QPoint &global, bool drop)
         return;
     const auto where = drop ? hover(global) : std::nullopt;
     const QPointer<QWidget> dragged = std::exchange(m_dragged, nullptr);
-    qApp->removeEventFilter(this);
+    if (!m_eatRelease)
+        qApp->removeEventFilter(this);
     QApplication::restoreOverrideCursor();
     m_openTab.stop();
+    m_follow.stop();
+    m_pickedUp = false;
     m_overTab = -1;
     delete m_indicator;
     delete m_picture;
@@ -200,6 +223,34 @@ void PaneDrag::finish(const QPoint &global, bool drop)
 
 bool PaneDrag::eventFilter(QObject *watched, QEvent *event)
 {
+    // The release of the click that dropped a picked-up terminal.
+    if (m_eatRelease && !m_dragged && event->type() == QEvent::MouseButtonRelease) {
+        m_eatRelease = false;
+        qApp->removeEventFilter(this);
+        return true;
+    }
+    if (m_dragged && m_pickedUp) {
+        // Picked up: a click drops it (a right click cancels); the pointer
+        // moves are the timer's.
+        switch (event->type()) {
+        case QEvent::MouseButtonPress: {
+            auto *mouse = static_cast<QMouseEvent *>(event);
+            m_eatRelease = true;
+            finish(mouse->globalPosition().toPoint(), mouse->button() == Qt::LeftButton);
+            return true;
+        }
+        case QEvent::ApplicationDeactivate:
+            finish({}, false);
+            return false;
+        case QEvent::MouseMove:
+        case QEvent::MouseButtonRelease:
+        case QEvent::MouseButtonDblClick:
+        case QEvent::Wheel:
+            return true;
+        default:
+            break;
+        }
+    }
     if (m_dragged) {
         // While dragging, the pointer and Esc are this drag's alone.
         switch (event->type()) {
@@ -228,6 +279,8 @@ bool PaneDrag::eventFilter(QObject *watched, QEvent *event)
     // A tab pulled down out of the tab strip is dragged.
     auto *bar = m_tabs->tabBar();
     if (watched != bar)
+        return false;
+    if (!pullTabs)
         return false;
     if (event->type() == QEvent::MouseButtonPress) {
         auto *mouse = static_cast<QMouseEvent *>(event);

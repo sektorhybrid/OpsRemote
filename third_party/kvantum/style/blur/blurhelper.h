@@ -1,3 +1,4 @@
+// Modified for OpsRemote by Thanos Athanasopoulos, 2026 (see OPSREMOTE-CHANGES.md).
 // Some functions were adapted from Oxygen-Transparent -> oxygenblurhelper.h
 
 /*

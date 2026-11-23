@@ -2,15 +2,43 @@
 # SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 # Cross-build environment for the portable Windows bundle: Fedora's MinGW-w64
 # packages provide Qt and most dependencies as Windows (x86_64) libraries.
-FROM fedora:42
+# Fedora 45 is supported until 2027-12-08: move on before it ends.
+FROM fedora:45
+
+# The distribution's updates, taken when the image is built. Docker reuses
+# this layer until REFRESHED changes, so the date is raised on purpose (at
+# least monthly) with the base image pulled again; every step below is then
+# built again.
+ARG REFRESHED=2026-11-22
+RUN echo "distribution updates of ${REFRESHED}" && dnf -y upgrade --refresh && dnf clean all
 
 RUN dnf -y install \
         cmake ninja-build make xz curl findutils file zip \
         mingw64-gcc-c++ mingw64-pkg-config mingw64-winpthreads-static \
         mingw64-qt6-qtbase mingw64-qt6-qttools mingw64-qt6-qtsvg mingw64-qt6-qtimageformats \
         mingw64-openssl mingw64-zlib mingw64-libsodium mingw64-yaml-cpp \
-        qt6-qtbase-devel qt6-qttools-devel \
+        qt6-qtbase-devel qt6-qttools-devel perl \
     && dnf clean all
+
+# OpenSSL from its long-term-support series (3.5, supported until 2030-04),
+# built here because Fedora's MinGW OpenSSL has had no update since 3.2.4
+# (February 2025), a series OpenSSL no longer maintains. It is installed over
+# Fedora's copy (the same DLL names), before everything that links it: Qt
+# loads it at run time, and libfido2, libssh, FreeRDP and LibVNC link it.
+# Signature verified against the OpenSSL release key
+# B146 647E 45A7 B339 47AB 226B 2A2C 87D1 6169 2D40 when this pin was set.
+ARG OPENSSL_VERSION=3.5.9
+ARG OPENSSL_SHA256=603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a
+RUN curl -fsSLo /tmp/openssl.tar.gz \
+        "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz" \
+    && echo "${OPENSSL_SHA256}  /tmp/openssl.tar.gz" | sha256sum -c - \
+    && mkdir /tmp/openssl && tar -C /tmp/openssl --strip-components=1 -xf /tmp/openssl.tar.gz \
+    && cd /tmp/openssl \
+    && ./Configure mingw64 --cross-compile-prefix=x86_64-w64-mingw32- \
+        --prefix=/usr/x86_64-w64-mingw32/sys-root/mingw --libdir=lib shared no-tests no-docs \
+    && make -j"$(nproc)" \
+    && make install_sw \
+    && cd / && rm -rf /tmp/openssl /tmp/openssl.tar.gz
 
 # libcbor (MIT) and libfido2 (BSD-2-Clause) give libssh FIDO2 security keys
 # (sk-ed25519, sk-ecdsa): USB keys directly, and Windows Hello (webauthn.dll),
@@ -18,8 +46,8 @@ RUN dnf -y install \
 # maintainer's key 78D9 97D5 3E9C 0A2A 2053 92ED 14A1 9784 723C 9988 when
 # this pin was set; libcbor publishes no signed release files, so its pin is
 # the SHA-256 of the GitHub release archive as downloaded when it was set.
-ARG LIBCBOR_VERSION=0.13.0
-ARG LIBCBOR_SHA256=95a7f0dd333fd1dce3e4f92691ca8be38227b27887599b21cd3c4f6d6a7abb10
+ARG LIBCBOR_VERSION=0.14.1
+ARG LIBCBOR_SHA256=a8f3aa5c75a4e1e2c639a4928036a3a53fd1682037033db0964935965bd5f5da
 ARG LIBFIDO2_VERSION=1.17.0
 ARG LIBFIDO2_SHA256=c1012c8871d71b65872fd5ff1a9d6b0838a55683a03e85ba97479ce57129c736
 RUN curl -fsSLo /tmp/libcbor.tar.gz \
@@ -87,8 +115,8 @@ RUN curl -fsSLo /tmp/utf8proc.tar.gz \
 # use __thread for its thread-local storage instead. FreeRDP 3.32.2 passes
 # DWORD* for UINT32* in deprecated keyboard code; both are 32-bit on Windows,
 # but GCC 14 rejects it unless that check is only a warning.
-ARG FREERDP_VERSION=3.32.2
-ARG FREERDP_SHA256=e95a505c0057e4d06a3b120477c421028769deba4db9c639ef3465d050f0955c
+ARG FREERDP_VERSION=3.33.1
+ARG FREERDP_SHA256=4431bbf04d370545cfe2924b9d9f116b95c90c64ff156b2550bbaf82d34e7124
 RUN curl -fsSLo /tmp/freerdp.tar.gz \
         "https://github.com/FreeRDP/FreeRDP/releases/download/${FREERDP_VERSION}/freerdp-${FREERDP_VERSION}.tar.gz" \
     && echo "${FREERDP_SHA256}  /tmp/freerdp.tar.gz" | sha256sum -c - \
@@ -137,11 +165,18 @@ RUN curl -fsSLo /tmp/zstd.tar.gz \
 # SHA-256 of the GitHub release archive as downloaded when it was set.
 ARG LIBVNC_VERSION=0.9.15
 ARG LIBVNC_SHA256=62352c7795e231dfce044beb96156065a05a05c974e5de9e023d688d8ff675d7
-RUN dnf -y install mingw64-libjpeg-turbo && dnf clean all \
+# CMAKE_POLICY_VERSION_MINIMUM: LibVNC 0.9.15 asks for a CMake older than
+# 3.5, which CMake 4 (Fedora 45) refuses without it.
+# Three upstream security fixes no LibVNCServer release has yet (Tight and
+# UltraZip decoding; see libvncserver/OPSREMOTE-CHANGES.md). A patch that no
+# longer applies stops the build.
+COPY libvncserver/patches/ /tmp/libvnc-patches/
+RUN dnf -y install mingw64-libjpeg-turbo patch && dnf clean all \
     && curl -fsSLo /tmp/libvnc.tar.gz \
         "https://github.com/LibVNC/libvncserver/archive/refs/tags/LibVNCServer-${LIBVNC_VERSION}.tar.gz" \
     && echo "${LIBVNC_SHA256}  /tmp/libvnc.tar.gz" | sha256sum -c - \
     && mkdir /tmp/libvnc && tar -C /tmp/libvnc --strip-components=1 -xf /tmp/libvnc.tar.gz \
+    && for patch in /tmp/libvnc-patches/*.patch; do patch -d /tmp/libvnc -p1 --forward --batch --fuzz=0 < "${patch}"; done \
     && mingw64-cmake -S /tmp/libvnc -B /tmp/libvnc/build -G Ninja \
         -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
         -DWITH_ZLIB=ON -DWITH_JPEG=ON -DWITH_OPENSSL=ON -DWITH_GNUTLS=OFF -DWITH_GCRYPT=OFF \
@@ -149,9 +184,10 @@ RUN dnf -y install mingw64-libjpeg-turbo && dnf clean all \
         -DWITH_LIBSSHTUNNEL=OFF -DWITH_SYSTEMD=OFF -DWITH_FFMPEG=OFF -DWITH_SASL=OFF \
         -DWITH_XCB=OFF -DWITH_WEBSOCKETS=OFF -DWITH_TIGHTVNC_FILETRANSFER=OFF \
         -DWITH_EXAMPLES=OFF -DWITH_TESTS=OFF \
+        -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
     && cmake --build /tmp/libvnc/build \
     && cmake --install /tmp/libvnc/build \
-    && rm -rf /tmp/libvnc /tmp/libvnc.tar.gz
+    && rm -rf /tmp/libvnc /tmp/libvnc.tar.gz /tmp/libvnc-patches
 
 # Licence texts of the libraries built from source above, for the licenses/
 # folder of the packages: taken from the same pinned, verified archives.
@@ -168,6 +204,7 @@ RUN set -e; \
             -exec cp {} "/opt/licenses/$3/" \; ; \
         rm -rf /tmp/lic /tmp/lic.archive; \
     }; \
+    take "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz" "${OPENSSL_SHA256}" OpenSSL; \
     take "https://www.libssh.org/files/0.12/libssh-${LIBSSH_VERSION}.tar.xz" "${LIBSSH_SHA256}" libssh; \
     take "https://github.com/PJK/libcbor/archive/refs/tags/v${LIBCBOR_VERSION}.tar.gz" "${LIBCBOR_SHA256}" libcbor; \
     take "https://developers.yubico.com/libfido2/Releases/libfido2-${LIBFIDO2_VERSION}.tar.gz" "${LIBFIDO2_SHA256}" libfido2; \
@@ -179,3 +216,8 @@ RUN set -e; \
 # Qt Serial Port for serial console sessions (a separate step, so the
 # layers above stay cached).
 RUN dnf -y install mingw64-qt6-qtserialport && dnf clean all
+
+# Our OpenSSL is still the one installed (a later package could have put
+# Fedora's back over it).
+RUN grep -aq "OpenSSL ${OPENSSL_VERSION:-3.5.9}" /usr/x86_64-w64-mingw32/sys-root/mingw/bin/libcrypto-3-x64.dll \
+    || { echo "libcrypto-3-x64.dll is not OpenSSL ${OPENSSL_VERSION:-3.5.9}" >&2; exit 1; }

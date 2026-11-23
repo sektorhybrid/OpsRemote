@@ -189,6 +189,15 @@ public:
     // The tab's messages not yet read, on the Messages part at the right;
     // below 0: no tab, so no Messages part either (the strip stays, empty).
     void setMessageCount(int unread);
+    // A pane that can be dragged to other places: a handle (dots) at the
+    // left end, in a slot of its own, and the open hand over the empty parts.
+    void setMovable(bool movable);
+    // Dragged only by the handle (not the whole bar); a click on the handle
+    // asks for the Move menu (handleClicked).
+    void setMoveStyle(bool handleOnly, bool handleMenu);
+    // The transfer part keeps its place between dividers even when idle
+    // (nothing shifts when a transfer starts), or shows only while transferring.
+    void setFixedParts(bool fixed);
 
 signals:
     void dismissRequested();
@@ -199,6 +208,9 @@ signals:
     void promptDismissRequested();
     // Pressed and moved: the pane is being dragged (see PaneDrag).
     void dragRequested();
+    // The handle was clicked (setMoveStyle handleMenu): global is where the
+    // menu goes.
+    void handleClicked(const QPoint &global);
 
 protected:
     void paintEvent(QPaintEvent *event) override;
@@ -217,6 +229,13 @@ private:
     bool showsClose() const { return !m_entry.text.isEmpty() && (!m_prompt || m_promptClosable); }
     QRect transferRect() const;
     QRect transferCancelRect() const;
+    QRect handleRect() const;
+    bool transferPart() const { return m_transfer.shown || m_fixedParts; }
+    // Where a press drags the pane (the handle, or any part that is not clicked).
+    bool drags(const QPoint &at) const;
+    void setPointer(const QPoint &at);
+    // The part under at that does something when clicked (no hand there).
+    bool clickable(const QPoint &at) const;
     MessageLog::Entry m_entry;
     struct
     {
@@ -238,6 +257,12 @@ private:
     QList<QPushButton *> m_buttons;
     StatusIndicator *m_messages = nullptr;
     bool m_countShown = true;
+    bool m_movable = false;
+    bool m_hoverHandle = false;
+    bool m_fixedParts = false;
+    bool m_handleOnly = false;
+    bool m_handleMenu = false;
+    bool m_pressedOnHandle = false;
     std::optional<QPoint> m_pressedAt; // to drag the pane from
     // Where the right-hand parts (✕, transfer) end: before the Messages part.
     int partsRight() const;

@@ -19,13 +19,17 @@ const MouseClipboardPreferences &preferences();
 void setPreferences(const MouseClipboardPreferences &value);
 
 // Emits changed() when the settings change (terminals take the new word
-// characters and link settings).
+// characters and link settings), and newestChanged() when what a paste
+// pastes may have changed: a copy in any program, a selection finished in
+// OpsRemote, or (when counted) another program's selection. Remote desktops
+// share that text (textToPaste(false)).
 class Notifier final : public QObject
 {
     Q_OBJECT
 
 signals:
     void changed();
+    void newestChanged();
 };
 Notifier *notifier();
 

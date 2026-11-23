@@ -17,14 +17,25 @@ class AvailabilityNote final : public QWidget
     Q_OBJECT
 
 public:
-    AvailabilityNote(std::function<QString()> problem, std::function<void(bool)> apply,
-                     QWidget *parent = nullptr);
+    // Where problem runs. Background: on a worker thread, so a slow check
+    // (a connection attempt, a long PATH) never holds up the window; the
+    // option keeps its state until the answer comes, and problem must not
+    // touch widgets. Here: at once, on the window's thread (a check that
+    // reads fields of the window).
+    enum class Run { Background, Here };
 
-    // Runs the check again; true when the resource is available.
-    bool check();
+    AvailabilityNote(std::function<QString()> problem, std::function<void(bool)> apply,
+                     QWidget *parent = nullptr, Run run = Run::Here);
+
+    // Runs the check again (in the background: the answer comes later).
+    void check();
 
 private:
+    void show(const QString &reason);
+
     std::function<QString()> m_problem;
     std::function<void(bool)> m_apply;
+    Run m_run;
+    int m_generation = 0; // a later check's answer replaces an earlier one's
     QLabel *m_text = nullptr;
 };

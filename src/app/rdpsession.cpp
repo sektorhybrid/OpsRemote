@@ -2,6 +2,8 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "rdpsession.h"
+
+#include "sessionthread.h"
 #include "reconnect.h"
 #include "appdirs.h"
 #include "localresources.h"
@@ -1041,18 +1043,5 @@ bool RdpSession::askCredentials(QString *username, QString *password, QString *d
 void RdpSession::retire()
 {
     disconnectFromHost();
-    // Nobody listens any more; the session deletes itself once its thread
-    // has ended (FreeRDP may take a moment to return from a connection
-    // attempt), instead of making the GUI wait for it.
-    disconnect(this, nullptr, nullptr, nullptr);
-    setParent(nullptr);
-    auto *poll = new QTimer(this);
-    connect(poll, &QTimer::timeout, this, [this] {
-        if (!m_finished)
-            return;
-        if (m_thread.joinable())
-            m_thread.join();
-        deleteLater();
-    });
-    poll->start(100);
+    deleteWhenThreadEnds(this, m_thread, m_finished);
 }

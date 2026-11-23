@@ -338,6 +338,7 @@ private:
     int sessionListWidth(int columnsWidth) const;
     void fitSidePanelToContents();
     void setSidePanelWidth(int width);
+    void updateSidePanelMinimum();
     void checkHostStatus();
     void applySessionFilter();
     QList<TerminalPage *> terminalPagesIn(QWidget *tab) const;
@@ -357,6 +358,8 @@ private:
     void takePaneOut(TerminalPage *pane);
     bool canDropOn(QWidget *dragged, TerminalPage *target) const;
     void moveDropped(QWidget *dragged, const PaneDrag::Drop &drop);
+    void fillMoveMenu(QMenu *menu, TerminalPage *page);
+    void applyMoveSettings();
     void chooseMultiExecTargets();
     TerminalPage *newLocalProgramPage(const QString &program, const QStringList &arguments,
                                       const QString &label, const TerminalAppearance &appearance,

@@ -5,6 +5,13 @@
 # while still shipping Qt 6.6+ as QTermWidget requires.
 FROM almalinux:9
 
+# The distribution's updates, taken when the image is built. Docker reuses
+# this layer until REFRESHED changes, so the date is raised on purpose (at
+# least monthly) with the base image pulled again; every step below is then
+# built again.
+ARG REFRESHED=2026-11-22
+RUN echo "distribution updates of ${REFRESHED}" && dnf -y upgrade --refresh && dnf clean all
+
 RUN dnf -y install epel-release dnf-plugins-core \
     && dnf config-manager --set-enabled crb \
     && dnf -y install \
@@ -23,8 +30,8 @@ RUN dnf -y install pulseaudio-libs-devel cups-devel pcsc-lite-devel patchelf && 
 # media codecs. The pinned
 # release tarball was verified against the maintainer's signing key
 # 7703 B333 420E 0AEF 995E B4B3 A494 54A3 FC90 9FD5 when this pin was set.
-ARG FREERDP_VERSION=3.32.2
-ARG FREERDP_SHA256=e95a505c0057e4d06a3b120477c421028769deba4db9c639ef3465d050f0955c
+ARG FREERDP_VERSION=3.33.1
+ARG FREERDP_SHA256=4431bbf04d370545cfe2924b9d9f116b95c90c64ff156b2550bbaf82d34e7124
 RUN curl -fsSLo /tmp/freerdp.tar.gz \
         "https://github.com/FreeRDP/FreeRDP/releases/download/${FREERDP_VERSION}/freerdp-${FREERDP_VERSION}.tar.gz" \
     && echo "${FREERDP_SHA256}  /tmp/freerdp.tar.gz" | sha256sum -c - \
@@ -71,11 +78,16 @@ RUN curl -fsSLo /tmp/zstd.tar.gz \
 # SHA-256 of the GitHub release archive as downloaded when it was set.
 ARG LIBVNC_VERSION=0.9.15
 ARG LIBVNC_SHA256=62352c7795e231dfce044beb96156065a05a05c974e5de9e023d688d8ff675d7
-RUN dnf -y install libjpeg-turbo-devel && dnf clean all \
+# Three upstream security fixes no LibVNCServer release has yet (Tight and
+# UltraZip decoding; see libvncserver/OPSREMOTE-CHANGES.md). A patch that no
+# longer applies stops the build.
+COPY libvncserver/patches/ /tmp/libvnc-patches/
+RUN dnf -y install libjpeg-turbo-devel patch && dnf clean all \
     && curl -fsSLo /tmp/libvnc.tar.gz \
         "https://github.com/LibVNC/libvncserver/archive/refs/tags/LibVNCServer-${LIBVNC_VERSION}.tar.gz" \
     && echo "${LIBVNC_SHA256}  /tmp/libvnc.tar.gz" | sha256sum -c - \
     && mkdir /tmp/libvnc && tar -C /tmp/libvnc --strip-components=1 -xf /tmp/libvnc.tar.gz \
+    && for patch in /tmp/libvnc-patches/*.patch; do patch -d /tmp/libvnc -p1 --forward --batch --fuzz=0 < "${patch}"; done \
     && cmake -S /tmp/libvnc -B /tmp/libvnc/build -G Ninja \
         -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
         -DWITH_ZLIB=ON -DWITH_JPEG=ON -DWITH_OPENSSL=ON -DWITH_GNUTLS=OFF -DWITH_GCRYPT=OFF \
@@ -85,7 +97,7 @@ RUN dnf -y install libjpeg-turbo-devel && dnf clean all \
         -DWITH_EXAMPLES=OFF -DWITH_TESTS=OFF \
     && cmake --build /tmp/libvnc/build \
     && cmake --install /tmp/libvnc/build \
-    && rm -rf /tmp/libvnc /tmp/libvnc.tar.gz
+    && rm -rf /tmp/libvnc /tmp/libvnc.tar.gz /tmp/libvnc-patches
 RUN echo /usr/local/lib64 > /etc/ld.so.conf.d/usr-local.conf && ldconfig
 ENV PKG_CONFIG_PATH=/usr/local/lib64/pkgconfig
 

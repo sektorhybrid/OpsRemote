@@ -1,3 +1,4 @@
+// Modified for OpsRemote by Thanos Athanasopoulos, 2026 (see OPSREMOTE-CHANGES.md).
 /*  Copyright (C) 2022 Francesc Martinez (info@francescmm.com)
 
     This library is free software; you can redistribute it and/or

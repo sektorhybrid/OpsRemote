@@ -51,8 +51,7 @@ The first start of each version unpacks the program, which takes a few seconds. 
 | [What's new](docs/changes.md) | The changes of each version |
 | [Features](docs/features.md) | Every feature in detail |
 | [Portable data](docs/portable-data.md) | Where sessions, preferences, the vault and host keys are kept |
-| [Building](docs/building.md) | Building from source, the package scripts, the project layout |
-| [Publishing a release](docs/releasing.md) | Steps for a release and its source archive |
+| [Building](docs/building.md) | How to build OpsRemote from source |
 | [Third-party components](THIRD_PARTY.md) | Bundled components and their licences |
 
 ## Licence

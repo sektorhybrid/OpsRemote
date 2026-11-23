@@ -238,12 +238,15 @@ QWidget *NetworkToolsWindow::buildDownloadTab()
     auto *layout = new QVBoxLayout(page);
     auto *form = new QFormLayout;
     m_downloadUrl = new QLineEdit(page);
+    m_downloadUrl->setObjectName(QStringLiteral("downloadUrl"));
     m_downloadUrl->setPlaceholderText(QStringLiteral("https://… or http://…"));
     m_downloadFolder = new QComboBox(page);
+    m_downloadFolder->setObjectName(QStringLiteral("downloadFolder"));
     m_downloadFolder->addItem(QStringLiteral("My Downloads folder"), QStringLiteral("downloads"));
     m_downloadFolder->addItem(QStringLiteral("The package's shared folder (Local Servers)"), QStringLiteral("shared"));
     m_downloadFolder->addItem(QStringLiteral("Another folder"), QStringLiteral("custom"));
     m_downloadCustom = new QLineEdit(page);
+    m_downloadCustom->setObjectName(QStringLiteral("downloadCustom"));
     auto *browse = new QPushButton(QStringLiteral("Browse…"), page);
     auto *folderRow = new QHBoxLayout;
     folderRow->addWidget(m_downloadFolder);
@@ -270,6 +273,7 @@ QWidget *NetworkToolsWindow::buildDownloadTab()
     layout->addLayout(form);
     auto *row = new QHBoxLayout;
     m_downloadStart = new QPushButton(QStringLiteral("Download"), page);
+    m_downloadStart->setObjectName(QStringLiteral("downloadStart"));
     m_downloadProgress = new QProgressBar(page);
     row->addWidget(m_downloadStart);
     row->addWidget(m_downloadProgress, 1);
@@ -362,6 +366,10 @@ void NetworkToolsWindow::toggleDownload()
         m_network = new QNetworkAccessManager(this);
     QNetworkRequest request(url);
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    // HTTP/1.1 only: Qt's HTTP/2 client has a use-after-free a server can
+    // trigger (CVE-2026-95620, Qt 6.9.0 to 6.11.2: both packages' Qt). A
+    // single download gains nothing from HTTP/2.
+    request.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
     request.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("OpsRemote"));
     const qint64 already = resume ? m_downloadFile->size() : 0;
     if (already > 0)
@@ -405,6 +413,9 @@ void NetworkToolsWindow::toggleDownload()
         m_downloadFile->write(m_download->readAll());
         const auto error = m_download->error();
         const int status = m_download->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        // For OPSREMOTE_LOG: which protocol the download used (never HTTP/2).
+        qInfo().noquote() << "download: status" << status << "HTTP/2"
+                          << m_download->attribute(QNetworkRequest::Http2WasUsedAttribute).toBool();
         if (error == QNetworkReply::OperationCanceledError)
             finishDownload(QStringLiteral("Stopped; the part downloaded is kept for resuming."));
         else if (error != QNetworkReply::NoError && status != 416)

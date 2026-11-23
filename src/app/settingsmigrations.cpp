@@ -192,6 +192,24 @@ void moveMouseClipboard(YAML::Node &settings)
 }
 
 // In order; the last one's version is CurrentSettingsVersion.
+// 0.6.5 → 0.6.6: backup.remove_runtime_on_exit now defaults to on (the
+// unpacked program goes when OpsRemote closes, also after a crash or a
+// forced end). OpsRemote saved the old default, off, in every file, and an
+// off chosen by hand cannot be told from it: off becomes on once (user's
+// choice, 2026-11-22; the release notes say so). On, a missing key or a
+// value that is not a switch stay as they are.
+void turnOnRuntimeRemoval(YAML::Node &settings)
+{
+    auto backup = section(settings, "backup");
+    if (!backup || !backup["remove_runtime_on_exit"])
+        return;
+    try {
+        if (!backup["remove_runtime_on_exit"].as<bool>())
+            backup["remove_runtime_on_exit"] = true;
+    } catch (const YAML::Exception &) {
+    }
+}
+
 const Step steps[] = {
     {1, "behaviour.copy_on_select split into copy_on_select_linux and copy_on_select_windows",
      splitCopyOnSelect},
@@ -203,6 +221,8 @@ const Step steps[] = {
      mergeLinkSettings},
     {5, "copy, paste, mouse buttons, links and the mouse wheel moved to mouse_clipboard",
      moveMouseClipboard},
+    {6, "backup.remove_runtime_on_exit: the old default (off) becomes on, the new default",
+     turnOnRuntimeRemoval},
 };
 static_assert(sizeof steps / sizeof *steps == CurrentSettingsVersion,
               "one step per settings version");

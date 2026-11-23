@@ -7,7 +7,9 @@
 #include "reconnect.h"
 #include "preferences.h"
 #include "appdirs.h"
+#include "windowfit.h"
 
+#include <QScrollArea>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDir>
@@ -301,14 +303,7 @@ VncOptionsEditor::VncOptionsEditor(const VncOptions &value, const VncOptions &de
     layout->setContentsMargins(0, 0, 0, 0);
     auto *tabs = new QTabWidget(this);
     layout->addWidget(tabs);
-    // A tab of light cards (formcard.h).
-    const auto section = [this, tabs](const QString &title) {
-        auto *page = new QWidget(this);
-        auto *layout = new QVBoxLayout(page);
-        layout->setSpacing(6);
-        tabs->addTab(page, title);
-        return layout;
-    };
+    const auto section = [this, tabs](const QString &title) { return addCardTab(tabs, title, this); };
     const auto finish = [this](QVBoxLayout *page) {
         page->addStretch();
         alignFormLabels(this); // all tabs alike
@@ -333,12 +328,7 @@ VncOptionsEditor::VncOptionsEditor(const VncOptions &value, const VncOptions &de
     // The session type's wait and tries, inherited until set here.
     m_reconnectDelay = reconnectDelayBox(value.reconnectDelay, m_defaults.reconnectDelay);
     m_reconnectAttempts = reconnectAttemptsBox(value.reconnectAttempts, m_defaults.reconnectAttempts);
-    connection->addRow(QStringLiteral("Wait:"), m_reconnectDelay);
-    connection->addRow(QStringLiteral("Tries:"), m_reconnectAttempts);
-    for (QWidget *box : {static_cast<QWidget *>(m_reconnectDelay), static_cast<QWidget *>(m_reconnectAttempts)}) {
-        box->setEnabled(m_autoReconnect->isChecked());
-        connect(m_autoReconnect, &QCheckBox::toggled, box, &QWidget::setEnabled);
-    }
+    addReconnectRows(connection, m_autoReconnect, m_reconnectDelay, m_reconnectAttempts);
     connection = addFormCard(connectionPage, QStringLiteral("Logon"), this);
     connection->addRow(QStringLiteral("Encryption:"), m_encryption);
     connection = addFormCard(connectionPage, QStringLiteral("Listening"), this);
@@ -349,7 +339,7 @@ VncOptionsEditor::VncOptionsEditor(const VncOptions &value, const VncOptions &de
     connection->addRow(QStringLiteral("ID:"), m_repeaterId);
     finish(connectionPage);
     // Connection first, as in every session type's window.
-    tabs->tabBar()->moveTab(tabs->indexOf(connectionPage->parentWidget()), 0);
+    tabs->tabBar()->moveTab(WindowFit::indexOfPage(tabs, connectionPage->parentWidget()), 0);
     tabs->setCurrentIndex(0);
 }
 

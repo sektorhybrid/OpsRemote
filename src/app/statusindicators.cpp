@@ -532,7 +532,7 @@ void TabMessageStrip::setCountShown(bool shown)
     m_countShown = shown;
     m_messages->setVisible(shown);
     // A pane's bar: nothing to open by a click on its message.
-    setCursor(shown ? Qt::PointingHandCursor : Qt::ArrowCursor);
+    setPointer({-1, -1});
     placeButtons();
     update();
 }
@@ -547,6 +547,72 @@ void TabMessageStrip::setMessageCount(int unread)
     m_messages->setVisible(m_countShown && unread >= 0);
     m_messages->setState(QString::number(qMax(unread, 0)), unread > 0);
     m_messages->setTip(QStringLiteral("This tab's messages: %1 new").arg(unread));
+}
+
+namespace {
+const QString MoveTip = QStringLiteral("Drag to move this terminal: next to another one, to another tab, or to a tab "
+                                       "of its own");
+}
+
+void TabMessageStrip::setMovable(bool movable)
+{
+    if (m_movable == movable)
+        return;
+    m_movable = movable;
+    m_hoverHandle = false;
+    setPointer({-1, -1});
+    update();
+}
+
+void TabMessageStrip::setMoveStyle(bool handleOnly, bool handleMenu)
+{
+    m_handleOnly = handleOnly;
+    m_handleMenu = handleMenu;
+    setPointer({-1, -1});
+}
+
+void TabMessageStrip::setFixedParts(bool fixed)
+{
+    if (m_fixedParts == fixed)
+        return;
+    m_fixedParts = fixed;
+    placeButtons();
+    update();
+}
+
+bool TabMessageStrip::drags(const QPoint &at) const
+{
+    if (!m_movable)
+        return false;
+    if (handleRect().contains(at))
+        return true;
+    return !m_handleOnly && !clickable(at);
+}
+
+// The open hand where a press drags, the pointing hand where it clicks.
+void TabMessageStrip::setPointer(const QPoint &at)
+{
+    if (!m_movable)
+        setCursor(m_countShown ? Qt::PointingHandCursor : Qt::ArrowCursor);
+    else if (rect().contains(at) ? drags(at) : !m_handleOnly)
+        setCursor(Qt::OpenHandCursor);
+    else
+        setCursor(clickable(at) ? Qt::PointingHandCursor : Qt::ArrowCursor);
+}
+
+// About two characters wide, the whole height, at the left end.
+QRect TabMessageStrip::handleRect() const
+{
+    if (!m_movable)
+        return {};
+    return {0, 0, qMax(12, fontMetrics().averageCharWidth() * 2), height()};
+}
+
+bool TabMessageStrip::clickable(const QPoint &at) const
+{
+    if (m_movable && handleRect().contains(at))
+        return false;
+    return m_countShown || (showsClose() && closeRect().contains(at)) || (m_transfer.shown && transferRect().contains(at));
 }
 
 void TabMessageStrip::showEntry(const MessageLog::Entry &entry, const QString &pane)
@@ -652,7 +718,7 @@ void TabMessageStrip::changeEvent(QEvent *event)
 QRect TabMessageStrip::closeRect() const
 {
     const int side = height() - 8;
-    const int right = m_transfer.shown ? transferRect().left() - 4 : partsRight() - 6;
+    const int right = transferPart() ? transferRect().left() - 4 : partsRight() - 6;
     return {right - side, 4, side, side};
 }
 
@@ -660,7 +726,12 @@ QRect TabMessageStrip::closeRect() const
 // transfers; the message on the left is shortened to make room.
 QRect TabMessageStrip::transferRect() const
 {
-    const int widthWanted = qMin(fontMetrics().averageCharWidth() * 42, partsRight() / 2);
+    const int character = fontMetrics().averageCharWidth();
+    int widthWanted = qMin(character * 42, partsRight() * 2 / 5);
+    // On a narrow pane the message keeps about 12 characters (with its icon
+    // and ✕) before the transfer part gets smaller.
+    const int messageLeast = (m_movable ? handleRect().width() : 0) + character * 12 + height() * 2;
+    widthWanted = qMax(qMin(widthWanted, partsRight() - messageLeast), qMin(character * 10, partsRight() / 3));
     return {partsRight() - widthWanted, 0, widthWanted, height()};
 }
 
@@ -703,13 +774,35 @@ void TabMessageStrip::paintEvent(QPaintEvent *)
                                   (ground.blueF() + base.blueF()) / 2);
     }
     painter.fillRect(rect(), ground);
+    if (m_movable) {
+        // The handle: two columns of three dots, the accent colour under the
+        // pointer.
+        const QRect handle = handleRect();
+        QColor dots = pal.color(QPalette::Text);
+        dots.setAlphaF(0.4);
+        if (m_hoverHandle)
+            dots = visibleColor(ground, {pal.color(QPalette::Highlight), pal.color(QPalette::Link),
+                                         QColor(0xf0, 0xa0, 0x30), QColor(0x3d, 0xae, 0xe9)});
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(dots);
+        const QPointF centre = QRectF(handle).center();
+        for (int column = -1; column <= 1; column += 2)
+            for (int row = -1; row <= 1; ++row)
+                painter.drawEllipse(centre + QPointF(column * 2.5, row * 4.5), 1.4, 1.4);
+        painter.setRenderHint(QPainter::Antialiasing, false);
+    }
     QColor edge = pal.color(QPalette::Text); // the transfer part's divider
     edge.setAlphaF(0.15);
+    // Dividers: after the handle, before the transfer part.
+    painter.setPen(edge);
+    if (m_movable && m_fixedParts)
+        painter.drawLine(handleRect().right(), 5, handleRect().right(), height() - 6);
+    if (transferPart())
+        painter.drawLine(transferRect().left(), 5, transferRect().left(), height() - 6);
     if (m_transfer.shown) {
-        // A divider, ↑/↓, the file, a small bar, %, +N, ✕.
+        // ↑/↓, the file, a small bar, %, +N, ✕.
         const QRect area = transferRect();
-        painter.setPen(edge);
-        painter.drawLine(area.left(), 5, area.left(), height() - 6);
         const int iconSide = style()->pixelMetric(QStyle::PM_SmallIconSize);
         const QRect arrow(area.left() + 8, (height() - iconSide) / 2, iconSide, iconSide);
         style()->standardIcon(m_transfer.upload ? QStyle::SP_ArrowUp : QStyle::SP_ArrowDown).paint(&painter, arrow);
@@ -718,7 +811,7 @@ void TabMessageStrip::paintEvent(QPaintEvent *)
         // Ended: its state where the % was, no bar.
         const QString percent = m_transfer.ended.isEmpty() ? QStringLiteral("%1%").arg(m_transfer.percent)
                                                            : m_transfer.ended;
-        const int barWidth = fontMetrics().averageCharWidth() * 5;
+        int barWidth = fontMetrics().averageCharWidth() * 5;
         int x = cancel.left() - 6;
         const QColor accent = visibleColor(pal.color(QPalette::Window),
                                            {pal.color(QPalette::Highlight), pal.color(QPalette::Link),
@@ -734,19 +827,22 @@ void TabMessageStrip::paintEvent(QPaintEvent *)
         painter.setPen(pal.color(QPalette::PlaceholderText));
         painter.drawText(QRect(x - pw, 0, pw, height()), Qt::AlignVCenter | Qt::AlignRight, percent);
         x -= pw + 6;
+        // Narrow: the small bar goes first, so the file keeps a short name.
+        if (x - barWidth - 12 - arrow.right() < fontMetrics().averageCharWidth() * 8)
+            barWidth = 0;
         const QRectF bar(x - barWidth, height() / 2.0 - 3, barWidth, 6);
         painter.setRenderHint(QPainter::Antialiasing);
         painter.setPen(Qt::NoPen);
         QColor trough = pal.color(QPalette::Text);
         trough.setAlphaF(0.15);
-        if (m_transfer.ended.isEmpty()) {
+        if (m_transfer.ended.isEmpty() && barWidth > 0) {
             painter.setBrush(trough);
             painter.drawRoundedRect(bar, 3, 3);
             painter.setBrush(accent);
             painter.drawRoundedRect(QRectF(bar.left(), bar.top(), bar.width() * m_transfer.percent / 100.0, bar.height()), 3, 3);
         }
         painter.setRenderHint(QPainter::Antialiasing, false);
-        const QRect name(arrow.right() + 6, 0, int(bar.left()) - arrow.right() - 12, height());
+        const QRect name(arrow.right() + 6, 0, int(bar.left()) - arrow.right() - (barWidth > 0 ? 12 : 6), height());
         painter.setPen(pal.color(QPalette::Text));
         painter.drawText(name, Qt::AlignVCenter | Qt::AlignLeft,
                          fontMetrics().elidedText(m_transfer.name, Qt::ElideMiddle, name.width()));
@@ -764,7 +860,8 @@ void TabMessageStrip::paintEvent(QPaintEvent *)
     if (m_entry.text.isEmpty())
         return; // Empty, the same height.
     const int iconSide = style()->pixelMetric(QStyle::PM_SmallIconSize);
-    const QRect iconRect(8, (height() - iconSide) / 2, iconSide, iconSide);
+    const int left = m_movable ? handleRect().right() + 4 : 8; // past the handle
+    const QRect iconRect(left, (height() - iconSide) / 2, iconSide, iconSide);
     style()->standardIcon(m_entry.level == MessageLog::Level::Warning ? QStyle::SP_MessageBoxWarning
                                                                       : QStyle::SP_MessageBoxInformation)
         .paint(&painter, iconRect);
@@ -777,8 +874,10 @@ void TabMessageStrip::paintEvent(QPaintEvent *)
     const QString shown = fontMetrics().elidedText(text, Qt::ElideRight, textRect.width());
     painter.setPen(pal.color(QPalette::Text));
     painter.drawText(textRect, Qt::AlignLeft | Qt::AlignVCenter, shown);
-    m_messageTip = shown == text ? QStringLiteral("Click for this tab's messages")
-                                 : text + QStringLiteral("\n\nClick for this tab's messages");
+    // A pane's bar opens nothing by a click on its message.
+    const QString hint = m_countShown ? QStringLiteral("Click for this tab's messages") : QString();
+    // A pane's bar: the whole message, always.
+    m_messageTip = hint.isEmpty() ? text : shown == text ? hint : text + QStringLiteral("\n\n") + hint;
     if (!showsClose())
         return;
     // The ✕ that puts the message away (it stays in the tab's list).
@@ -794,8 +893,10 @@ void TabMessageStrip::paintEvent(QPaintEvent *)
 void TabMessageStrip::mousePressEvent(QMouseEvent *event)
 {
     m_pressedAt.reset();
-    if (event->button() == Qt::LeftButton)
-        m_pressedAt = event->position().toPoint();
+    const QPoint at = event->position().toPoint();
+    m_pressedOnHandle = event->button() == Qt::LeftButton && m_movable && handleRect().contains(at);
+    if (event->button() == Qt::LeftButton && (!m_movable || drags(at)))
+        m_pressedAt = at;
 }
 
 void TabMessageStrip::mouseMoveEvent(QMouseEvent *event)
@@ -810,26 +911,33 @@ void TabMessageStrip::mouseMoveEvent(QMouseEvent *event)
     }
     const bool over = showsClose() && closeRect().contains(at);
     const bool overCancel = m_transfer.shown && !m_transfer.cancelHint.isEmpty() && transferCancelRect().contains(at);
-    if (over != m_hoverClose || overCancel != m_hoverCancel) {
+    const bool overHandle = m_movable && handleRect().contains(at);
+    if (over != m_hoverClose || overCancel != m_hoverCancel || overHandle != m_hoverHandle) {
         m_hoverClose = over;
         m_hoverCancel = overCancel;
+        m_hoverHandle = overHandle;
         update();
     }
+    setPointer(at);
     // The tooltip of the part under the pointer.
-    if (overCancel)
+    if (overHandle)
+        setToolTip(m_handleMenu ? MoveTip + QStringLiteral(".\nClick for the Move menu.") : MoveTip);
+    else if (overCancel)
         setToolTip(m_transfer.cancelHint);
     else if (m_transfer.shown && transferRect().contains(at))
         setToolTip(QStringLiteral("%1\n\nClick for this tab's transfers").arg(m_transfer.name));
     else if (over)
         setToolTip(m_prompt ? QStringLiteral("Close this without answering") : QStringLiteral("Put this message away"));
+    else if (!m_entry.text.isEmpty() && !m_messageTip.isEmpty())
+        setToolTip(m_messageTip);
     else
-        setToolTip(m_entry.text.isEmpty() ? QString() : m_messageTip);
+        setToolTip(m_movable && !m_handleOnly ? MoveTip : QString());
 }
 
 void TabMessageStrip::leaveEvent(QEvent *)
 {
-    if (m_hoverClose || m_hoverCancel) {
-        m_hoverClose = m_hoverCancel = false;
+    if (m_hoverClose || m_hoverCancel || m_hoverHandle) {
+        m_hoverClose = m_hoverCancel = m_hoverHandle = false;
         update();
     }
 }
@@ -840,6 +948,12 @@ void TabMessageStrip::mouseReleaseEvent(QMouseEvent *event)
         return;
     m_pressedAt.reset();
     const QPoint at = event->position().toPoint();
+    const bool onHandle = std::exchange(m_pressedOnHandle, false);
+    if (m_movable && handleRect().contains(at)) {
+        if (onHandle && m_handleMenu)
+            emit handleClicked(mapToGlobal(QPoint(0, height())));
+        return;
+    }
     if (m_transfer.shown && !m_transfer.cancelHint.isEmpty() && transferCancelRect().contains(at))
         emit cancelTransferRequested();
     else if (m_transfer.shown && transferRect().contains(at))
