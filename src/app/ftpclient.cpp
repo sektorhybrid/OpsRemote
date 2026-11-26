@@ -16,7 +16,6 @@
 #include <QNetworkProxy>
 #include <QPointer>
 #include <QRegularExpression>
-#include <QSaveFile>
 #include <QSet>
 #include <QSslCertificate>
 #include <QSslConfiguration>
@@ -126,15 +125,7 @@ private:
                 lines << existing;
         }
         lines << line;
-        QDir().mkpath(QFileInfo(m_path).absolutePath());
-        QSaveFile file(m_path);
-        const QByteArray contents = (lines.join(QLatin1Char('\n')) + QLatin1Char('\n')).toUtf8();
-        if (!file.open(QIODevice::WriteOnly) || file.write(contents) != contents.size() || !file.commit()) {
-            *error = file.errorString();
-            return false;
-        }
-        restrictToOwner(m_path);
-        return true;
+        return savePrivateFile(m_path, (lines.join(QLatin1Char('\n')) + QLatin1Char('\n')).toUtf8(), error);
     }
 
     QStringList stored() const

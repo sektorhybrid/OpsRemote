@@ -49,7 +49,7 @@ void AvailabilityNote::check()
         timer.start();
         const QString reason = problem();
         if (timer.elapsed() > 100)
-            qInfo("availability check: %lld ms (%s)", qint64(timer.elapsed()),
+            qInfo("Availability check: %lld ms (%s)", qint64(timer.elapsed()),
                   reason.isEmpty() ? "available" : qUtf8Printable(reason.left(60)));
         QMetaObject::invokeMethod(qApp, [note, reason, generation] {
             if (note && generation == note->m_generation)

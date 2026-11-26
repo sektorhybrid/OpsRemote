@@ -3,12 +3,15 @@
 
 #pragma once
 
+#include "reconnect.h"
+
 #include <QList>
 #include <QPair>
 #include <QString>
 #include <QWidget>
 
 #include <functional>
+#include <memory>
 
 class QCheckBox;
 class QSpinBox;
@@ -42,10 +45,7 @@ struct RdpOptions
     QString gatewayUser;
     // "auto" (this computer's layout) or a Windows layout id ("00000408").
     QString keyboardLayout;
-    int autoReconnect = -1; // reconnect after a network drop
-    // Wait and tries (reconnect.h); 0 s and -1: the Preferences'.
-    int reconnectDelay = 0;
-    int reconnectAttempts = -1;
+    ReconnectOptions reconnect; // after a network drop (reconnect.h)
     int askCredentials = -1; // off: log on at the remote screen instead
     // A program started instead of the desktop, and its folder (Windows
     // Server, and xrdp; Windows client editions ignore it).
@@ -69,6 +69,9 @@ struct RdpOptions
 
 // (value, label) choices, shared by the session editor and Preferences.
 using RdpChoices = QList<QPair<QString, QString>>;
+// The label shown for a saved value; the value itself when it is not one
+// of the choices.
+QString labelFor(const RdpChoices &choices, const QString &value);
 RdpChoices rdpResolutionChoices();
 RdpChoices rdpColorDepthChoices();
 RdpChoices rdpQualityChoices();
@@ -85,21 +88,17 @@ void rdpOptionsToYaml(const RdpOptions &options, YAML::Node &node);
 RdpOptions loadRdpDefaults();
 void saveRdpDefaults(const RdpOptions &options);
 
-// Edits RdpOptions. For a session (withDefault), every choice starts with
-// the inherited value, which leaves the field empty; on/off options are checkboxes
-// that start at the default and are stored only when they differ from it.
+// Edits RdpOptions for a session: every choice starts with the inherited
+// value, which leaves the field empty; on/off options are checkboxes that
+// start at the default and are stored only when they differ from it.
 class RdpOptionsEditor final : public QWidget
 {
     Q_OBJECT
 
 public:
-    RdpOptionsEditor(const RdpOptions &value, bool withDefault, const RdpOptions &defaults,
-                     QWidget *parent = nullptr);
+    RdpOptionsEditor(const RdpOptions &value, const RdpOptions &defaults, QWidget *parent = nullptr);
 
     RdpOptions value() const;
-
-signals:
-    void changed();
 
 private:
     QComboBox *m_resolution = nullptr;
@@ -107,7 +106,6 @@ private:
     QComboBox *m_quality = nullptr;
     QComboBox *m_security = nullptr;
     RdpOptions m_defaults;
-    bool m_withDefault = false;
     QCheckBox *m_admin = nullptr;
     QCheckBox *m_clipboardText = nullptr;
     QCheckBox *m_clipboardFiles = nullptr;
@@ -117,9 +115,7 @@ private:
     QLineEdit *m_gateway = nullptr;
     QLineEdit *m_gatewayUser = nullptr;
     QComboBox *m_keyboard = nullptr;
-    QCheckBox *m_autoReconnect = nullptr;
-    QSpinBox *m_reconnectDelay = nullptr; // reconnect.h
-    QSpinBox *m_reconnectAttempts = nullptr;
+    std::unique_ptr<ReconnectEditorRows> m_reconnect;
     QCheckBox *m_askCredentials = nullptr;
     QLineEdit *m_startProgram = nullptr;
     QLineEdit *m_startFolder = nullptr;

@@ -107,7 +107,7 @@ VncPage::VncPage(const VncPageSettings &settings, QWidget *parent)
 
     buildOverlay(QStringLiteral("vncOverlay"));
     connect(m_endedPanel, &SessionEndedPanel::reconnectRequested, this, [this] {
-        m_reconnectAttempts = 0;
+        m_reconnector.worked();
         start();
     });
     connect(m_endedPanel, &SessionEndedPanel::closeRequested, this, &VncPage::requestClose);
@@ -125,7 +125,7 @@ VncPage::VncPage(const VncPageSettings &settings, QWidget *parent)
             [this](int width, int height, const QString &name) {
                 m_connected = true;
                 m_wasConnected = true;
-                m_reconnectAttempts = 0;
+                m_reconnector.worked();
                 m_overlay->hide();
                 m_endedPanel->hide();
                 setFocus();
@@ -184,21 +184,17 @@ VncPage::VncPage(const VncPageSettings &settings, QWidget *parent)
                                    "after too many failed log-ons. Wait a few minutes, then reconnect "
                                    "(with the right password).");
         emit statusMessage(QStringLiteral("%1: %2").arg(host(), shown));
-        // The session type's wait and tries (reconnect.h); 0 keeps trying.
-        const auto &options = m_settings.connection.options;
-        const int attempts = options.reconnectAttempts < 0 ? DefaultReconnectAttempts : options.reconnectAttempts;
-        const int delay = options.reconnectDelay > 0 ? options.reconnectDelay : DefaultReconnectDelay;
-        if (error && !blocked && m_wasConnected && options.autoReconnect == 1
-            && mayReconnect(m_reconnectAttempts, attempts)) {
-            ++m_reconnectAttempts;
-            showOverlay(QStringLiteral("Connection lost. Reconnecting (%1)…")
-                            .arg(reconnectAttemptText(m_reconnectAttempts, attempts)),
-                        false);
-            QTimer::singleShot(delay * 1000, this, [this] {
+        // The session type's wait and tries (reconnect.h).
+        const auto &policy = m_settings.connection.options.reconnect;
+        if (error && !blocked && m_wasConnected && policy.autoReconnect == 1) {
+            const QString attempt = m_reconnector.retry(policy, this, QStringLiteral("VNC %1").arg(host()), [this] {
                 if (!m_connected)
                     start();
             });
-            return;
+            if (!attempt.isEmpty()) {
+                showOverlay(QStringLiteral("Connection lost. Reconnecting (%1)…").arg(attempt), false);
+                return;
+            }
         }
         showOverlay(shown, true, error);
     });
@@ -235,6 +231,7 @@ void VncPage::start()
     // Through jump hosts: the chain's local port stands in for the server.
     stopTunnel();
     m_tunnel = new JumpChain(this);
+    connect(m_tunnel, &JumpChain::typedPasswordWorked, this, &VncPage::typedPasswordWorked);
     connect(m_tunnel, &JumpChain::statusMessage, this, [this](const QString &message) {
         showOverlay(message, false);
     });
@@ -281,7 +278,7 @@ bool VncPage::askCredentials(QString *username, QString *password, bool needUser
     if (needUsername)
         form->addRow(QStringLiteral("User name:"), user);
     form->addRow(QStringLiteral("Password:"), secret);
-    auto *save = new QCheckBox(QStringLiteral("Save the password in the vault"), &dialog);
+    auto *save = new QCheckBox(QStringLiteral("Save the password (in the session's password store)"), &dialog);
     save->setVisible(m_settings.canSavePassword);
     form->addRow(QString(), save);
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
@@ -359,7 +356,7 @@ void VncPage::keyPressEvent(QKeyEvent *event)
 {
     if (!m_connected && m_endedPanel->isOffered()) {
         if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) {
-            m_reconnectAttempts = 0;
+            m_reconnector.worked();
             start();
         } else if (event->key() == Qt::Key_Escape) {
             requestClose();

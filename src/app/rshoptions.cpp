@@ -17,17 +17,6 @@
 
 #include <yaml-cpp/yaml.h>
 
-namespace {
-
-QString labelFor(const RdpChoices &choices, const QString &value)
-{
-    for (const auto &choice : choices) {
-        if (choice.first == value)
-            return choice.second;
-    }
-    return value;
-}
-}
 
 RshOptions RshOptions::overriddenBy(const RshOptions &session) const
 {
@@ -38,6 +27,7 @@ RshOptions RshOptions::overriddenBy(const RshOptions &session) const
         result.sourcePort = session.sourcePort;
     if (!session.command.isEmpty())
         result.command = session.command;
+    result.reconnect = reconnect.overriddenBy(session.reconnect);
     return result;
 }
 
@@ -45,6 +35,7 @@ RshOptions RshOptions::builtIn()
 {
     RshOptions options;
     options.sourcePort = QStringLiteral("auto");
+    options.reconnect = ReconnectOptions::builtIn();
     return options;
 }
 
@@ -85,6 +76,7 @@ RshOptions rshOptionsFromYaml(const YAML::Node &node)
     } catch (const YAML::Exception &) {
         // Keep what was read; invalid values use the defaults.
     }
+    options.reconnect = reconnectOptionsFromYaml(node);
     return options;
 }
 
@@ -97,6 +89,7 @@ void rshOptionsToYaml(const RshOptions &options, YAML::Node &node)
     text("local_user", options.localUser);
     text("source_port", options.sourcePort);
     text("command", options.command);
+    reconnectOptionsToYaml(options.reconnect, node);
 }
 
 RshOptions loadRshDefaults()
@@ -125,6 +118,7 @@ RshOptionsEditor::RshOptionsEditor(const RshOptions &value, const RshOptions &de
     const RshOptions fallback = RshOptions::builtIn().overriddenBy(defaults);
     m_localUser = new QLineEdit(value.localUser, this);
     m_localUser->setPlaceholderText(fallback.localUser.isEmpty() ? currentUserName() : fallback.localUser);
+    m_localUser->setProperty("inheritedText", m_localUser->placeholderText()); // applyInheritance()
     m_localUser->setToolTip(QStringLiteral(
         "Sent as your user name on this computer. The server lets you in without a password when "
         "its .rhosts or hosts.equiv trusts this name from this computer; otherwise it asks."));
@@ -159,15 +153,23 @@ RshOptionsEditor::RshOptionsEditor(const RshOptions &value, const RshOptions &de
     note->setWordWrap(true);
     note->setForegroundRole(QPalette::PlaceholderText);
     form->addRow(note);
+    auto *reconnect = addFormCard(cards, QStringLiteral("Reconnect"), page);
+    m_reconnectCard = reconnect->parentWidget();
+    m_reconnect = std::make_unique<ReconnectEditorRows>(
+        reconnect, QStringLiteral("Reconnect automatically if the network drops"), value.reconnect,
+        fallback.reconnect, page);
     cards->addStretch();
     alignFormLabels(this);
 }
+
+RshOptionsEditor::~RshOptionsEditor() = default;
 
 void RshOptionsEditor::setCommandShown(bool shown)
 {
     m_commandShown = shown;
     m_command->setVisible(shown);
     m_commandLabel->setVisible(shown);
+    m_reconnectCard->setVisible(!shown);
 }
 
 RshOptions RshOptionsEditor::value() const
@@ -177,5 +179,7 @@ RshOptions RshOptionsEditor::value() const
     options.sourcePort = m_sourcePort->currentData().toString();
     if (m_commandShown)
         options.command = m_command->text().trimmed();
+    else
+        options.reconnect = m_reconnect->value();
     return options;
 }

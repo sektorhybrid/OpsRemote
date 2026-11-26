@@ -30,14 +30,6 @@
 
 namespace {
 
-QString labelFor(const RdpChoices &choices, const QString &value)
-{
-    for (const auto &choice : choices) {
-        if (choice.first == value)
-            return choice.second;
-    }
-    return value;
-}
 
 // A display number no X server uses yet, from :10 on (lower ones are
 // usually this computer's own).

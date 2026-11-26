@@ -24,17 +24,6 @@
 
 #include <yaml-cpp/yaml.h>
 
-namespace {
-
-QString labelFor(const RdpChoices &choices, const QString &value)
-{
-    for (const auto &choice : choices) {
-        if (choice.first == value)
-            return choice.second;
-    }
-    return value;
-}
-}
 
 bool VncOptions::isEmpty() const
 {
@@ -59,11 +48,7 @@ VncOptions VncOptions::overriddenBy(const VncOptions &session) const
     text(result.encryption, session.encryption);
     number(result.remoteCursor, session.remoteCursor);
     number(result.clipboard, session.clipboard);
-    number(result.autoReconnect, session.autoReconnect);
-    if (session.reconnectDelay > 0)
-        result.reconnectDelay = session.reconnectDelay;
-    if (session.reconnectAttempts >= 0)
-        result.reconnectAttempts = session.reconnectAttempts;
+    result.reconnect = reconnect.overriddenBy(session.reconnect);
     number(result.highDpi, session.highDpi);
     number(result.allMonitors, session.allMonitors);
     // Session only.
@@ -83,9 +68,8 @@ VncOptions VncOptions::builtIn()
     options.encryption = QStringLiteral("prefer");
     options.remoteCursor = 1;
     options.clipboard = 1;
-    options.autoReconnect = 1;
-    options.reconnectDelay = DefaultReconnectDelay;
-    options.reconnectAttempts = DefaultReconnectAttempts;
+    options.reconnect = ReconnectOptions::builtIn();
+    options.reconnect.autoReconnect = 1; // on for remote desktops
     options.highDpi = 1;
     options.allMonitors = 0;
     return options;
@@ -151,8 +135,7 @@ VncOptions vncOptionsFromYaml(const YAML::Node &node)
         readChoice("encryption", vncEncryptionChoices(), options.encryption);
         readSwitch("remote_cursor", options.remoteCursor);
         readSwitch("clipboard", options.clipboard);
-        readSwitch("auto_reconnect", options.autoReconnect);
-        readReconnectTiming(node, options.reconnectDelay, options.reconnectAttempts);
+        options.reconnect = reconnectOptionsFromYaml(node);
         readSwitch("high_dpi", options.highDpi);
         readSwitch("all_monitors", options.allMonitors);
         readText("ssh_tunnel", options.sshTunnel);
@@ -184,8 +167,7 @@ void vncOptionsToYaml(const VncOptions &options, YAML::Node &node)
     text("encryption", options.encryption);
     flag("remote_cursor", options.remoteCursor);
     flag("clipboard", options.clipboard);
-    flag("auto_reconnect", options.autoReconnect);
-    writeReconnectTiming(node, options.reconnectDelay, options.reconnectAttempts);
+    reconnectOptionsToYaml(options.reconnect, node);
     flag("high_dpi", options.highDpi);
     flag("all_monitors", options.allMonitors);
     flag("listen", options.listen);
@@ -231,7 +213,6 @@ VncOptionsEditor::VncOptionsEditor(const VncOptions &value, const VncOptions &de
             if (choice.first != defaultValue) // listed once, as the inherited one
                 box->addItem(choice.second, choice.first);
         box->setCurrentIndex(qMax(0, box->findData(current)));
-        connect(box, &QComboBox::currentIndexChanged, this, &VncOptionsEditor::changed);
         return box;
     };
     const auto makeSwitch = [this](const QString &text, const QString &tip, int own, int fallback) {
@@ -239,7 +220,6 @@ VncOptionsEditor::VncOptionsEditor(const VncOptions &value, const VncOptions &de
         box->setToolTip(tip);
         box->setChecked((own >= 0 ? own : fallback) == 1);
         box->setProperty("inheritedOn", fallback == 1); // applyInheritance()
-        connect(box, &QCheckBox::toggled, this, &VncOptionsEditor::changed);
         return box;
     };
     const auto makeText = [this](const QString &current, const QString &placeholder,
@@ -248,7 +228,6 @@ VncOptionsEditor::VncOptionsEditor(const VncOptions &value, const VncOptions &de
         edit->setPlaceholderText(placeholder);
         edit->setToolTip(tip);
         edit->setMaxLength(255);
-        connect(edit, &QLineEdit::textChanged, this, &VncOptionsEditor::changed);
         return edit;
     };
 
@@ -263,7 +242,7 @@ VncOptionsEditor::VncOptionsEditor(const VncOptions &value, const VncOptions &de
                                           "an enlarged, blurry desktop."),
                            value.highDpi, m_defaults.highDpi);
     m_allMonitors = makeSwitch(QStringLiteral("Full screen uses all monitors"),
-                               QStringLiteral("In full screen (Ctrl+Alt+Enter), the window spans "
+                               QStringLiteral("In full screen (Ctrl+Alt+Enter by default), the window spans "
                                               "every monitor (not on Wayland)."),
                                value.allMonitors, m_defaults.allMonitors);
     m_remoteCursor = makeSwitch(QStringLiteral("Show the remote pointer shape"),
@@ -278,9 +257,6 @@ VncOptionsEditor::VncOptionsEditor(const VncOptions &value, const VncOptions &de
     m_encryption = makeBox(vncEncryptionChoices(), value.encryption, m_defaults.encryption);
     m_encryption->setToolTip(QStringLiteral("Plain VNC is not encrypted; a jump host encrypts "
                                             "any server."));
-    m_autoReconnect = makeSwitch(QStringLiteral("Reconnect automatically if the network drops"),
-                                 QStringLiteral("Tries again for about half a minute."),
-                                 value.autoReconnect, m_defaults.autoReconnect);
 
     m_listen = makeSwitch(QStringLiteral("Wait for the server to connect (listen mode)"),
                           QStringLiteral("Reverse VNC: the remote computer connects to this one, "
@@ -324,11 +300,9 @@ VncOptionsEditor::VncOptionsEditor(const VncOptions &value, const VncOptions &de
     auto *connectionPage = section(QStringLiteral("Connection"));
     // The same cards as every session type: General, Logon, then VNC's own.
     auto *connection = addFormCard(connectionPage, QStringLiteral("General"), this);
-    connection->addRow(QString(), m_autoReconnect);
-    // The session type's wait and tries, inherited until set here.
-    m_reconnectDelay = reconnectDelayBox(value.reconnectDelay, m_defaults.reconnectDelay);
-    m_reconnectAttempts = reconnectAttemptsBox(value.reconnectAttempts, m_defaults.reconnectAttempts);
-    addReconnectRows(connection, m_autoReconnect, m_reconnectDelay, m_reconnectAttempts);
+    m_reconnect = std::make_unique<ReconnectEditorRows>(
+        connection, QStringLiteral("Reconnect automatically if the network drops"), value.reconnect,
+        m_defaults.reconnect, this);
     connection = addFormCard(connectionPage, QStringLiteral("Logon"), this);
     connection->addRow(QStringLiteral("Encryption:"), m_encryption);
     connection = addFormCard(connectionPage, QStringLiteral("Listening"), this);
@@ -358,9 +332,7 @@ VncOptions VncOptionsEditor::value() const
     };
     options.remoteCursor = switchValue(m_remoteCursor, m_defaults.remoteCursor);
     options.clipboard = switchValue(m_clipboard, m_defaults.clipboard);
-    options.autoReconnect = switchValue(m_autoReconnect, m_defaults.autoReconnect);
-    options.reconnectDelay = m_reconnectDelay->value();
-    options.reconnectAttempts = m_reconnectAttempts->value();
+    options.reconnect = m_reconnect->value();
     options.highDpi = switchValue(m_highDpi, m_defaults.highDpi);
     options.allMonitors = switchValue(m_allMonitors, m_defaults.allMonitors);
     options.listen = m_listen->isChecked() ? 1 : -1;

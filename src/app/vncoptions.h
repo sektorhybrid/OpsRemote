@@ -30,10 +30,7 @@ struct VncOptions
     // On/off options: 1 on, 0 off, -1 the default.
     int remoteCursor = -1; // the server's pointer shape, drawn locally
     int clipboard = -1; // copy and paste text both ways
-    int autoReconnect = -1;
-    // Wait and tries (reconnect.h); 0 s and -1: the Preferences'.
-    int reconnectDelay = 0;
-    int reconnectAttempts = -1;
+    ReconnectOptions reconnect; // reconnect.h
     int highDpi = -1; // one remote pixel per physical pixel
     int allMonitors = -1; // full screen spans every monitor
     // Read from older files only: a session's SSH tunnel, now its jump host
@@ -76,9 +73,6 @@ public:
 
     VncOptions value() const;
 
-signals:
-    void changed();
-
 private:
     VncOptions m_defaults;
     QComboBox *m_resolution = nullptr;
@@ -87,9 +81,7 @@ private:
     QComboBox *m_encryption = nullptr;
     QCheckBox *m_remoteCursor = nullptr;
     QCheckBox *m_clipboard = nullptr;
-    QCheckBox *m_autoReconnect = nullptr;
-    QSpinBox *m_reconnectDelay = nullptr; // reconnect.h
-    QSpinBox *m_reconnectAttempts = nullptr;
+    std::unique_ptr<ReconnectEditorRows> m_reconnect;
     QCheckBox *m_highDpi = nullptr;
     QCheckBox *m_allMonitors = nullptr;
     QCheckBox *m_listen = nullptr;

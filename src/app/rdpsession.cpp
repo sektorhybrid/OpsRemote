@@ -12,7 +12,6 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
-#include <QSaveFile>
 #include <QMetaObject>
 #include <QTimer>
 
@@ -525,7 +524,7 @@ void RdpSession::run(RdpConnectionSettings settings)
         }
     }
     // Server-side support for resuming the session after a reconnect.
-    freerdp_settings_set_bool(rdp, FreeRDP_AutoReconnectionEnabled, options.autoReconnect == 1);
+    freerdp_settings_set_bool(rdp, FreeRDP_AutoReconnectionEnabled, options.reconnect.autoReconnect == 1);
     freerdp_settings_set_bool(rdp, FreeRDP_FastPathInput, TRUE);
     freerdp_settings_set_bool(rdp, FreeRDP_FastPathOutput, TRUE);
     freerdp_settings_set_bool(rdp, FreeRDP_IgnoreCertificate, FALSE);
@@ -637,7 +636,7 @@ void RdpSession::run(RdpConnectionSettings settings)
                       : QStringLiteral("Could not connect: %1")
                             .arg(text(freerdp_get_last_error_string(code)));
     } else {
-        const bool reconnect = settings.options.autoReconnect == 1;
+        const bool reconnect = settings.options.reconnect.autoReconnect == 1;
         for (;;) {
             HANDLE handles[MAXIMUM_WAIT_OBJECTS];
             while (!freerdp_shall_disconnect_context(context)) {
@@ -664,10 +663,10 @@ void RdpSession::run(RdpConnectionSettings settings)
                 m_clipboard->attach(nullptr);
             bool resumed = false;
             // The session type's wait and tries (reconnect.h); 0 keeps trying.
-            const int attempts = settings.options.reconnectAttempts < 0 ? DefaultReconnectAttempts
-                                                                        : settings.options.reconnectAttempts;
-            const int delay = settings.options.reconnectDelay > 0 ? settings.options.reconnectDelay
-                                                                 : DefaultReconnectDelay;
+            // On this worker thread FreeRDP reconnects itself, so the tries
+            // are counted here rather than by a Reconnector.
+            const int attempts = settings.options.reconnect.attempts;
+            const int delay = settings.options.reconnect.delay;
             for (int attempt = 1; mayReconnect(attempt - 1, attempts) && !m_stopping && !resumed; ++attempt) {
                 QMetaObject::invokeMethod(this, [this, attempt, attempts] {
                     emit statusMessage(QStringLiteral("Connection lost. Reconnecting (%1)…")
@@ -986,13 +985,7 @@ unsigned long RdpSession::verifyTunnelledCertificate(const QString &subject,
         return 0;
     if (decision == RdpCertificateDecision::AcceptAndSave) {
         lines.append(m_certificateName + QLatin1Char(' ') + fingerprint);
-        QDir().mkpath(m_configPath);
-        QSaveFile file(path);
-        if (file.open(QIODevice::WriteOnly | QIODevice::Text)) {
-            file.write((lines.join(QLatin1Char('\n')) + QLatin1Char('\n')).toUtf8());
-            if (file.commit())
-                restrictToOwner(path);
-        }
+        savePrivateFile(path, (lines.join(QLatin1Char('\n')) + QLatin1Char('\n')).toUtf8());
     }
     // Never saved in FreeRDP's own store, where the name is only 127.0.0.1.
     return 2;

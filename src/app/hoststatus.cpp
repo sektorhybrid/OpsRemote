@@ -215,7 +215,7 @@ bool HostStatusChecker::shutdown(int timeoutMs)
     const bool done = m_thread->wait(timeoutMs);
     if (!done) {
         // Never destroy a running thread: leave it (and its worker) behind.
-        qWarning() << "Host-status check did not finish before shutdown deadline";
+        qWarning() << "Host status: the check did not finish before the shutdown deadline";
         m_thread->setParent(nullptr);
     }
     m_thread = nullptr;

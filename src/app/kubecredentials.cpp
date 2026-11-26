@@ -24,7 +24,6 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRegularExpression>
-#include <QSaveFile>
 #include <QTreeWidget>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -35,16 +34,6 @@ namespace {
 QString indexPath()
 {
     return QDir(kubeCredentialsFolder()).filePath(QStringLiteral("credentials.yaml"));
-}
-
-bool writePrivate(const QString &path, const QByteArray &data)
-{
-    QDir().mkpath(QFileInfo(path).absolutePath());
-    QSaveFile file(path);
-    if (!file.open(QIODevice::WriteOnly) || file.write(data) != data.size() || !file.commit())
-        return false;
-    QFile::setPermissions(path, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
-    return true;
 }
 
 QString readFile(const QString &path)
@@ -110,7 +99,7 @@ void saveKubeCredentials(const QList<KubeCredential> &credentials)
     }
     YAML::Emitter emitter;
     emitter << node;
-    writePrivate(indexPath(), QByteArray(emitter.c_str()) + '\n');
+    savePrivateFile(indexPath(), QByteArray(emitter.c_str()) + '\n');
 }
 
 QStringList kubeCredentialNames()
@@ -197,7 +186,7 @@ KubeCredentialsWindow::KubeCredentialsWindow(Read read, Write write, Remove remo
     connect(m_show, &QPushButton::clicked, this, &KubeCredentialsWindow::show);
     connect(m_delete, &QPushButton::clicked, this, &KubeCredentialsWindow::remove);
     connect(folder, &QPushButton::clicked, this, [] {
-        QDir().mkpath(kubeCredentialsFolder());
+        makePrivateFolder(kubeCredentialsFolder());
         QDesktopServices::openUrl(QUrl::fromLocalFile(kubeCredentialsFolder()));
     });
     connect(m_list, &QTreeWidget::currentItemChanged, this, &KubeCredentialsWindow::updateButtons);
@@ -294,7 +283,7 @@ bool KubeCredentialsWindow::add(const QString &text, const QString &suggestedNam
         credential.file = base + QStringLiteral(".yaml");
         for (int number = 2; QFile::exists(QDir(kubeCredentialsFolder()).filePath(credential.file)); ++number)
             credential.file = QStringLiteral("%1-%2.yaml").arg(base).arg(number);
-        if (!writePrivate(QDir(kubeCredentialsFolder()).filePath(credential.file), text.toUtf8())) {
+        if (!savePrivateFile(QDir(kubeCredentialsFolder()).filePath(credential.file), text.toUtf8())) {
             QMessageBox::warning(this, windowTitle(), QStringLiteral("Could not write settings/kube/%1.").arg(credential.file));
             return false;
         }

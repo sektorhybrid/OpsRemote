@@ -73,7 +73,7 @@ void logError(const char *format, ...)
     std::vsnprintf(buffer, sizeof buffer, format, arguments);
     va_end(arguments);
     lastError = QString::fromUtf8(buffer).trimmed();
-    qInfo("VNC error: %s", qUtf8Printable(lastError));
+    qInfo("VNC: error: %s", qUtf8Printable(lastError));
 }
 
 VncSession *ownerOf(rfbClient *client)

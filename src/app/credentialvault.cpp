@@ -10,7 +10,6 @@
 #include <QFile>
 #include <QFileDevice>
 #include <QFileInfo>
-#include <QSaveFile>
 
 #include <sodium.h>
 #include <yaml-cpp/yaml.h>
@@ -344,17 +343,10 @@ bool CredentialVault::saveEncryptedData(QString *error)
     contents.append(reinterpret_cast<const char *>(nonce.data()), nonce.size());
     contents.append(ciphertext);
 
-    if (!QDir().mkpath(QFileInfo(m_filePath).absolutePath())) {
-        setError(error, QStringLiteral("Could not create the credential vault directory."));
+    QString problem;
+    if (!savePrivateFile(m_filePath, contents, &problem)) {
+        setError(error, problem);
         return false;
     }
-    QSaveFile file(m_filePath);
-    if (!file.open(QIODevice::WriteOnly)
-        || file.write(contents) != contents.size()
-        || !file.commit()) {
-        setError(error, file.errorString());
-        return false;
-    }
-    restrictToOwner(m_filePath);
     return true;
 }

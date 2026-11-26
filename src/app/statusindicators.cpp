@@ -107,8 +107,9 @@ void TabPrompt::setInStrip(bool inStrip)
 }
 
 void TabPrompt::set(const QString &text, bool warning, const QList<Action> &actions,
-                    const std::function<void()> &dismiss)
+                    const std::function<void()> &dismiss, const QString &owner)
 {
+    m_owner = owner;
     m_text = text;
     m_warning = warning;
     m_actions = actions;
@@ -116,9 +117,9 @@ void TabPrompt::set(const QString &text, bool warning, const QList<Action> &acti
     emit changed();
 }
 
-void TabPrompt::clear()
+void TabPrompt::clear(const QString &owner)
 {
-    if (!isActive())
+    if (!isActive() || owner != m_owner)
         return;
     m_text.clear();
     m_actions.clear();
@@ -403,11 +404,24 @@ void placeOverlay(QWidget *panel, QWidget *anchor, bool below)
 
 } // namespace
 
-void showMessageList(QWidget *anchor, const QString &title, const QList<MessageLog::Entry> &entries,
-                     const std::function<void()> &clearAll, bool below)
+namespace {
+// The Messages and Transfers lists' popup: a see-through window holding a
+// card with round corners, its edge and background from the look, so it
+// stands out from the window behind; 64 characters wide, with a bold title
+// and a flat button at the right.
+struct ListCard
 {
-    // A see-through window holding a card with round corners, its edge and
-    // background from the look, so it stands out from the window behind.
+    OverlayPanel *popup;
+    QFrame *card;
+    QVBoxLayout *layout;
+    QHBoxLayout *header; // the title and the button
+    QPushButton *button;
+    int width;
+    int unit; // spacing that follows the font size
+};
+
+ListCard listCard(QWidget *anchor, const QString &title, const QString &buttonText)
+{
     auto *popup = new OverlayPanel(anchor);
     auto *outer = new QVBoxLayout(popup);
     outer->setContentsMargins(0, 0, 0, 0);
@@ -417,7 +431,7 @@ void showMessageList(QWidget *anchor, const QString &title, const QList<MessageL
     outer->addWidget(card);
     const int width = popup->fontMetrics().averageCharWidth() * 64;
     popup->setFixedWidth(width);
-    const int unit = popup->fontMetrics().height(); // spacing that follows the font size
+    const int unit = popup->fontMetrics().height();
     auto *layout = new QVBoxLayout(card);
     layout->setContentsMargins(unit, unit * 3 / 4, unit, unit * 3 / 4);
     layout->setSpacing(unit / 2);
@@ -429,11 +443,19 @@ void showMessageList(QWidget *anchor, const QString &title, const QList<MessageL
     headingFont.setBold(true);
     heading->setFont(headingFont);
     header->addWidget(heading, 1);
-    auto *clear = new QPushButton(QStringLiteral("Clear all"), card);
-    clear->setFlat(true);
-    clear->setEnabled(!entries.isEmpty());
-    header->addWidget(clear);
+    auto *button = new QPushButton(buttonText, card);
+    button->setFlat(true);
+    header->addWidget(button);
     layout->addLayout(header);
+    return {popup, card, layout, header, button, width, unit};
+}
+}
+
+void showMessageList(QWidget *anchor, const QString &title, const QList<MessageLog::Entry> &entries,
+                     const std::function<void()> &clearAll, bool below)
+{
+    const auto [popup, card, layout, header, clear, width, unit] = listCard(anchor, title, QStringLiteral("Clear all"));
+    clear->setEnabled(!entries.isEmpty());
 
     auto *list = new QWidget;
     auto *rows = new QVBoxLayout(list);
@@ -999,29 +1021,9 @@ QString stateText(const TransferList::Transfer &transfer)
 void showTransferList(QWidget *anchor, const std::function<bool(QWidget *)> &include,
                       const std::function<QString(QWidget *)> &whereOf, bool below)
 {
-    auto *popup = new OverlayPanel(anchor);
-    auto *outer = new QVBoxLayout(popup);
-    outer->setContentsMargins(0, 0, 0, 0);
-    auto *card = new QFrame(popup);
-    card->setObjectName(QStringLiteral("messageList"));
-    card->setStyleSheet(listCardStyle(card));
-    outer->addWidget(card);
-    const int width = popup->fontMetrics().averageCharWidth() * 64;
-    popup->setFixedWidth(width);
-    const int unit = popup->fontMetrics().height();
-    auto *layout = new QVBoxLayout(card);
-    layout->setContentsMargins(unit, unit * 3 / 4, unit, unit * 3 / 4);
-    layout->setSpacing(unit / 2);
-    auto *header = new QHBoxLayout;
-    auto *heading = new QLabel(include ? QStringLiteral("Transfers in this tab") : QStringLiteral("Transfers"), card);
-    QFont headingFont = heading->font();
-    headingFont.setBold(true);
-    heading->setFont(headingFont);
-    header->addWidget(heading, 1);
-    auto *clear = new QPushButton(QStringLiteral("Clear done"), card);
-    clear->setFlat(true);
-    header->addWidget(clear);
-    layout->addLayout(header);
+    const auto [popup, card, layout, header, clear, width, unit] =
+        listCard(anchor, include ? QStringLiteral("Transfers in this tab") : QStringLiteral("Transfers"),
+                 QStringLiteral("Clear done"));
     auto *list = new QWidget(card);
     auto *rows = new QVBoxLayout(list);
     rows->setContentsMargins(0, 0, 0, 0);

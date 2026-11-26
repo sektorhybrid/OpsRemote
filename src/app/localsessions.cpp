@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "localsessions.h"
+#include "appdirs.h"
 #include "capabilities.h"
 #include "filedialogs.h"
 #include "formcard.h"
@@ -14,6 +15,7 @@
 
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -42,7 +44,6 @@ const QString Wsl = QStringLiteral("WSL");
 const QString Docker = QStringLiteral("Container (Docker)");
 const QString Kubernetes = QStringLiteral("Container (Kubernetes)");
 // In kubectl's arguments: the kubeconfig written on the SSH server.
-const QString RemoteKubeconfig = QStringLiteral("@OPSREMOTE-KUBECONFIG@");
 
 // bash when the container has it, else sh.
 const QString AnyShell = QStringLiteral("command -v bash >/dev/null 2>&1 && exec bash || exec sh");
@@ -184,27 +185,21 @@ QStringList kubectlLogOn(const LocalSessionOptions &options, const QString &kube
     return arguments;
 }
 
-// A private file here with the text; empty when it cannot be written.
-QString writePrivateFile(const QString &text)
+// The name pattern of the kubeconfigs written for kubectl here.
+const QString TemporaryKubeconfig = QStringLiteral("opsremote-kube-XXXXXX.yaml");
+
+// A private temporary kubeconfig with the text; empty when it cannot be
+// written. Owner-only before the text is in it.
+QString temporaryKubeconfig(const QString &text)
 {
-    QTemporaryFile file(QDir::temp().filePath(QStringLiteral("opsremote-kube-XXXXXX.yaml")));
+    QTemporaryFile file(QDir::temp().filePath(TemporaryKubeconfig));
     file.setAutoRemove(false);
     if (!file.open())
         return {};
-    file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+    restrictToOwner(file.fileName());
     file.write(text.toUtf8());
     file.close();
     return file.fileName();
-}
-
-// On an SSH server: writes the kubeconfig privately, runs the command
-// (where RemoteKubeconfig stands for its path), and removes it.
-QString withRemoteKubeconfig(const QString &kubeconfig, QString command)
-{
-    command.replace(QLatin1Char('\'') + RemoteKubeconfig + QLatin1Char('\''), QStringLiteral("\"$k\""));
-    return QStringLiteral("umask 077; k=$(mktemp \"${TMPDIR:-/tmp}/opsremote-kube-XXXXXX\") || exit 1; "
-                          "printf '%s' '%1' | base64 -d > \"$k\"; %2; s=$?; rm -f \"$k\"; exit $s")
-        .arg(QString::fromLatin1(kubeconfig.toUtf8().toBase64()), command);
 }
 
 // docker's (or podman's) arguments for a context or a remote engine.
@@ -501,6 +496,16 @@ LocalCommand dockerCommand(const LocalSessionOptions &options, const ContainerPr
     return command;
 }
 
+void removeLeftoverKubeconfigs()
+{
+    const QDir temp = QDir::temp();
+    const QString pattern = QString(TemporaryKubeconfig).replace(QStringLiteral("XXXXXX"), QStringLiteral("*"));
+    for (const auto &info : temp.entryInfoList({pattern}, QDir::Files)) {
+        if (info.lastModified().secsTo(QDateTime::currentDateTime()) > 120)
+            QFile::remove(info.filePath());
+    }
+}
+
 LocalCommand kubernetesCommand(const LocalSessionOptions &options, const ContainerPreferences &preferences,
                                const QString &secret)
 {
@@ -508,7 +513,7 @@ LocalCommand kubernetesCommand(const LocalSessionOptions &options, const Contain
     const auto kubeconfig = kubeconfigText(options, secret);
     QString written;
     if (!kubeconfig.isEmpty())
-        written = runsOverSsh(options) ? RemoteKubeconfig : (command.temporaryFile = writePrivateFile(kubeconfig));
+        written = runsOverSsh(options) ? RemoteFilePlaceholder : (command.temporaryFile = temporaryKubeconfig(kubeconfig));
     QStringList arguments = kubectlLogOn(options, written);
     if (!options.kubeNamespace.isEmpty())
         arguments << QStringLiteral("-n") << options.kubeNamespace;
@@ -518,8 +523,7 @@ LocalCommand kubernetesCommand(const LocalSessionOptions &options, const Contain
     arguments << QStringLiteral("--") << shellArguments(options.shell, preferences.kubernetes.shell);
     if (runsOverSsh(options)) {
         command.remoteCommand = remoteLine(QStringLiteral("kubectl"), arguments);
-        if (!kubeconfig.isEmpty())
-            command.remoteCommand = withRemoteKubeconfig(kubeconfig, command.remoteCommand);
+        command.remoteFile = kubeconfig.toUtf8(); // through the channel's input (sshsession.h)
         return command;
     }
     command.program = containerProgram(QStringLiteral("kubectl"));
@@ -1108,7 +1112,7 @@ void LocalSessionEditor::refreshKubernetes(QComboBox *target, const QStringList 
         return;
     }
     // Listing contexts needs no context.
-    auto logOn = kubectlLogOn(options, kubeconfig.isEmpty() ? QString() : (overSsh() ? RemoteKubeconfig : QStringLiteral("@LOCAL@")));
+    auto logOn = kubectlLogOn(options, kubeconfig.isEmpty() ? QString() : (overSsh() ? RemoteFilePlaceholder : QStringLiteral("@LOCAL@")));
     if (target == m_context) {
         const int at = logOn.indexOf(QStringLiteral("--context"));
         if (at >= 0)
@@ -1177,7 +1181,7 @@ void LocalSessionEditor::fillFrom(QComboBox *target, const QString &program, con
         // The written kubeconfig, private, removed when the program ends.
         QString written;
         if (!kubeconfig.isEmpty()) {
-            written = writePrivateFile(kubeconfig);
+            written = temporaryKubeconfig(kubeconfig);
             arguments.replaceInStrings(QStringLiteral("@LOCAL@"), written);
         }
         auto *process = new QProcess(this);
@@ -1213,9 +1217,8 @@ void LocalSessionEditor::fillFrom(QComboBox *target, const QString &program, con
     auto connection = *settings;
     connection.openShell = false;
     auto *ssh = new SshSession(this);
-    QString command = remoteLine(program, arguments);
-    if (!kubeconfig.isEmpty())
-        command = withRemoteKubeconfig(kubeconfig, command);
+    const QString command = remoteLine(program, arguments);
+    const QByteArray file = kubeconfig.toUtf8(); // through the channel's input (sshsession.h)
     connect(ssh, &SshSession::hostKeyVerificationRequired, ssh,
             [ssh] { ssh->answerHostKey(SshHostKeyDecision::Reject); });
     // A key's passphrase or a password is asked as everywhere else.
@@ -1227,7 +1230,9 @@ void LocalSessionEditor::fillFrom(QComboBox *target, const QString &program, con
                                 const QList<bool> &echo) {
                 askSshLogOn(window(), ssh, server, instruction, prompts, echo);
             });
-    connect(ssh, &SshSession::connected, ssh, [ssh, command, timeout] { ssh->runCommand(command, false, timeout, 256 * 1024); });
+    connect(ssh, &SshSession::connected, ssh, [ssh, command, file, timeout] {
+        ssh->runCommand(command, false, timeout, 256 * 1024, file);
+    });
     connect(ssh, &SshSession::commandFinished, this,
             [ssh, show](int, int exitStatus, const QByteArray &output, bool, const QString &error, int) {
                 QString problem;

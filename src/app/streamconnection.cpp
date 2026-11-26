@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "streamconnection.h"
+#include "tcpkeepalive.h"
 
 #include <QSerialPort>
 #include <QTcpSocket>
@@ -94,6 +95,13 @@ QString TelnetConnection::description() const
     return QStringLiteral("Telnet %1:%2").arg(m_host).arg(m_port);
 }
 
+void StreamConnection::watchForDeadNetwork(QTcpSocket *socket)
+{
+    if (m_deadNetworkSeconds > 0 && !TcpKeepalive::detectDeadNetwork(socket->socketDescriptor(), m_deadNetworkSeconds))
+        qInfo("Connection: %s: this system refused keepalive probes; a dead network is noticed later",
+              qUtf8Printable(description()));
+}
+
 void TelnetConnection::open()
 {
     close();
@@ -101,6 +109,7 @@ void TelnetConnection::open()
     m_state = State::Data;
     m_windowSizeAgreed = false;
     m_socket = new QTcpSocket(this);
+    connect(m_socket, &QTcpSocket::connected, this, [this] { watchForDeadNetwork(m_socket); });
     connect(m_socket, &QTcpSocket::connected, this, &StreamConnection::connected);
     connect(m_socket, &QTcpSocket::readyRead, this, &TelnetConnection::readSocket);
     connect(m_socket, &QTcpSocket::disconnected, this, [this] {
@@ -262,21 +271,26 @@ void TelnetConnection::sendWindowSize()
     m_socket->write(reply);
 }
 
-// ---- Rlogin ----
+// ---- Rlogin and RSH ----
 
-RloginConnection::RloginConnection(const QString &host, quint16 port, const QString &remoteUser,
-                                   const RshOptions &options, const QString &terminalType, QObject *parent)
-    : StreamConnection(parent), m_host(host), m_port(port == 0 ? 513 : port), m_remoteUser(remoteUser),
-      m_options(options), m_terminalType(terminalType.toLower().toLatin1())
+RServiceConnection::RServiceConnection(const QString &host, quint16 port, const QString &remoteUser,
+                                       const RshOptions &options, QObject *parent)
+    : StreamConnection(parent), m_host(host), m_port(port), m_remoteUser(remoteUser), m_options(options)
 {
 }
 
-QString RloginConnection::description() const
+QString RServiceConnection::localUser() const
 {
-    return QStringLiteral("Rlogin %1:%2").arg(m_host).arg(m_port);
+    return m_options.localUser.isEmpty() ? currentUserName() : m_options.localUser;
 }
 
-void RloginConnection::open()
+QString RServiceConnection::remoteUser() const
+{
+    return m_remoteUser.isEmpty() ? localUser() : m_remoteUser;
+}
+
+void RServiceConnection::connectWith(const QString &type, const std::function<QByteArray()> &request,
+                                     const QString &end)
 {
     close();
     m_closing = false;
@@ -286,28 +300,21 @@ void RloginConnection::open()
     if (!m_socket) {
         m_closing = true;
         emit disconnected(QStringLiteral("No reserved port could be used. %1 Choose \"Any port\" in the "
-                                         "session's Rlogin settings, or run OpsRemote as administrator.")
-                              .arg(m_portNote),
+                                         "session's %2 settings, or run OpsRemote as administrator.")
+                              .arg(m_portNote, type),
                           true);
         return;
     }
-    connect(m_socket, &QTcpSocket::connected, this, [this] {
-        // Client user, server user, terminal type/speed, each ending in NUL.
-        const QString localUser = m_options.localUser.isEmpty() ? currentUserName() : m_options.localUser;
-        QByteArray hello(1, '\0');
-        hello += localUser.toUtf8() + '\0';
-        hello += (m_remoteUser.isEmpty() ? localUser : m_remoteUser).toUtf8() + '\0';
-        hello += m_terminalType + "/38400" + '\0';
-        m_socket->write(hello);
+    connect(m_socket, &QTcpSocket::connected, this, [this, request] {
+        watchForDeadNetwork(m_socket);
+        m_socket->write(request());
     });
-    connect(m_socket, &QTcpSocket::readyRead, this, &RloginConnection::readSocket);
-    connect(m_socket, &QTcpSocket::disconnected, this, [this] {
+    connect(m_socket, &QTcpSocket::readyRead, this, [this] { readSocket(); });
+    connect(m_socket, &QTcpSocket::disconnected, this, [this, end] {
         if (m_closing)
             return;
         m_closing = true;
-        emit disconnected(m_started ? QStringLiteral("The server closed the connection.")
-                                    : refusedReason(m_portNote, {}),
-                          !m_started);
+        emit disconnected(m_started ? end : refusedReason(m_portNote, {}), !m_started);
     });
     connect(m_socket, &QTcpSocket::errorOccurred, this, [this](QAbstractSocket::SocketError error) {
         if (m_closing || error == QAbstractSocket::RemoteHostClosedError)
@@ -318,27 +325,74 @@ void RloginConnection::open()
     m_socket->connectToHost(m_host, m_port);
 }
 
-void RloginConnection::readSocket()
+QByteArray RServiceConnection::readAccepted(bool *first)
 {
     QByteArray data = m_socket->readAll();
+    if (first)
+        *first = false;
     if (!m_started) {
-        // The server's first byte is NUL when it accepted; anything else is
-        // its reason for refusing.
         if (data.isEmpty())
-            return;
+            return {};
         if (data.front() != '\0') {
             m_closing = true;
             emit disconnected(refusedReason(m_portNote, data), true);
             close();
-            return;
+            return {};
         }
         data.remove(0, 1);
         m_started = true;
+        if (first)
+            *first = true;
         emit connected();
-        sendWindowSize();
     }
+    return data;
+}
+
+void RServiceConnection::close()
+{
+    if (!m_socket)
+        return;
+    m_closing = true;
+    m_socket->disconnect(this);
+    m_socket->abort();
+    m_socket->deleteLater();
+    m_socket = nullptr;
+}
+
+// ---- Rlogin ----
+
+RloginConnection::RloginConnection(const QString &host, quint16 port, const QString &remoteUser,
+                                   const RshOptions &options, const QString &terminalType, QObject *parent)
+    : RServiceConnection(host, port == 0 ? 513 : port, remoteUser, options, parent),
+      m_terminalType(terminalType.toLower().toLatin1())
+{
+}
+
+void RloginConnection::open()
+{
+    connectWith(QStringLiteral("Rlogin"), [this] {
+        // Client user, server user, terminal type/speed, each ending in NUL.
+        QByteArray hello(1, '\0');
+        hello += localUser().toUtf8() + '\0';
+        hello += remoteUser().toUtf8() + '\0';
+        hello += m_terminalType + "/38400" + '\0';
+        return hello;
+    }, QStringLiteral("The server closed the connection."));
+}
+
+void RloginConnection::readSocket()
+{
+    bool first = false;
+    const QByteArray data = readAccepted(&first);
+    if (first)
+        sendWindowSize();
     if (!data.isEmpty())
         emit dataReceived(data);
+}
+
+QString RloginConnection::description() const
+{
+    return QStringLiteral("Rlogin %1:%2").arg(m_host).arg(m_port);
 }
 
 void RloginConnection::write(const QByteArray &data)
@@ -367,38 +421,18 @@ void RloginConnection::sendWindowSize()
     m_socket->write(message);
 }
 
-void RloginConnection::close()
-{
-    if (!m_socket)
-        return;
-    m_closing = true;
-    m_socket->disconnect(this);
-    m_socket->abort();
-    m_socket->deleteLater();
-    m_socket = nullptr;
-}
-
 // ---- RSH ----
 
 RshConnection::RshConnection(const QString &host, quint16 port, const QString &remoteUser,
                              const RshOptions &options, QObject *parent)
-    : StreamConnection(parent), m_host(host), m_port(port == 0 ? 514 : port), m_remoteUser(remoteUser),
-      m_options(options)
+    : RServiceConnection(host, port == 0 ? 514 : port, remoteUser, options, parent)
 {
-}
-
-QString RshConnection::description() const
-{
-    return QStringLiteral("RSH %1:%2").arg(m_host).arg(m_port);
 }
 
 void RshConnection::open()
 {
     close();
-    m_closing = false;
-    m_started = false;
     m_line.clear();
-    m_portNote.clear();
     if (m_options.command.trimmed().isEmpty()) {
         m_closing = true;
         emit disconnected(QStringLiteral("This RSH session has no command. Set one in the session's settings, "
@@ -406,63 +440,24 @@ void RshConnection::open()
                           true);
         return;
     }
-    m_socket = sourceSocket(this, m_options.sourcePort, &m_portNote);
-    if (!m_socket) {
-        m_closing = true;
-        emit disconnected(QStringLiteral("No reserved port could be used. %1 Choose \"Any port\" in the "
-                                         "session's RSH settings, or run OpsRemote as administrator.")
-                              .arg(m_portNote),
-                          true);
-        return;
-    }
-    connect(m_socket, &QTcpSocket::connected, this, [this] {
+    connectWith(QStringLiteral("RSH"), [this] {
         // No separate error channel ("0"): errors come with the output.
-        const QString localUser = m_options.localUser.isEmpty() ? currentUserName() : m_options.localUser;
         QByteArray request("0", 1);
         request += '\0';
-        request += localUser.toUtf8() + '\0';
-        request += (m_remoteUser.isEmpty() ? localUser : m_remoteUser).toUtf8() + '\0';
+        request += localUser().toUtf8() + '\0';
+        request += remoteUser().toUtf8() + '\0';
         request += m_options.command.toUtf8() + '\0';
-        m_socket->write(request);
-    });
-    connect(m_socket, &QTcpSocket::readyRead, this, &RshConnection::readSocket);
-    connect(m_socket, &QTcpSocket::disconnected, this, [this] {
-        if (m_closing)
-            return;
-        m_closing = true;
-        emit disconnected(m_started ? QStringLiteral("The command finished.") : refusedReason(m_portNote, {}),
-                          !m_started);
-    });
-    connect(m_socket, &QTcpSocket::errorOccurred, this, [this](QAbstractSocket::SocketError error) {
-        if (m_closing || error == QAbstractSocket::RemoteHostClosedError)
-            return;
-        m_closing = true;
-        emit disconnected(m_socket->errorString(), true);
-    });
-    m_socket->connectToHost(m_host, m_port);
+        return request;
+    }, QStringLiteral("The command finished."));
 }
 
 void RshConnection::readSocket()
 {
-    QByteArray data = m_socket->readAll();
-    if (!m_started) {
-        if (data.isEmpty())
-            return;
-        // NUL: running; 1 and a message: refused.
-        if (data.front() != '\0') {
-            m_closing = true;
-            emit disconnected(refusedReason(m_portNote, data), true);
-            close();
-            return;
-        }
-        data.remove(0, 1);
-        m_started = true;
-        emit connected();
-    }
+    const QByteArray data = readAccepted();
     // No terminal on the server: bare line feeds become new lines here.
     QByteArray shown;
     shown.reserve(data.size() + data.size() / 16);
-    for (const char c : std::as_const(data)) {
+    for (const char c : data) {
         if (c == '\n' && !m_lastWasCr)
             shown.append('\r');
         shown.append(c);
@@ -470,6 +465,11 @@ void RshConnection::readSocket()
     }
     if (!shown.isEmpty())
         emit dataReceived(shown);
+}
+
+QString RshConnection::description() const
+{
+    return QStringLiteral("RSH %1:%2").arg(m_host).arg(m_port);
 }
 
 void RshConnection::write(const QByteArray &data)
@@ -519,17 +519,6 @@ void RshConnection::write(const QByteArray &data)
     }
     if (!echo.isEmpty())
         emit dataReceived(echo);
-}
-
-void RshConnection::close()
-{
-    if (!m_socket)
-        return;
-    m_closing = true;
-    m_socket->disconnect(this);
-    m_socket->abort();
-    m_socket->deleteLater();
-    m_socket = nullptr;
 }
 
 // ---- Serial ----

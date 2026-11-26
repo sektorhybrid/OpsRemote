@@ -72,10 +72,13 @@ public:
     static TabPrompt *hub();
 
     // dismiss: run by the ✕ (none: no ✕). A choice (with actions) has no ✕:
-    // it stays until answered, so its options are not lost.
+    // it stays until answered, so its options are not lost. owner: who may
+    // clear it (a tab's own state, the default, or another part such as the
+    // offer to save a password, which the tab's connecting must not clear).
     void set(const QString &text, bool warning, const QList<Action> &actions,
-             const std::function<void()> &dismiss = {});
-    void clear();
+             const std::function<void()> &dismiss = {}, const QString &owner = {});
+    // Clears the prompt if owner set it.
+    void clear(const QString &owner = {});
     bool isActive() const { return !m_text.isEmpty(); }
     QString text() const { return m_text; }
     bool isWarning() const { return m_warning; }
@@ -93,6 +96,7 @@ private:
     bool m_warning = false;
     QList<Action> m_actions;
     std::function<void()> m_dismiss;
+    QString m_owner;
 };
 
 // A status-bar button of a fixed width, so nothing beside it moves when its

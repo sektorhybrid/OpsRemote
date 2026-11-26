@@ -66,6 +66,7 @@ private:
     void buildFtpPage();
     void buildRunCommandPage();
     void buildHttpRequestPage();
+    void buildTelnetPage();
     void buildRshPage();
     void buildXdmcpPage();
     void buildProxyPage();

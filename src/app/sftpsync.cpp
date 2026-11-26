@@ -39,12 +39,6 @@ bool same(const Item &a, const Item &b)
            && qAbs(a.modified.secsTo(b.modified)) <= 2;
 }
 
-QString joinRemote(const QString &folder, const QString &relative)
-{
-    if (relative.isEmpty())
-        return folder;
-    return folder.endsWith(QLatin1Char('/')) ? folder + relative : folder + QLatin1Char('/') + relative;
-}
 
 QString parentOf(const QString &relative)
 {
@@ -290,13 +284,13 @@ void SftpSyncDialog::sync()
     if (m_upload) {
         for (const auto &folder : std::as_const(m_plan.folders)) {
             ++m_pendingOperations;
-            m_session->makeDirectory(joinRemote(m_remoteRoot, folder));
+            m_session->makeDirectory(RemotePaths::join(m_remoteRoot, folder));
         }
         for (auto it = byFolder.cbegin(); it != byFolder.cend(); ++it) {
             QStringList sources;
             for (const auto &path : it.value())
                 sources.append(QDir(m_localRoot).filePath(path));
-            m_jobs.insert(m_session->upload(sources, joinRemote(m_remoteRoot, it.key()),
+            m_jobs.insert(m_session->upload(sources, RemotePaths::join(m_remoteRoot, it.key()),
                                             SftpConflictResolution::Overwrite));
         }
     } else {
@@ -308,7 +302,7 @@ void SftpSyncDialog::sync()
         for (auto it = byFolder.cbegin(); it != byFolder.cend(); ++it) {
             QStringList sources;
             for (const auto &path : it.value())
-                sources.append(joinRemote(m_remoteRoot, path));
+                sources.append(RemotePaths::join(m_remoteRoot, path));
             const QString folder = QDir(m_localRoot).filePath(it.key());
             QDir().mkpath(folder);
             m_jobs.insert(m_session->download(sources, folder, SftpConflictResolution::Overwrite));
@@ -343,7 +337,7 @@ void SftpSyncDialog::advance()
             // Relative paths from the scan, never leaving the folder.
             if (path.isEmpty() || path.split(QLatin1Char('/')).contains(QStringLiteral("..")))
                 continue;
-            remove.append(joinRemote(m_remoteRoot, path));
+            remove.append(RemotePaths::join(m_remoteRoot, path));
         }
         if (!remove.isEmpty()) {
             ++m_pendingOperations;

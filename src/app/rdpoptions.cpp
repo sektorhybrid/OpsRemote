@@ -46,14 +46,6 @@ bool validResolution(const QString &value)
            || size.match(value).hasMatch();
 }
 
-QString labelFor(const RdpChoices &choices, const QString &value)
-{
-    for (const auto &choice : choices) {
-        if (choice.first == value)
-            return choice.second;
-    }
-    return value;
-}
 }
 
 bool RdpOptions::isEmpty() const
@@ -61,8 +53,7 @@ bool RdpOptions::isEmpty() const
     return resolution.isEmpty() && colorDepth == 0 && quality.isEmpty() && security.isEmpty()
            && adminSession < 0 && clipboardText < 0 && clipboardFiles < 0
            && graphicsPipeline < 0 && highDpi < 0 && allMonitors < 0 && gateway.isEmpty()
-           && gatewayUser.isEmpty() && keyboardLayout.isEmpty() && autoReconnect < 0
-           && reconnectDelay <= 0 && reconnectAttempts < 0
+           && gatewayUser.isEmpty() && keyboardLayout.isEmpty() && reconnect == ReconnectOptions()
            && askCredentials < 0 && startProgram.isEmpty() && startFolder.isEmpty()
            && audio.isEmpty() && microphone < 0 && drives.isEmpty() && driveFolders.isEmpty()
            && printers < 0 && smartCards < 0;
@@ -93,12 +84,7 @@ RdpOptions RdpOptions::overriddenBy(const RdpOptions &session) const
         result.allMonitors = session.allMonitors;
     if (!session.keyboardLayout.isEmpty())
         result.keyboardLayout = session.keyboardLayout;
-    if (session.autoReconnect >= 0)
-        result.autoReconnect = session.autoReconnect;
-    if (session.reconnectDelay > 0)
-        result.reconnectDelay = session.reconnectDelay;
-    if (session.reconnectAttempts >= 0)
-        result.reconnectAttempts = session.reconnectAttempts;
+    result.reconnect = reconnect.overriddenBy(session.reconnect);
     if (session.askCredentials >= 0)
         result.askCredentials = session.askCredentials;
     if (!session.startProgram.isEmpty()) {
@@ -142,9 +128,8 @@ RdpOptions RdpOptions::builtIn()
     options.highDpi = 1;
     options.allMonitors = 0;
     options.keyboardLayout = QStringLiteral("auto");
-    options.autoReconnect = 1;
-    options.reconnectDelay = DefaultReconnectDelay;
-    options.reconnectAttempts = DefaultReconnectAttempts;
+    options.reconnect = ReconnectOptions::builtIn();
+    options.reconnect.autoReconnect = 1; // on for remote desktops
     options.askCredentials = 1;
     // Sound and printers are off unless chosen (globally or per session).
     options.audio = QStringLiteral("off");
@@ -159,7 +144,7 @@ RdpChoices rdpAudioChoices()
 {
     return {{QStringLiteral("local"), QStringLiteral("Play on this computer")},
             {QStringLiteral("remote"), QStringLiteral("Leave on the remote computer")},
-            {QStringLiteral("off"), QStringLiteral("Don't play")}};
+            {QStringLiteral("off"), QStringLiteral("Do not play")}};
 }
 
 RdpChoices rdpDriveChoices()
@@ -203,6 +188,15 @@ RdpChoices rdpSecurityChoices()
             {QStringLiteral("nla"), QStringLiteral("NLA (Network Level Authentication)")},
             {QStringLiteral("tls"), QStringLiteral("TLS")},
             {QStringLiteral("rdp"), QStringLiteral("Legacy RDP encryption")}};
+}
+
+QString labelFor(const RdpChoices &choices, const QString &value)
+{
+    for (const auto &choice : choices) {
+        if (choice.first == value)
+            return choice.second;
+    }
+    return value;
 }
 
 RdpChoices rdpKeyboardChoices()
@@ -320,8 +314,7 @@ RdpOptions rdpOptionsFromYaml(const YAML::Node &node)
         readText("gateway", options.gateway);
         readText("gateway_user", options.gatewayUser);
         readChoice("keyboard_layout", rdpKeyboardChoices(), options.keyboardLayout);
-        readSwitch("auto_reconnect", options.autoReconnect);
-        readReconnectTiming(node, options.reconnectDelay, options.reconnectAttempts);
+        options.reconnect = reconnectOptionsFromYaml(node);
         readSwitch("ask_credentials", options.askCredentials);
         readText("start_program", options.startProgram);
         readText("start_folder", options.startFolder);
@@ -366,9 +359,7 @@ void rdpOptionsToYaml(const RdpOptions &options, YAML::Node &node)
         node["gateway_user"] = options.gatewayUser.toStdString();
     if (!options.keyboardLayout.isEmpty())
         node["keyboard_layout"] = options.keyboardLayout.toStdString();
-    if (options.autoReconnect >= 0)
-        node["auto_reconnect"] = options.autoReconnect == 1;
-    writeReconnectTiming(node, options.reconnectDelay, options.reconnectAttempts);
+    reconnectOptionsToYaml(options.reconnect, node);
     if (options.askCredentials >= 0)
         node["ask_credentials"] = options.askCredentials == 1;
     if (!options.startProgram.isEmpty())
@@ -406,24 +397,18 @@ void saveRdpDefaults(const RdpOptions &options)
     savePreferencesSection("rdp", node);
 }
 
-RdpOptionsEditor::RdpOptionsEditor(const RdpOptions &value, bool withDefault,
-                                   const RdpOptions &defaults, QWidget *parent)
-    : QWidget(parent), m_defaults(RdpOptions::builtIn().overriddenBy(defaults)),
-      m_withDefault(withDefault)
+RdpOptionsEditor::RdpOptionsEditor(const RdpOptions &value, const RdpOptions &defaults, QWidget *parent)
+    : QWidget(parent), m_defaults(RdpOptions::builtIn().overriddenBy(defaults))
 {
-    const auto makeBox = [this, withDefault](const RdpChoices &choices, const QString &current,
-                                             const QString &defaultValue) {
+    const auto makeBox = [this](const RdpChoices &choices, const QString &current, const QString &defaultValue) {
         auto *box = new QComboBox(this);
-        if (withDefault)
-            addInheritedItem(box, QString(labelFor(choices, defaultValue)),
-                         QString());
+        addInheritedItem(box, QString(labelFor(choices, defaultValue)), QString());
         // The inherited entry comes first and the same value is not listed
         // again; a saved value equal to it shows as inherited.
         for (const auto &choice : choices)
-            if (!withDefault || choice.first != defaultValue)
+            if (choice.first != defaultValue)
                 box->addItem(choice.second, choice.first);
         box->setCurrentIndex(qMax(0, box->findData(current)));
-        connect(box, &QComboBox::currentIndexChanged, this, &RdpOptionsEditor::changed);
         return box;
     };
     m_resolution = makeBox(rdpResolutionChoices(), value.resolution, defaults.resolution);
@@ -437,7 +422,6 @@ RdpOptionsEditor::RdpOptionsEditor(const RdpOptions &value, bool withDefault,
         auto *box = new QCheckBox(text, this);
         box->setToolTip(tip);
         box->setChecked((own >= 0 ? own : fallback) == 1);
-        connect(box, &QCheckBox::toggled, this, &RdpOptionsEditor::changed);
         return box;
     };
     m_clipboardText = makeSwitch(QStringLiteral("Share clipboard text"),
@@ -463,19 +447,16 @@ RdpOptionsEditor::RdpOptionsEditor(const RdpOptions &value, bool withDefault,
                                           "smaller desktop."),
                            value.highDpi, m_defaults.highDpi);
     m_allMonitors = makeSwitch(QStringLiteral("Full screen uses all monitors"),
-                               QStringLiteral("In full screen (Ctrl+Alt+Enter), the remote desktop "
+                               QStringLiteral("In full screen (Ctrl+Alt+Enter by default), the remote desktop "
                                               "gets one monitor per local monitor. Needs a server "
                                               "that allows several monitors."),
                                value.allMonitors, m_defaults.allMonitors);
-    const auto makeText = [this, withDefault](const QString &current, const QString &defaultValue,
-                                              const QString &emptyText, const QString &tip) {
+    const auto makeText = [this](const QString &current, const QString &defaultValue, const QString &emptyText,
+                                 const QString &tip) {
         auto *edit = new QLineEdit(current, this);
-        edit->setPlaceholderText(withDefault && !defaultValue.isEmpty()
-                                     ? defaultValue
-                                     : emptyText);
+        edit->setPlaceholderText(!defaultValue.isEmpty() ? defaultValue : emptyText);
         edit->setToolTip(tip);
         edit->setMaxLength(255);
-        connect(edit, &QLineEdit::textChanged, this, &RdpOptionsEditor::changed);
         return edit;
     };
     m_gateway = makeText(value.gateway, defaults.gateway, QStringLiteral("None (connect directly)"),
@@ -491,10 +472,6 @@ RdpOptionsEditor::RdpOptionsEditor(const RdpOptions &value, bool withDefault,
     m_keyboard->setToolTip(QStringLiteral("The remote session's keyboard layout. Keys are sent "
                                           "by position, so this decides which characters they "
                                           "type there."));
-    m_autoReconnect = makeSwitch(QStringLiteral("Reconnect automatically if the network drops"),
-                                 QStringLiteral("Tries again for about half a minute, resuming the "
-                                                "same remote session."),
-                                 value.autoReconnect, m_defaults.autoReconnect);
     m_askCredentials = makeSwitch(QStringLiteral("Ask for the password before connecting"),
                                   QStringLiteral("Off: when no password is saved, connect first "
                                                  "and log on at the remote computer's own screen "
@@ -549,17 +526,14 @@ RdpOptionsEditor::RdpOptionsEditor(const RdpOptions &value, bool withDefault,
         page->addStretch();
         alignFormLabels(this); // all tabs alike
     };
-    // Inherited or the session's own, per row (inheritance.h); the
-    // Preferences' editor has no default to inherit.
-    // Marks what applyInheritance() needs beyond the drop-downs' and numbers'
-    // own marks: a switch's inherited state, a text field's inherited value.
-    const auto inherit = [this](auto *control, const auto &inherited) -> QWidget * {
-        if (m_withDefault) {
-            if constexpr (std::is_same_v<std::remove_pointer_t<decltype(control)>, QCheckBox>)
-                control->setProperty("inheritedOn", bool(inherited));
-            else if constexpr (std::is_same_v<std::remove_pointer_t<decltype(control)>, QLineEdit>)
-                control->setProperty("inheritedText", QString(inherited));
-        }
+    // Inherited or the session's own, per row (inheritance.h). Marks what
+    // applyInheritance() needs beyond the drop-downs' and numbers' own marks:
+    // a switch's inherited state, a text field's inherited value.
+    const auto inherit = [](auto *control, const auto &inherited) -> QWidget * {
+        if constexpr (std::is_same_v<std::remove_pointer_t<decltype(control)>, QCheckBox>)
+            control->setProperty("inheritedOn", bool(inherited));
+        else if constexpr (std::is_same_v<std::remove_pointer_t<decltype(control)>, QLineEdit>)
+            control->setProperty("inheritedText", QString(inherited));
         return control;
     };
     auto *displayPage = section(QStringLiteral("Display"));
@@ -602,11 +576,9 @@ RdpOptionsEditor::RdpOptionsEditor(const RdpOptions &value, bool withDefault,
     // The same cards as every session type: General, Logon, then RDP's own.
     auto *connection = addFormCard(connectionPage, QStringLiteral("General"), this);
     connection->addRow(QString(), inherit(m_admin, m_defaults.adminSession == 1));
-    connection->addRow(QString(), inherit(m_autoReconnect, m_defaults.autoReconnect == 1));
-    // The session type's wait and tries, inherited until set here.
-    m_reconnectDelay = reconnectDelayBox(value.reconnectDelay, m_defaults.reconnectDelay);
-    m_reconnectAttempts = reconnectAttemptsBox(value.reconnectAttempts, m_defaults.reconnectAttempts);
-    addReconnectRows(connection, m_autoReconnect, m_reconnectDelay, m_reconnectAttempts);
+    m_reconnect = std::make_unique<ReconnectEditorRows>(
+        connection, QStringLiteral("Reconnect automatically if the network drops"), value.reconnect,
+        m_defaults.reconnect, this, QStringLiteral("Resumes the same remote session."));
     connection = addFormCard(connectionPage, QStringLiteral("Logon"), this);
     connection->addRow(QStringLiteral("Security:"), m_security);
     connection->addRow(QString(), inherit(m_askCredentials, m_defaults.askCredentials == 1));
@@ -639,9 +611,9 @@ RdpOptions RdpOptionsEditor::value() const
     options.security = m_security->currentData().toString();
     // For a session, store a switch only when it differs from the default, so
     // changing the default later still applies to this session.
-    const auto switchValue = [this](const QCheckBox *box, int fallback) {
+    const auto switchValue = [](const QCheckBox *box, int fallback) {
         const int value = box->isChecked() ? 1 : 0;
-        return m_withDefault && value == fallback ? -1 : value;
+        return value == fallback ? -1 : value;
     };
     options.adminSession = switchValue(m_admin, m_defaults.adminSession);
     options.clipboardText = switchValue(m_clipboardText, m_defaults.clipboardText);
@@ -652,9 +624,7 @@ RdpOptions RdpOptionsEditor::value() const
     options.gateway = m_gateway->text().trimmed();
     options.gatewayUser = m_gatewayUser->text().trimmed();
     options.keyboardLayout = m_keyboard->currentData().toString();
-    options.autoReconnect = switchValue(m_autoReconnect, m_defaults.autoReconnect);
-    options.reconnectDelay = m_reconnectDelay->value();
-    options.reconnectAttempts = m_reconnectAttempts->value();
+    options.reconnect = m_reconnect->value();
     options.askCredentials = switchValue(m_askCredentials, m_defaults.askCredentials);
     options.startProgram = m_startProgram->text().trimmed();
     options.startFolder = m_startFolder->text().trimmed();

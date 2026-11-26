@@ -280,6 +280,13 @@ protected:
 private:
     enum class ItemKind { Folder, Session };
 
+    // The session window, one for New Session and Edit Saved Session: the
+    // common fields and every protocol's tabs, filled from a session (empty
+    // for a new one); read() gives the edited session back.
+    struct SessionWindow;
+    SessionWindow buildSessionWindow(QDialog &dialog, const SessionDefinition &value, QTreeWidgetItem *folder,
+                                     bool isNew, bool fixedProtocol);
+
     void createMenus();
     // Gives action the configurable shortcut id and keeps it up to date.
     void bindShortcut(QAction *action, const QString &id);
@@ -306,6 +313,11 @@ private:
     void syncMenuChecks();
     TerminalAppearance effectiveTerminalAppearance() const;
     bool ensureVaultUnlocked();
+    // After page logged on with a password typed at a prompt: asks in the
+    // tab whether to keep it for the saved session key (none for quick
+    // connections); replaces: the saved one had been rejected.
+    void offerToSavePassword(QWidget *page, const QString &key, const QString &label, const QString &password,
+                             bool replaces);
     bool appendSessionYaml(const YAML::Node &roots, QTreeWidgetItem *parent, QString *error);
     YAML::Node sessionsDocument(const QTreeWidgetItem *root) const;
     bool appendCompactSessionYaml(const YAML::Node &folders, QTreeWidgetItem *parent,
@@ -390,19 +402,12 @@ private:
                                                          SshOptionsEditor **sshEditor,
                                                          const SerialOptions &serial,
                                                          SerialOptionsEditor **serialEditor);
-    FtpOptionsEditor *addFtpOptionsGroup(QFormLayout *form, QComboBox *protocolCombo,
-                                         const FtpOptions &value);
+    TelnetOptionsEditor *addTelnetOptionsTab(TerminalAppearanceEditor *sshTabsMember, const TelnetOptions &value);
     RshOptionsEditor *addRshOptionsTab(QComboBox *protocolCombo, TerminalAppearanceEditor *sshTabsMember,
                                        const RshOptions &value);
-    XdmcpOptionsEditor *addXdmcpOptionsGroup(QFormLayout *form, QComboBox *protocolCombo,
-                                             const XdmcpOptions &value);
-    VncOptionsEditor *addVncOptionsGroup(QFormLayout *form, QComboBox *protocolCombo,
-                                         const VncOptions &value);
     SshConnectionSettings sshSettingsFor(const QString &host, quint16 port,
                                          const QString &username,
                                          const SshOptions &options = {}) const;
-    RdpOptionsEditor *addRdpOptionsGroup(QFormLayout *form, QComboBox *protocolCombo,
-                                         const RdpOptions &value);
 
     QTabWidget *m_leftTabs = nullptr;
     QTreeWidget *m_sessionTree = nullptr;

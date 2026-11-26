@@ -102,6 +102,7 @@ security:
   lock_on_minimize: false
   unlock_at_startup: false
   password_store: vault
+  offer_to_save_passwords: true
 logging:
   enabled: false
   folder: ""
@@ -221,6 +222,13 @@ ftp:
   keepalive_seconds: 60
 rlogin:
   source_port: auto
+  auto_reconnect: false
+  reconnect_delay: 5
+  reconnect_attempts: 5
+telnet:
+  auto_reconnect: false
+  reconnect_delay: 5
+  reconnect_attempts: 5
 vnc:
   resolution: follow
   color_depth: 32

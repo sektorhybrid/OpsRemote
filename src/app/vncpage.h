@@ -86,7 +86,7 @@ private:
     QElapsedTimer m_lastRefresh;
     bool m_started = false;
     bool m_wasConnected = false;
-    int m_reconnectAttempts = 0;
+    Reconnector m_reconnector; // reconnect.h
     // Pressed keys (by native scan code or Qt key) and the keysym sent, so
     // the release sends the same one.
     QHash<quint32, quint32> m_pressedKeys;

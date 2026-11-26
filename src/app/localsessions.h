@@ -127,6 +127,7 @@ struct LocalCommand
     QString program;
     QStringList arguments;
     QString remoteCommand; // Docker and Kubernetes over SSH
+    QByteArray remoteFile; // Kubernetes over SSH: the kubeconfig (SshConnectionSettings::remoteFile)
     // A private kubeconfig written for the token or certificate log-on; the
     // caller removes it once kubectl has read it.
     QString temporaryFile;
@@ -146,6 +147,10 @@ LocalCommand dockerCommand(const LocalSessionOptions &options, const ContainerPr
 LocalCommand kubernetesCommand(const LocalSessionOptions &options, const ContainerPreferences &preferences,
                                const QString &secret);
 LocalCommand wslCommand(const LocalSessionOptions &options);
+// At start: kubeconfigs written for kubectl here are removed a minute after
+// it read them; one left by an OpsRemote that crashed meanwhile (older than
+// two minutes) goes now.
+void removeLeftoverKubeconfigs();
 // The local shells on this computer: (id, label); "" is the system's default
 // (Windows PowerShell; on Linux the login shell), "custom" another program.
 QList<QPair<QString, QString>> localShellChoices();

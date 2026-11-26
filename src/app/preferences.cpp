@@ -13,6 +13,8 @@
 #include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
+#include <QMutex>
+#include <QMutexLocker>
 #include <QSaveFile>
 
 #include <yaml-cpp/yaml.h>
@@ -29,24 +31,68 @@ QString settingsPath()
 // this document instead of settings.yaml.
 YAML::Node *captured = nullptr;
 
-// All of settings.yaml; null when it is missing or invalid.
+// settings.yaml parsed once and kept: every load…() used to read and parse
+// the whole file (each tab opened, each folder listed). Read again when the
+// file changed on disk (its size or time: another OpsRemote, a backup
+// restored, an edit by hand) or after forgetCachedSettings(). One lock for
+// the GUI thread and the workers that read settings.
+struct SettingsCache
+{
+    QMutex mutex;
+    YAML::Node document;
+    QDateTime modified;
+    qint64 size = -1;
+    bool loaded = false;
+};
+
+SettingsCache &settingsCache()
+{
+    static SettingsCache cache;
+    return cache;
+}
+
+// The document, under the cache's lock; null when missing or invalid.
+const YAML::Node &cachedDocument(SettingsCache &cache)
+{
+    const QFileInfo info(settingsPath());
+    const QDateTime modified = info.exists() ? info.lastModified() : QDateTime();
+    const qint64 size = info.exists() ? info.size() : -1;
+    if (!cache.loaded || modified != cache.modified || size != cache.size) {
+        try {
+            cache.document = info.exists() ? YAML::LoadFile(info.filePath().toStdString()) : YAML::Node();
+        } catch (const YAML::Exception &) {
+            cache.document = YAML::Node();
+        }
+        cache.modified = modified;
+        cache.size = size;
+        cache.loaded = true;
+    }
+    return cache.document;
+}
+
+// All of settings.yaml (a copy); null when it is missing or invalid.
 YAML::Node loadDocument()
 {
     if (captured)
         return *captured;
-    try {
-        return YAML::LoadFile(settingsPath().toStdString());
-    } catch (const YAML::Exception &) {
-        return YAML::Node();
-    }
+    auto &cache = settingsCache();
+    const QMutexLocker locker(&cache.mutex);
+    return YAML::Clone(cachedDocument(cache));
 }
 
 YAML::Node loadSection(const char *section)
 {
     try {
-        const auto document = loadDocument();
-        if (const auto node = document.IsMap() ? document[section] : YAML::Node(); node && node.IsMap())
-            return YAML::Clone(node);
+        if (captured) {
+            if (const auto node = captured->IsMap() ? (*captured)[section] : YAML::Node(); node && node.IsMap())
+                return YAML::Clone(node);
+        } else {
+            auto &cache = settingsCache();
+            const QMutexLocker locker(&cache.mutex);
+            const auto &document = cachedDocument(cache);
+            if (const auto node = document.IsMap() ? document[section] : YAML::Node(); node && node.IsMap())
+                return YAML::Clone(node);
+        }
     } catch (const YAML::Exception &) {
         // Invalid settings use the defaults.
     }
@@ -89,6 +135,7 @@ void saveSection(const char *section, const YAML::Node &node)
         file.commit();
     else
         file.cancelWriting();
+    forgetCachedSettings(); // the next read takes what was written
 }
 
 template <typename T>
@@ -176,8 +223,7 @@ SshPreferences loadSshPreferences()
     read(node, "kerberos_delegate", value.kerberosDelegate);
     readChoice(node, "kerberos_order", value.kerberosOrder,
                {QStringLiteral("first"), QStringLiteral("after-keys"), QStringLiteral("last")});
-    read(node, "auto_reconnect", value.autoReconnect);
-    readReconnectTiming(node, value.reconnectDelay, value.reconnectAttempts);
+    value.reconnect = value.reconnect.overriddenBy(reconnectOptionsFromYaml(node));
     readChoice(node, "terminal_type", value.terminalType,
                {QStringLiteral("xterm-256color"), QStringLiteral("xterm"),
                 QStringLiteral("vt100"), QStringLiteral("linux")});
@@ -203,8 +249,7 @@ void saveSshPreferences(const SshPreferences &value)
     node["kerberos"] = value.kerberos;
     node["kerberos_delegate"] = value.kerberosDelegate;
     node["kerberos_order"] = value.kerberosOrder.toStdString();
-    node["auto_reconnect"] = value.autoReconnect;
-    writeReconnectTiming(node, value.reconnectDelay, value.reconnectAttempts);
+    reconnectOptionsToYaml(value.reconnect, node);
     node["terminal_type"] = value.terminalType.toStdString();
     saveSection("ssh", node);
 }
@@ -256,6 +301,7 @@ SecurityPreferences loadSecurityPreferences()
     read(node, "unlock_at_startup", value.unlockAtStartup);
     readChoice(node, "password_store", value.passwordStore,
                {QStringLiteral("vault"), QStringLiteral("system"), QStringLiteral("both")});
+    read(node, "offer_to_save_passwords", value.offerToSave);
     return value;
 }
 
@@ -266,6 +312,7 @@ void saveSecurityPreferences(const SecurityPreferences &value)
     node["lock_on_minimize"] = value.lockOnMinimize;
     node["unlock_at_startup"] = value.unlockAtStartup;
     node["password_store"] = value.passwordStore.toStdString();
+    node["offer_to_save_passwords"] = value.offerToSave;
     saveSection("security", node);
 }
 
@@ -531,6 +578,13 @@ void captureSettings(YAML::Node *document)
     captured = document;
 }
 
+void forgetCachedSettings()
+{
+    auto &cache = settingsCache();
+    const QMutexLocker locker(&cache.mutex);
+    cache.loaded = false;
+}
+
 YAML::Node loadPreferencesSection(const char *section)
 {
     return loadSection(section);
@@ -637,6 +691,9 @@ QString createBackup(QString *error)
     const auto target = QDir(backupsFolder()).filePath(name);
     if (QDir(target).exists())
         return target;
+    // Copies of the vault, keys and credentials: owner-only like the
+    // originals (on Windows the copies take this folder's access list).
+    makePrivateFolder(backupsFolder());
     if (!copyTree(settings, target, error)) {
         QDir(target).removeRecursively();
         return QString();
@@ -669,7 +726,9 @@ bool restoreBackup(const QString &name, QString *error)
         return false;
     }
     createBackup();
-    return copyTree(source, portableFilePath(QStringLiteral("settings")), error);
+    const bool restored = copyTree(source, portableFilePath(QStringLiteral("settings")), error);
+    forgetCachedSettings();
+    return restored;
 }
 
 TerminalBehaviour loadTerminalBehaviour()
@@ -928,6 +987,13 @@ const QList<ShortcutDefinition> &shortcutDefinitions()
          QKeySequence(Qt::CTRL | Qt::Key_Comma)},
         {QStringLiteral("quit"), QStringLiteral("Exit"), QStringLiteral("Window"),
          QKeySequence(Qt::CTRL | Qt::Key_Q)},
+        {QStringLiteral("remote_full_screen"), QStringLiteral("Full screen of an RDP or VNC tab"),
+         QStringLiteral("Remote desktops"), QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_Return)},
+        // Keys of lists and the Files panel, the same everywhere.
+        {QStringLiteral("rename"), QStringLiteral("Rename (session list, Files panel)"),
+         QStringLiteral("Fixed keys"), QKeySequence(Qt::Key_F2), true},
+        {QStringLiteral("delete_selected"), QStringLiteral("Delete (Files panel, SSH Tunnels list)"),
+         QStringLiteral("Fixed keys"), QKeySequence(QKeySequence::Delete), true},
     };
     return definitions;
 }
@@ -940,7 +1006,7 @@ QHash<QString, QKeySequence> loadShortcuts()
         auto key = definition.defaultKey;
         QString text;
         read(node, definition.id.toStdString().c_str(), text);
-        if (node[definition.id.toStdString()])
+        if (!definition.fixed && node[definition.id.toStdString()])
             key = QKeySequence::fromString(text, QKeySequence::PortableText);
         shortcuts.insert(definition.id, key);
     }
@@ -952,7 +1018,7 @@ void saveShortcuts(const QHash<QString, QKeySequence> &shortcuts)
     YAML::Node node(YAML::NodeType::Map);
     for (const auto &definition : shortcutDefinitions()) {
         const auto key = shortcuts.value(definition.id, definition.defaultKey);
-        if (key != definition.defaultKey)
+        if (!definition.fixed && key != definition.defaultKey)
             node[definition.id.toStdString()] = key.toString(QKeySequence::PortableText).toStdString();
     }
     saveSection("shortcuts", node);
@@ -979,7 +1045,7 @@ void markRuntimeForRemoval(bool on)
     }
     QFile file(marker);
     if (!file.open(QIODevice::WriteOnly))
-        qInfo("runtime: could not mark %s for removal: %s", qUtf8Printable(folder),
+        qInfo("Runtime folder: could not mark %s for removal: %s", qUtf8Printable(folder),
               qUtf8Printable(file.errorString()));
 }
 

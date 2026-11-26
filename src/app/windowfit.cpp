@@ -54,7 +54,7 @@ void fit(QWidget *window, bool natural)
         window->resize(size);
     if (qEnvironmentVariableIntValue("OPSREMOTE_TEST_WINDOW_FIT") > 0) {
         const QSize smallest = window->minimumSize().expandedTo(window->minimumSizeHint());
-        qInfo("window fit: \"%s\" (%s) %dx%d, smallest %dx%d, screen room %dx%d%s",
+        qInfo("Window fit: \"%s\" (%s) %dx%d, smallest %dx%d, screen room %dx%d%s",
               qUtf8Printable(window->windowTitle()), window->metaObject()->className(), size.width(),
               size.height(), smallest.width(), smallest.height(), room.width(), room.height(),
               smallest.width() > room.width() || smallest.height() > room.height() ? "  TOO BIG" : "");
@@ -63,7 +63,7 @@ void fit(QWidget *window, bool natural)
             for (int i = 0; i < tabs->count(); ++i) {
                 const QSize page = tabs->widget(i)->minimumSizeHint();
                 const QSize hint = tabs->widget(i)->sizeHint();
-                qInfo("window fit:   tab \"%s\" %s smallest %dx%d, asks %dx%d", qUtf8Printable(tabs->tabText(i)),
+                qInfo("Window fit:   tab \"%s\" %s smallest %dx%d, asks %dx%d", qUtf8Printable(tabs->tabText(i)),
                       tabs->widget(i)->metaObject()->className(), page.width(), page.height(), hint.width(),
                       hint.height());
             }
@@ -200,7 +200,7 @@ void grow(QWidget *window)
                                                                    margins.top() + margins.bottom());
     const QSize wanted = window->size().expandedTo(window->sizeHint()).boundedTo(room);
     if (qEnvironmentVariableIntValue("OPSREMOTE_TEST_WINDOW_FIT") > 0)
-        qInfo("window fit: \"%s\" grows from %dx%d to %dx%d", qUtf8Printable(window->windowTitle()),
+        qInfo("Window fit: \"%s\" grows from %dx%d to %dx%d", qUtf8Printable(window->windowTitle()),
               window->width(), window->height(), wanted.width(), wanted.height());
     if (wanted != window->size()) {
         window->resize(wanted);

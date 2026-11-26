@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Thanos Athanasopoulos
 
 #include "scripts.h"
+#include "sshsession.h"
 #include "filedialogs.h"
 #include "appdirs.h"
 #include "preferences.h"
@@ -99,14 +100,6 @@ QString shellQuote(const QString &text)
 QString interpreterCommand(const SavedScript &script)
 {
     return script.interpreter.trimmed().isEmpty() ? QStringLiteral("sh") : script.interpreter.trimmed();
-}
-
-QString base64Of(const QString &body)
-{
-    auto text = body;
-    if (!text.endsWith(QLatin1Char('\n')))
-        text += QLatin1Char('\n');
-    return QString::fromLatin1(text.toUtf8().toBase64());
 }
 
 const QStringList &builtInFields()
@@ -267,11 +260,12 @@ QString filledScript(const SavedScript &script, const QHash<QString, QString> &v
     return body;
 }
 
-QString storeScriptCommand(const QString &body)
+QByteArray scriptFile(const QString &body)
 {
-    return QStringLiteral("umask 077; f=$(mktemp \"${TMPDIR:-/tmp}/opsremote-XXXXXX\") && "
-                          "printf '%s' '%1' | base64 -d > \"$f\" && echo \"OPSREMOTE-SCRIPT:$f\"")
-        .arg(base64Of(body));
+    auto text = body;
+    if (!text.endsWith(QLatin1Char('\n')))
+        text += QLatin1Char('\n');
+    return text.toUtf8();
 }
 
 QString runStoredScriptLine(const SavedScript &script, const QString &path)
@@ -281,11 +275,10 @@ QString runStoredScriptLine(const SavedScript &script, const QString &path)
         .arg(script.sudo ? QStringLiteral("sudo ") : QString(), interpreterCommand(script), shellQuote(path));
 }
 
-QString runScriptCommand(const SavedScript &script, const QString &body)
+QString runScriptCommand(const SavedScript &script)
 {
-    return QStringLiteral("umask 077; f=$(mktemp \"${TMPDIR:-/tmp}/opsremote-XXXXXX\") || exit 1; "
-                          "printf '%s' '%1' | base64 -d > \"$f\"; %2%3 \"$f\"; s=$?; rm -f \"$f\"; exit $s")
-        .arg(base64Of(body), script.sudo ? QStringLiteral("sudo -n ") : QString(), interpreterCommand(script));
+    return QStringLiteral("%1%2 %3").arg(script.sudo ? QStringLiteral("sudo -n ") : QString(),
+                                         interpreterCommand(script), RemoteFilePlaceholder);
 }
 
 QString typedScript(const SavedScript &script, const QString &body)

@@ -17,17 +17,6 @@
 
 #include <yaml-cpp/yaml.h>
 
-namespace {
-
-QString labelFor(const RdpChoices &choices, const QString &value)
-{
-    for (const auto &choice : choices) {
-        if (choice.first == value)
-            return choice.second;
-    }
-    return value;
-}
-}
 
 FtpOptions FtpOptions::overriddenBy(const FtpOptions &session) const
 {

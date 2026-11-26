@@ -583,6 +583,44 @@ bool ScpBackend::readLine(QByteArray *line, QString *error)
     return false;
 }
 
+QString ScpBackend::startFailure(const QString &reason)
+{
+    // What the server's shell said, and how the command ended (127: not
+    // found); both may still be on the way.
+    QByteArray errors;
+    char buffer[4096];
+    for (int round = 0; round < 10 && errors.size() < 64 * 1024; ++round) {
+        const int available = ssh_channel_poll_timeout(m_channel, 100, 1);
+        if (available == SSH_ERROR || available == SSH_EOF)
+            break;
+        if (available <= 0)
+            continue;
+        const int count = ssh_channel_read_nonblocking(m_channel, buffer,
+                                                       uint32_t(qMin<int>(available, sizeof buffer)), 1);
+        if (count <= 0)
+            break;
+        errors.append(buffer, count);
+    }
+    int status = -1;
+#if LIBSSH_VERSION_INT >= SSH_VERSION_INT(0, 11, 0)
+    uint32_t code = 0;
+    char *signal = nullptr;
+    int core = 0;
+    if (ssh_channel_get_exit_state(m_channel, &code, &signal, &core) == SSH_OK)
+        status = signal ? 128 : int(code);
+    ssh_string_free_char(signal);
+#else
+    status = ssh_channel_get_exit_status(m_channel);
+#endif
+    const QString said = QString::fromUtf8(errors).trimmed().section(QLatin1Char('\n'), -1).trimmed();
+    if (status == 127 || said.contains(QStringLiteral("not found"), Qt::CaseInsensitive))
+        return QStringLiteral("the server has no scp program, which SCP transfers need (install "
+                              "the OpenSSH client programs there, or use SFTP if the server offers it)");
+    if (!said.isEmpty())
+        return said.startsWith(QStringLiteral("scp: ")) ? said.mid(5) : said;
+    return reason.isEmpty() ? QStringLiteral("scp did not start on the server") : reason;
+}
+
 bool ScpBackend::readAck(QString *error)
 {
     char code = 0;
@@ -621,8 +659,7 @@ bool ScpBackend::openRead(const QString &path, QString *error)
             return fail(QStringLiteral("the connection closed"));
         QByteArray line;
         if (!readLine(&line, &reason))
-            return fail(reason.isEmpty() ? QStringLiteral("scp is not installed on the server")
-                                         : reason);
+            return fail(round == 0 ? startFailure(reason) : reason);
         if (line.startsWith('T'))
             continue; // times; the listing already has them
         if (line.startsWith('\1') || line.startsWith('\2')) {
@@ -691,8 +728,9 @@ bool ScpBackend::openWrite(const QString &path, quint64 size, const QDateTime &m
     if (!m_channel || ssh_channel_open_session(m_channel) != SSH_OK
         || ssh_channel_request_exec(m_channel, command.constData()) != SSH_OK)
         return fail(QStringLiteral("the server refused to run scp"));
+    // The first reply: scp's own refusal, or nothing when it did not start.
     if (!readAck(&reason))
-        return fail(reason.isEmpty() ? QStringLiteral("scp is not installed on the server") : reason);
+        return fail(startFailure(reason));
     const auto send = [this](const QByteArray &message) {
         return ssh_channel_write(m_channel, message.constData(), uint32_t(message.size()))
             == int(message.size());

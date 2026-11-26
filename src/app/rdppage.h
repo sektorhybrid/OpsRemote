@@ -57,6 +57,10 @@ protected:
     bool focusNextPrevChild(bool) override { return false; }
 
 private:
+    // The password typed in the log-on window, until the connection works
+    // (then offered for saving) or ends; replaces: one was saved already.
+    QString m_typedPassword;
+    bool m_typedReplaces = false;
     void stopJumpChain();
     void start();
     // ended: the session is over; offers Reconnect and Close Tab.

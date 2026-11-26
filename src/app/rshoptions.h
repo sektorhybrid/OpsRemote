@@ -4,9 +4,12 @@
 #pragma once
 
 #include "rdpoptions.h" // RdpChoices
+#include "reconnect.h"
 
 #include <QString>
 #include <QWidget>
+
+#include <memory>
 
 class QComboBox;
 class QLabel;
@@ -25,6 +28,8 @@ struct RshOptions
     // port otherwise; reserved: only a reserved one; any: never try.
     QString sourcePort;
     QString command; // RSH: what to run
+    // Rlogin only: RSH runs one command, which reconnecting would run again.
+    ReconnectOptions reconnect;
 
     bool isEmpty() const { return *this == RshOptions(); }
     RshOptions overriddenBy(const RshOptions &session) const;
@@ -44,13 +49,14 @@ void saveRshDefaults(const RshOptions &options);
 
 // Edits RshOptions for a session (the Connection tab of an Rlogin or RSH
 // session): the fields start at the inherited value; the command row is shown
-// for RSH only.
+// for RSH only, the Reconnect card for Rlogin only.
 class RshOptionsEditor final : public QWidget
 {
     Q_OBJECT
 
 public:
     RshOptionsEditor(const RshOptions &value, const RshOptions &defaults, QWidget *parent = nullptr);
+    ~RshOptionsEditor() override;
 
     RshOptions value() const;
     void setCommandShown(bool shown);
@@ -61,4 +67,6 @@ private:
     QLineEdit *m_command = nullptr;
     QLabel *m_commandLabel = nullptr;
     bool m_commandShown = true;
+    QWidget *m_reconnectCard = nullptr;
+    std::unique_ptr<ReconnectEditorRows> m_reconnect;
 };

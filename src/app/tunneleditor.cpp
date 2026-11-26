@@ -399,7 +399,7 @@ TunnelEditor::TunnelEditor(TunnelsWindow::SessionChoices sessions, NewEntry::Ses
     m_wait = new QSpinBox(m_more);
     m_wait->setRange(0, 600);
     m_wait->setSuffix(QStringLiteral(" s"));
-    m_wait->setSpecialValueText(QStringLiteral("don't wait"));
+    m_wait->setSpecialValueText(QStringLiteral("do not wait"));
     m_wait->setToolTip(QStringLiteral("Before connecting, wait until the server answers on its SSH "
                                       "port, up to this long."));
     moreLayout->addWidget(m_reuseTab);

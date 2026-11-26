@@ -52,12 +52,7 @@ SshPreferences SshOptions::appliedTo(SshPreferences preferences) const
         preferences.kerberosDelegate = kerberosDelegate == 1;
     if (!kerberosOrder.isEmpty())
         preferences.kerberosOrder = kerberosOrder;
-    if (autoReconnect >= 0)
-        preferences.autoReconnect = autoReconnect == 1;
-    if (reconnectDelay > 0)
-        preferences.reconnectDelay = reconnectDelay;
-    if (reconnectAttempts >= 0)
-        preferences.reconnectAttempts = reconnectAttempts;
+    preferences.reconnect = preferences.reconnect.overriddenBy(reconnect);
     if (!terminalType.isEmpty())
         preferences.terminalType = terminalType;
     return preferences;
@@ -102,8 +97,7 @@ SshOptions sshOptionsFromYaml(const YAML::Node &node)
             && options.fileTransfer != QStringLiteral("auto") && options.fileTransfer != QStringLiteral("sftp")
             && options.fileTransfer != QStringLiteral("scp"))
             options.fileTransfer.clear();
-        flag("auto_reconnect", options.autoReconnect);
-        readReconnectTiming(node, options.reconnectDelay, options.reconnectAttempts);
+        options.reconnect = reconnectOptionsFromYaml(node);
         text("terminal_type", options.terminalType);
         text("backspace", options.backspace);
         if (options.backspace != QStringLiteral("del") && options.backspace != QStringLiteral("ctrl-h"))
@@ -144,9 +138,7 @@ void sshOptionsToYaml(const SshOptions &options, YAML::Node &node)
         node["kerberos_server"] = options.kerberosServer.toStdString();
     if (!options.kerberosOrder.isEmpty())
         node["kerberos_order"] = options.kerberosOrder.toStdString();
-    if (options.autoReconnect >= 0)
-        node["auto_reconnect"] = options.autoReconnect == 1;
-    writeReconnectTiming(node, options.reconnectDelay, options.reconnectAttempts);
+    reconnectOptionsToYaml(options.reconnect, node);
     if (!options.terminalType.isEmpty())
         node["terminal_type"] = options.terminalType.toStdString();
     if (!options.backspace.isEmpty())
@@ -330,8 +322,6 @@ SshOptionsEditor::SshOptionsEditor(const SshOptions &value, const SshPreferences
     m_kerberosDelegate->setEnabled(m_kerberos->isChecked());
     m_kerberosServer->setEnabled(m_kerberos->isChecked());
     m_kerberosOrder->setEnabled(m_kerberos->isChecked());
-    m_autoReconnect = makeSwitch(QStringLiteral("Reconnect automatically if the network drops"),
-                                 QString(), value.autoReconnect, defaults.autoReconnect);
     m_terminalType = new QComboBox(this);
     m_terminalType->setEditable(true);
     addInheritedItem(m_terminalType, QString(defaults.terminalType), QString());
@@ -377,11 +367,8 @@ SshOptionsEditor::SshOptionsEditor(const SshOptions &value, const SshPreferences
         m_terminalRows << row;
     }
     m_terminalRows << m_terminalRows.last() + 1; // the X server note
-    form->addRow(QString(), m_autoReconnect);
-    // The session type's wait and tries, inherited until set here.
-    m_reconnectDelay = reconnectDelayBox(value.reconnectDelay, m_defaults.reconnectDelay);
-    m_reconnectAttempts = reconnectAttemptsBox(value.reconnectAttempts, m_defaults.reconnectAttempts);
-    addReconnectRows(form, m_autoReconnect, m_reconnectDelay, m_reconnectAttempts);
+    m_reconnect = std::make_unique<ReconnectEditorRows>(
+        form, QStringLiteral("Reconnect automatically if the network drops"), value.reconnect, m_defaults.reconnect, this);
     form = addFormCard(page, QStringLiteral("Logon"), this);
     form->addRow(QStringLiteral("Private key:"), identityRow);
     form->addRow(QStringLiteral("Certificate:"), certificateRow);
@@ -452,9 +439,7 @@ SshOptions SshOptionsEditor::value() const
     options.forwardAgent = flag(m_forwardAgent, m_defaults.forwardAgent);
     options.followTerminalFolder = m_followTerminalFolder->currentData().toInt();
     options.forwardX11 = flag(m_forwardX11, m_defaults.forwardX11);
-    options.autoReconnect = flag(m_autoReconnect, m_defaults.autoReconnect);
-    options.reconnectDelay = m_reconnectDelay->value();
-    options.reconnectAttempts = m_reconnectAttempts->value();
+    options.reconnect = m_reconnect->value();
     options.identityFile = m_identityFile->text().trimmed();
     options.certificateFile = m_certificate->currentData().toString();
     options.kerberos = flag(m_kerberos, m_defaults.kerberos);

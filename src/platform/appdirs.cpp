@@ -7,6 +7,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QSaveFile>
 
 QString portableHomeFor(const QString &executableFolder)
 {
@@ -35,11 +36,35 @@ QString portableFilePath(const QString &name)
     return QDir(portableHome()).filePath(name);
 }
 
-bool restrictToOwner(const QString &path)
+bool makePrivateFolder(const QString &path)
 {
-    if (QFile::setPermissions(path, QFileDevice::ReadOwner | QFileDevice::WriteOwner))
-        return true;
-    qWarning("Could not restrict %s to its owner; this file system may not support "
-             "permissions.", qUtf8Printable(QDir::toNativeSeparators(path)));
-    return false;
+    if (!QDir().mkpath(path))
+        return false;
+    restrictToOwner(path);
+    return true;
+}
+
+bool savePrivateFile(const QString &path, const QByteArray &data, QString *error)
+{
+    if (!QDir().mkpath(QFileInfo(path).absolutePath())) {
+        if (error)
+            *error = QStringLiteral("Could not create the folder %1.").arg(QDir::toNativeSeparators(QFileInfo(path).absolutePath()));
+        return false;
+    }
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly)) {
+        if (error)
+            *error = file.errorString();
+        return false;
+    }
+    // The temporary file (renamed at commit) is owner-only before any byte
+    // is in it; Windows ignores this but restrictToOwner() below.
+    file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+    if (file.write(data) != data.size() || !file.commit()) {
+        if (error)
+            *error = file.errorString();
+        return false;
+    }
+    restrictToOwner(path);
+    return true;
 }

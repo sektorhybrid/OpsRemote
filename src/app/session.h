@@ -12,6 +12,7 @@
 #include "vncoptions.h"
 #include "ftpoptions.h"
 #include "rshoptions.h"
+#include "telnetoptions.h"
 #include "xdmcp.h"
 #include "terminalappearance.h"
 #include "wakeonlan.h"
@@ -54,6 +55,8 @@ struct SessionDefinition
     SerialOptions serial;
     // Rlogin and RSH sessions (RSH: with its command); empty fields use the defaults.
     RshOptions rsh;
+    // Telnet sessions; empty fields use the defaults.
+    TelnetOptions telnet;
     // XDMCP sessions; empty fields use the defaults.
     XdmcpOptions xdmcp;
     // Terminal sessions: login script, triggers, and a script after logging on.

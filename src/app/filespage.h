@@ -37,6 +37,9 @@ public:
 
 signals:
     void statusMessage(const QString &message);
+    // A password typed at a log-on prompt worked: this tab's own (savedSession
+    // empty) or that of the jump host from that saved session.
+    void typedPasswordWorked(const QString &savedSession, const QString &password, bool replaces);
     void passwordSaveRequested(const QString &password);
 
 private:
@@ -63,6 +66,10 @@ private:
     QLabel *m_state = nullptr;
     QPushButton *m_reconnect = nullptr;
     bool m_reconnectOffered = false;
+    // SFTP/SCP: automatic reconnect, as SSH terminals do (the session's SSH
+    // settings).
+    Reconnector m_reconnector;
+    bool m_wasConnected = false;
     bool m_stateError = false;
     QToolButton *m_logButton = nullptr;
     QPlainTextEdit *m_log = nullptr;

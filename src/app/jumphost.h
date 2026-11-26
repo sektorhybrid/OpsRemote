@@ -54,6 +54,8 @@ public:
 
 signals:
     void statusMessage(const QString &message);
+    // A password typed for the hop from savedSession worked.
+    void typedPasswordWorked(const QString &savedSession, const QString &password, bool replaces);
     // Connections to 127.0.0.1:localPort reach the target.
     void ready(quint16 localPort);
     // A hop could not connect, or one dropped later.

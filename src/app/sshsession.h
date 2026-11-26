@@ -14,12 +14,19 @@
 
 #include "portforward.h"
 #include "proxy.h"
+#include "reconnect.h"
 #include "remotefiles.h"
 
 #include <vector>
 
 class QThread;
 class SshWorker;
+
+// Stands for the path of a private file OpsRemote writes on the server
+// before a command runs (SshConnectionSettings::remoteFile, runCommand's
+// file): secrets and scripts reach the server through a channel's input,
+// never in a command line that other users of the server could read (ps).
+inline const QString RemoteFilePlaceholder = QStringLiteral("@OPSREMOTE-FILE@");
 
 struct SshConnectionSettings
 {
@@ -29,6 +36,9 @@ struct SshConnectionSettings
     // Optional password from the credential vault. It is tried once, then the
     // user is prompted interactively.
     QString password;
+    // The saved session these settings come from, for a jump host (where a
+    // password typed for it is saved); empty otherwise.
+    QString savedSession;
     QString knownHostsPath;
     QString terminalType = QStringLiteral("xterm-256color");
     QString backspace = QStringLiteral("del");
@@ -59,6 +69,9 @@ struct SshConnectionSettings
     // Shell sessions: run this on the terminal instead of the login shell
     // (docker exec, kubectl exec on the server).
     QString remoteCommand;
+    // Written to a private file on the server first (RemoteFilePlaceholder
+    // in remoteCommand stands for its path), removed when the command ends.
+    QByteArray remoteFile;
     // identityFile's certificate: empty for key-cert.pub next to it (when
     // useCertificates), "none", or a file.
     QString certificateFile;
@@ -73,9 +86,7 @@ struct SshConnectionSettings
     int columns = 80;
     int rows = 24;
     // What the terminal tab does after a dropped connection.
-    bool autoReconnect = false;
-    int reconnectDelay = 5; // seconds
-    int reconnectAttempts = 5;
+    ReconnectOptions reconnect = ReconnectOptions::builtIn();
     // Tunnel mode (forwardPort > 0): instead of a shell, connections to a
     // local port are forwarded through the server to forwardHost:forwardPort
     // (like ssh -L); the local port is reported by forwardReady().
@@ -130,8 +141,11 @@ public:
     // Runs a command on the server (without a shell tab: openShell off),
     // answered by commandFinished() with the id returned. terminal: with a
     // pseudo-terminal, for commands that need one. Output past outputLimit
-    // bytes is dropped.
-    int runCommand(const QString &command, bool terminal, int timeoutSeconds, int outputLimit);
+    // bytes is dropped. With file: written to a private file on the server
+    // first (RemoteFilePlaceholder in command stands for its path), removed
+    // when the command ends unless keepFile.
+    int runCommand(const QString &command, bool terminal, int timeoutSeconds, int outputLimit,
+                   const QByteArray &file = {}, bool keepFile = false);
     // Ends the command under way, if any.
     void cancelCommands();
     // Answers the prompts from the last inputRequired() signal, in order.
@@ -165,6 +179,9 @@ signals:
                                      const QString &fingerprint);
     void inputRequired(const QString &instruction, const QStringList &prompts,
                        const QList<bool> &echo);
+    // A password typed at a log-on prompt worked (to offer saving it);
+    // replaces: the stored password was tried first and rejected.
+    void typedPasswordWorked(const QString &password, bool replaces);
     void connected();
     // Tunnel mode: the local port (on 127.0.0.1) to connect to.
     void forwardReady(quint16 localPort);

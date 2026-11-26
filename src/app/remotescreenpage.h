@@ -5,11 +5,13 @@
 
 #include <QIcon>
 #include <QImage>
+#include <QKeySequence>
 #include <QPointer>
 #include <QWidget>
 
 class QKeyEvent;
 class QLabel;
+class QPushButton;
 class QMutex;
 class QPainter;
 class QTabWidget;
@@ -17,7 +19,7 @@ class QTimer;
 class SessionEndedPanel;
 
 // What remote screen tabs (RDP, VNC) have in common: full screen in a window
-// of their own (Ctrl+Alt+Enter), key combinations the local system would
+// of their own (Ctrl+Alt+Enter by default), key combinations the local system would
 // otherwise catch (Send Keys), a screenshot, closing the tab after the
 // session ended, and drawing the remote picture: scaled to fit, with its
 // pointer, the overlay while connecting and the bar once it ended.
@@ -30,6 +32,10 @@ public:
     enum class KeyCombination { CtrlAltDelete, CtrlAltBackspace, CtrlEscape, AltTab, PrintScreen,
                                 Windows };
     static QList<QPair<KeyCombination, QString>> keyCombinations();
+
+    // The full-screen key ("remote_full_screen" in Keyboard shortcuts), for
+    // every remote desktop tab; set by the main window.
+    static void setFullScreenKey(const QKeySequence &key);
 
     explicit RemoteScreenPage(QWidget *parent = nullptr);
     ~RemoteScreenPage() override;
@@ -50,6 +56,9 @@ public:
 
 signals:
     void statusMessage(const QString &message);
+    // A password typed at a log-on prompt worked: this tab's own (savedSession
+    // empty) or that of the jump host from that saved session.
+    void typedPasswordWorked(const QString &savedSession, const QString &password, bool replaces);
     void fullScreenChanged(bool on);
     // The user asked to close this tab (after the session ended).
     void closeRequested();
@@ -66,7 +75,8 @@ protected:
     bool spansAllMonitors() const { return m_allMonitors; }
     // Leaves full screen if needed and asks for the tab to be closed.
     void requestClose();
-    // Ctrl+Alt+Enter: toggles full screen. True if the event was used.
+    // The full-screen key (Ctrl+Alt+Enter by default): toggles full screen.
+    // True if the event was used.
     bool handleFullScreenKey(QKeyEvent *event);
     // Mouse movement in the page: the exit bar appears at the top edge.
     void trackFullScreenPointer(const QPointF &position);
@@ -127,5 +137,6 @@ private:
     QString m_tabToolTip;
     QWidget *m_fullScreenBar = nullptr;
     QLabel *m_fullScreenText = nullptr;
+    QPushButton *m_fullScreenLeave = nullptr;
     QTimer *m_fullScreenBarTimer = nullptr;
 };

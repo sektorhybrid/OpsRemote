@@ -65,3 +65,11 @@ int runFollowTest(const QString &spec);
 // cds to folder, files are dropped on it (Upload clicked), then the same with
 // "sleep 20" running in front (Cancel clicked); the asking texts are printed.
 int runSshDropTest(const QString &spec);
+
+// Testing: OPSREMOTE_TEST_REMOTE_FILE=ssh://user:password@host:port?known_hosts=file
+// sends a marker as a private file with a command and with a shell
+// session's command (sshsession.h RemoteFilePlaceholder), and prints whether
+// each read it, how many of the server's processes show it in their command
+// line (0 expected), and whether the file is gone afterwards (a kept one:
+// still there, with the marker).
+int runRemoteFileTest(const QString &spec);

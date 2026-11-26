@@ -8,6 +8,8 @@
 #include <QString>
 #include <QWidget>
 
+#include <memory>
+
 class QCheckBox;
 class QComboBox;
 class QLabel;
@@ -33,9 +35,7 @@ struct SshOptions
     QString kerberosOrder; // empty: the Preferences'
     // The server's Kerberos name when it differs from the host name.
     QString kerberosServer;
-    int autoReconnect = -1;
-    int reconnectDelay = 0; // seconds
-    int reconnectAttempts = -1;
+    ReconnectOptions reconnect;
     QString terminalType;
     QString backspace; // empty or "del": DEL; "ctrl-h": BS
     int followTerminalFolder = -1;
@@ -80,9 +80,7 @@ private:
     QCheckBox *m_kerberosDelegate = nullptr;
     QLineEdit *m_kerberosServer = nullptr;
     void showCertificate();
-    QCheckBox *m_autoReconnect = nullptr;
-    QSpinBox *m_reconnectDelay = nullptr; // reconnect.h
-    QSpinBox *m_reconnectAttempts = nullptr;
+    std::unique_ptr<ReconnectEditorRows> m_reconnect;
     QComboBox *m_terminalType = nullptr;
     QComboBox *m_backspace = nullptr;
     QComboBox *m_followTerminalFolder = nullptr;

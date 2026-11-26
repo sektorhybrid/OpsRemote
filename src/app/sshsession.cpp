@@ -17,9 +17,10 @@
 #include <QFile>
 #include <QFileDevice>
 #include <QFileInfo>
-#include <QSaveFile>
 #include <QScopeGuard>
 #include <QSocketNotifier>
+
+#include <sodium.h>
 #include <QDeadlineTimer>
 #include <QMutex>
 #include <QPointer>
@@ -92,11 +93,39 @@ void wipe(QString &text)
     text.clear();
 }
 
+// A keyboard-interactive prompt for the account's password, not for a
+// one-time code, a PIN or a token (those are never offered for saving).
+bool asksForPassword(const QString &prompt)
+{
+    const auto text = prompt.toLower();
+    if (!text.contains(QStringLiteral("password")))
+        return false;
+    for (const auto *word : {"code", "otp", "one-time", "token", "verification", "pin", "new password"}) {
+        if (text.contains(QLatin1String(word)))
+            return false;
+    }
+    return true;
+}
+
 // libssh writes plain (unhashed) host names, using "[host]:port" for
 // non-default ports.
 QByteArray knownHostsToken(const QString &host, quint16 port)
 {
     return (port == 22 ? host : QStringLiteral("[%1]:%2").arg(host).arg(port)).toUtf8();
+}
+
+// command with RemoteFilePlaceholder (also as quoted by shellQuote) replaced
+// by the file's path; with remove, the file goes when the command ends, also
+// when the connection drops (HUP).
+QByteArray withRemoteFile(QByteArray command, const QString &path, bool remove)
+{
+    const QByteArray quoted = ScpBackend::quote(path);
+    const QByteArray placeholder = RemoteFilePlaceholder.toUtf8();
+    command.replace("'" + placeholder + "'", quoted);
+    command.replace(placeholder, quoted);
+    if (!remove)
+        return command;
+    return "opsremote_file=" + quoted + "; trap 'rm -f \"$opsremote_file\"' EXIT HUP INT TERM; " + command;
 }
 
 bool removeKnownHostEntries(const QString &path, const QByteArray &token, QString *error)
@@ -128,14 +157,7 @@ bool removeKnownHostEntries(const QString &path, const QByteArray &token, QStrin
     if (!removed)
         return true;
 
-    QSaveFile output(path);
-    if (!output.open(QIODevice::WriteOnly) || output.write(kept) != kept.size()
-        || !output.commit()) {
-        *error = output.errorString();
-        return false;
-    }
-    restrictToOwner(path);
-    return true;
+    return savePrivateFile(path, kept, error);
 }
 }
 
@@ -290,7 +312,8 @@ public:
     void addForwards(const QList<PortForward> &forwards, int firstIndex);
     void removeForwards(int firstIndex, int count);
     void probe(int id, const QString &host, quint16 port);
-    void runCommand(int id, const QByteArray &command, bool terminal, int timeoutMs, int outputLimit);
+    void runCommand(int id, QByteArray command, bool terminal, int timeoutMs, int outputLimit,
+                    QByteArray file, bool keepFile);
     // From any thread: ends a command under way (its result says so).
     void cancelCommands() { m_cancelCommands = true; }
 
@@ -300,6 +323,9 @@ signals:
                                      const QString &fingerprint);
     void inputRequired(const QString &instruction, const QStringList &prompts,
                        const QList<bool> &echo);
+    // A password typed at a prompt logged on; replaces: the stored one was
+    // tried first and rejected.
+    void typedPasswordWorked(const QString &password, bool replaces);
     void connected();
     void forwardReady(quint16 localPort);
     void forwardStatus(int index, bool listening, const QString &message);
@@ -374,10 +400,16 @@ private:
     void finish(const QString &reason, bool error);
     void closeSession();
     QString lastError() const;
+    // Writes content to a new private file on the server through a
+    // channel's input (never a command line); its path, or empty and error.
+    QString storeRemoteFile(const QByteArray &content, QString *error);
 
     SshConnectionSettings m_settings;
     ssh_session m_session = nullptr;
     ssh_channel m_channel = nullptr;
+    // A file session's SFTP channel (owned by its backend): with no terminal
+    // channel, readAvailable() polls it to notice the connection closing.
+    ssh_channel m_filesChannel = nullptr;
     // The LC_OPSREMOTE_TAG value given to the shell, if the server took it.
     QByteArray m_shellTag;
     enum class FolderStage { Opening, Executing, Reading };
@@ -465,6 +497,12 @@ private:
     ssh_key m_identityKey = nullptr;
     QByteArray m_securityKeyPin;
     bool m_storedPasswordTried = false;
+    // The password typed at the last prompt, until the log-on ends; and
+    // whether the keyboard-interactive prompt waiting is one for a password.
+    QByteArray m_typedPassword;
+    bool m_kbdintAsksPassword = false;
+    // The user answered the keyboard-interactive prompts now being checked.
+    bool m_kbdintAnswered = false;
     bool m_finished = false;
     std::atomic<bool> m_cancelCommands{false};
 
@@ -1063,6 +1101,10 @@ bool SshWorker::handleAuthResult(int result)
     switch (result) {
     case SSH_AUTH_SUCCESS:
         wipe(m_settings.password);
+        if (!m_typedPassword.isEmpty()) {
+            emit typedPasswordWorked(QString::fromUtf8(m_typedPassword), m_storedPasswordTried);
+            wipe(m_typedPassword);
+        }
         openShell();
         return true;
     case SSH_AUTH_PARTIAL:
@@ -1112,14 +1154,21 @@ bool SshWorker::runKeyboardInteractive()
                     header.append(line);
             }
             m_pendingInput = PendingInput::KeyboardInteractive;
+            m_kbdintAsksPassword = count == 1 && !echo.first() && asksForPassword(prompts.first());
             emit inputRequired(header.join(QLatin1Char('\n')), prompts, echo);
             return true;
         }
         if (result == SSH_AUTH_DENIED) {
+            wipe(m_typedPassword);
             if (std::exchange(answeredWithStoredPassword, false)) {
                 emit statusMessage(QStringLiteral("The stored password was rejected."));
                 continue;
             }
+            // Refused before asking anything (a server offering it with
+            // nothing behind it): not a wrong answer; the password prompt
+            // comes next.
+            if (!std::exchange(m_kbdintAnswered, false))
+                return false;
             if (++m_failedAttempts < MaximumPasswordAttempts) {
                 emit statusMessage(QStringLiteral("Access denied."));
                 continue;
@@ -1134,6 +1183,9 @@ void SshWorker::answerPrompts(QStringList answers)
 {
     const auto pending = std::exchange(m_pendingInput, PendingInput::None);
     if (pending == PendingInput::KeyboardInteractive) {
+        m_kbdintAnswered = true;
+        if (std::exchange(m_kbdintAsksPassword, false))
+            m_typedPassword = answers.value(0).toUtf8();
         for (int index = 0; index < answers.size(); ++index) {
             auto answer = answers[index].toUtf8();
             ssh_userauth_kbdint_setanswer(m_session, static_cast<unsigned int>(index),
@@ -1164,10 +1216,12 @@ void SshWorker::answerPrompts(QStringList answers)
         auto secret = answers.value(0).toUtf8();
         for (auto &answer : answers)
             wipe(answer);
+        m_typedPassword = secret;
         const int result = ssh_userauth_password(m_session, nullptr, secret.constData());
         wipe(secret);
         if (handleAuthResult(result))
             return;
+        wipe(m_typedPassword);
         if (result == SSH_AUTH_DENIED) {
             ++m_failedAttempts;
             emit statusMessage(QStringLiteral("Access denied."));
@@ -1235,7 +1289,18 @@ void SshWorker::openShell()
             m_shellTag = tag;
     }
     if (!m_settings.remoteCommand.isEmpty()) {
-        const auto command = m_settings.remoteCommand.toUtf8();
+        auto command = m_settings.remoteCommand.toUtf8();
+        if (!m_settings.remoteFile.isEmpty()) {
+            QString error;
+            const QString path = storeRemoteFile(m_settings.remoteFile, &error);
+            sodium_memzero(m_settings.remoteFile.data(), size_t(m_settings.remoteFile.size()));
+            m_settings.remoteFile.clear();
+            if (path.isEmpty()) {
+                finish(error, true);
+                return;
+            }
+            command = withRemoteFile(command, path, true);
+        }
         if (ssh_channel_request_exec(m_channel, command.constData()) != SSH_OK) {
             finish(QStringLiteral("The server refused to run %1: %2").arg(m_settings.remoteCommand, lastError()), true);
             return;
@@ -1727,13 +1792,64 @@ void SshWorker::probe(int id, const QString &host, quint16 port)
 // One command on its own channel, as `ssh host command` runs it: through
 // the account's shell, stdout and stderr together in the order they came.
 // The worker waits for it (a command connection has nothing else to do).
-void SshWorker::runCommand(int id, const QByteArray &command, bool terminal, int timeoutMs, int outputLimit)
+QString SshWorker::storeRemoteFile(const QByteArray &content, QString *error)
+{
+    static const char command[] = "umask 077; f=$(mktemp \"${TMPDIR:-/tmp}/opsremote-XXXXXX\") && cat > \"$f\" "
+                                  "&& printf '%s\\n' \"$f\"";
+    ssh_channel channel = ssh_channel_new(m_session);
+    const auto fail = [&](const QString &why) {
+        *error = QStringLiteral("Could not store a private file on the server: %1").arg(why);
+        if (channel)
+            ssh_channel_free(channel);
+        return QString();
+    };
+    if (!channel || ssh_channel_open_session(channel) != SSH_OK
+        || ssh_channel_request_exec(channel, command) != SSH_OK)
+        return fail(lastError());
+    for (qsizetype sent = 0; sent < content.size();) {
+        const int count = ssh_channel_write(channel, content.constData() + sent,
+                                            uint32_t(qMin<qsizetype>(content.size() - sent, 32768)));
+        if (count <= 0)
+            return fail(lastError());
+        sent += count;
+    }
+    ssh_channel_send_eof(channel);
+    QByteArray output;
+    char buffer[1024];
+    for (;;) {
+        const int count = ssh_channel_read_timeout(channel, buffer, sizeof buffer, 0, 30000);
+        if (count <= 0)
+            break;
+        output.append(buffer, count);
+    }
+    ssh_channel_close(channel);
+    ssh_channel_free(channel);
+    channel = nullptr;
+    const QString path = QString::fromUtf8(output).trimmed();
+    if (!path.startsWith(QLatin1Char('/')) || path.contains(QLatin1Char('\n')))
+        return fail(QStringLiteral("the server did not say where (it needs a POSIX shell, mktemp and cat)"));
+    return path;
+}
+
+void SshWorker::runCommand(int id, QByteArray command, bool terminal, int timeoutMs, int outputLimit,
+                           QByteArray file, bool keepFile)
 {
     QElapsedTimer timer;
     timer.start();
     if (!m_session || m_finished) {
+        sodium_memzero(file.data(), size_t(file.size()));
         emit commandFinished(id, -1, {}, false, QStringLiteral("Not connected."), 0);
         return;
+    }
+    if (!file.isEmpty()) {
+        QString error;
+        const QString path = storeRemoteFile(file, &error);
+        sodium_memzero(file.data(), size_t(file.size()));
+        if (path.isEmpty()) {
+            emit commandFinished(id, -1, {}, false, error, int(timer.elapsed()));
+            return;
+        }
+        command = withRemoteFile(command, path, !keepFile);
     }
     m_cancelCommands = false;
     ssh_channel channel = ssh_channel_new(m_session);
@@ -2238,6 +2354,17 @@ void SshWorker::readAvailable()
         acceptRemoteForwards();
     if (!m_forwards.isEmpty())
         pumpForwards();
+    // A file session has no terminal channel whose reads would notice the
+    // server going away (only the keepalive, a minute later): polling the
+    // SFTP channel takes in what arrived (the SFTP replies stay for their
+    // reader) and tells a closed connection at once.
+    if (!m_finished && !m_channel && m_filesChannel) {
+        const int polled = ssh_channel_poll(m_filesChannel, 0);
+        if (polled == SSH_ERROR || polled == SSH_EOF || !ssh_is_connected(m_session)) {
+            finish(QStringLiteral("Connection lost: %1").arg(lastError()), true);
+            return;
+        }
+    }
     if (m_finished || m_forwardServer || !m_channel)
         return;
 
@@ -2336,6 +2463,7 @@ void SshWorker::closeSession()
     delete m_forwardServer;
     m_forwardServer = nullptr;
     // Before the session goes: the backend uses it.
+    m_filesChannel = nullptr;
     m_files->reset();
     if (m_channel) {
         if (ssh_channel_is_open(m_channel))
@@ -2431,10 +2559,10 @@ bool SshWorker::startSftp(QString *error)
         if (received)
             quiet.restart();
         readAvailable();
-        if (m_finished) {
-            ssh_channel_free(channel);
+        // The session ended meanwhile (a shell command that stopped at once):
+        // ssh_free() in finish() freed this channel with the session.
+        if (m_finished)
             return false;
-        }
     }
 
     sftp_session sftp = sftp_new_channel(m_session, channel);
@@ -2468,6 +2596,8 @@ bool SshWorker::startSftp(QString *error)
     auto backend = std::make_unique<SftpBackend>(m_session, sftp, [this] { schedulePump(); });
     const QString home = backend->home();
     m_files->setBackend(std::move(backend));
+    if (m_settings.filesOnly)
+        m_filesChannel = channel;
     emit sftpReady(home, QStringLiteral("SFTP"));
     readAvailable();
     return true;
@@ -2678,6 +2808,7 @@ SshSession::SshSession(QObject *parent)
     connect(m_worker, &SshWorker::hostKeyVerificationRequired,
             this, &SshSession::hostKeyVerificationRequired);
     connect(m_worker, &SshWorker::inputRequired, this, &SshSession::inputRequired);
+    connect(m_worker, &SshWorker::typedPasswordWorked, this, &SshSession::typedPasswordWorked);
     connect(m_worker, &SshWorker::connected, this, &SshSession::connected);
     connect(m_worker, &SshWorker::forwardReady, this, &SshSession::forwardReady);
     connect(m_worker, &SshWorker::forwardStatus, this, &SshSession::forwardStatus);
@@ -2770,12 +2901,13 @@ void SshSession::removeForwards(int firstIndex, int count)
     }, Qt::QueuedConnection);
 }
 
-int SshSession::runCommand(const QString &command, bool terminal, int timeoutSeconds, int outputLimit)
+int SshSession::runCommand(const QString &command, bool terminal, int timeoutSeconds, int outputLimit,
+                           const QByteArray &file, bool keepFile)
 {
     const int id = m_nextJobId++;
     QMetaObject::invokeMethod(m_worker, [worker = m_worker, id, command = command.toUtf8(), terminal,
-                                         timeoutMs = timeoutSeconds * 1000, outputLimit] {
-        worker->runCommand(id, command, terminal, timeoutMs, outputLimit);
+                                         timeoutMs = timeoutSeconds * 1000, outputLimit, file, keepFile] {
+        worker->runCommand(id, command, terminal, timeoutMs, outputLimit, file, keepFile);
     }, Qt::QueuedConnection);
     return id;
 }

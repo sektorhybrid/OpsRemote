@@ -27,6 +27,7 @@
 #include "vncoptions.h"
 #include "ftpoptions.h"
 #include "rshoptions.h"
+#include "telnetoptions.h"
 #include "xdmcp.h"
 #include "terminalappearance.h"
 
@@ -566,6 +567,7 @@ void PreferencesWindow::buildPages()
     buildRdpPage();
     buildVncPage();
     buildFtpPage();
+    buildTelnetPage();
     buildRshPage();
     buildXdmcpPage();
     buildDockerPage();
@@ -1477,7 +1479,7 @@ void PreferencesWindow::buildStartupPage()
                         taskbar, QStringLiteral("icon taskbar dock desktop file launcher gear gnome kde"));
         connect(taskbar, &QAbstractButton::toggled, this, [update](bool on) {
             update([on](StartupPreferences &p) { p.taskbarIcon = on; });
-            qInfo("taskbar icon: %s", qUtf8Printable(DesktopEntry::update(on)));
+            qInfo("Taskbar icon: %s", qUtf8Printable(DesktopEntry::update(on)));
         });
     }
 
@@ -1818,6 +1820,14 @@ void PreferencesWindow::buildShortcutsPage()
         auto *&card = cards[definition.category];
         if (!card)
             card = page->addCard(definition.category);
+        if (definition.fixed) {
+            auto *key = secondaryLabel(definition.defaultKey.toString(QKeySequence::NativeText), nullptr);
+            key->setToolTip(QStringLiteral("This key cannot be changed."));
+            card->addRow(definition.label, QString(), key,
+                         definition.category + QStringLiteral(" shortcut keys ")
+                             + definition.defaultKey.toString(QKeySequence::NativeText));
+            continue;
+        }
         auto *controls = new QWidget;
         auto *layout = new QHBoxLayout(controls);
         layout->setContentsMargins(0, 0, 0, 0);
@@ -1846,6 +1856,8 @@ void PreferencesWindow::buildShortcutsPage()
         QHash<QString, QKeySequence> shortcuts;
         QHash<QKeySequence, QStringList> users;
         for (const auto &definition : shortcutDefinitions()) {
+            if (definition.fixed)
+                continue;
             const auto key = editors.value(definition.id)->keySequence();
             shortcuts.insert(definition.id, key);
             if (!key.isEmpty())
@@ -1871,7 +1883,8 @@ void PreferencesWindow::buildShortcutsPage()
     }
     connect(resetAll, &QPushButton::clicked, this, [editors, apply] {
         for (const auto &definition : shortcutDefinitions())
-            editors.value(definition.id)->setKeySequence(definition.defaultKey);
+            if (!definition.fixed)
+                editors.value(definition.id)->setKeySequence(definition.defaultKey);
         apply();
     });
 }
@@ -1950,9 +1963,22 @@ QWidget *pathPicker(const QString &value, const QString &placeholder, bool folde
 
 // "Wait before reconnecting" and "Tries" (reconnect.h), the same rows on every
 // session type's tab, greyed out while its "Reconnect automatically" is off.
-void addReconnectTimingRows(SettingsCard *card, QCheckBox *enabled, int delay, int attempts,
-                            std::function<void(int)> setDelay, std::function<void(int)> setAttempts)
+// A session type's reconnecting (reconnect.h), the same on every page: the
+// switch, then Wait and Tries, usable while it is on; change edits the
+// saved value.
+using ReconnectChange = std::function<void(const std::function<void(ReconnectOptions &)> &)>;
+void addReconnectPreferenceRows(SettingsCard *card, const ReconnectOptions &current, const QString &description,
+                                const QString &keywords, const ReconnectChange &change)
 {
+    auto *enabled = toggle(current.autoReconnect == 1);
+    card->addRow(QStringLiteral("Reconnect automatically"), description, enabled, keywords);
+    QObject::connect(enabled, &QCheckBox::toggled, card, [change](bool on) {
+        change([on](ReconnectOptions &o) { o.autoReconnect = on ? 1 : 0; });
+    });
+    const auto setDelay = [change](int v) { change([v](ReconnectOptions &o) { o.delay = v; }); };
+    const auto setAttempts = [change](int v) { change([v](ReconnectOptions &o) { o.attempts = v; }); };
+    const int delay = current.delay;
+    const int attempts = current.attempts;
     auto *delayBox = reconnectDelayBox(delay);
     card->addRow(QStringLiteral("Wait before reconnecting"), QString(), delayBox,
                  QStringLiteral("reconnect retry delay wait"));
@@ -1960,8 +1986,8 @@ void addReconnectTimingRows(SettingsCard *card, QCheckBox *enabled, int delay, i
     card->addRow(QStringLiteral("Tries"),
                  QStringLiteral("How many times it tries before giving up; 0 keeps trying."),
                  attemptsBox, QStringLiteral("reconnect retry attempts tries forever"));
-    QObject::connect(delayBox, &QSpinBox::valueChanged, card, std::move(setDelay));
-    QObject::connect(attemptsBox, &QSpinBox::valueChanged, card, std::move(setAttempts));
+    QObject::connect(delayBox, &QSpinBox::valueChanged, card, setDelay);
+    QObject::connect(attemptsBox, &QSpinBox::valueChanged, card, setAttempts);
     for (QWidget *box : {static_cast<QWidget *>(delayBox), static_cast<QWidget *>(attemptsBox)}) {
         box->setEnabled(enabled->isChecked());
         QObject::connect(enabled, &QCheckBox::toggled, box, &QWidget::setEnabled);
@@ -2058,14 +2084,12 @@ void PreferencesWindow::buildSshPage()
     bindChoice(this, terminalType, update, &SshPreferences::terminalType);
 
     auto *reconnect = page->addCard(QStringLiteral("Dropped connections"));
-    auto *autoReconnect = toggle(current.autoReconnect);
-    reconnect->addRow(QStringLiteral("Reconnect automatically"),
-                      QStringLiteral("When a connection drops (not when you log out)."),
-                      autoReconnect, QStringLiteral("retry"));
-    bindToggle(this, autoReconnect, update, &SshPreferences::autoReconnect);
-    addReconnectTimingRows(reconnect, autoReconnect, current.reconnectDelay, current.reconnectAttempts,
-                           [update](int v) { update([v](SshPreferences &p) { p.reconnectDelay = v; }); },
-                           [update](int v) { update([v](SshPreferences &p) { p.reconnectAttempts = v; }); });
+    addReconnectPreferenceRows(reconnect, current.reconnect,
+                               QStringLiteral("When a connection drops (not when you log out). SFTP and SCP "
+                                              "file tabs too."),
+                               QStringLiteral("retry"), [update](const auto &edit) {
+                                   update([&edit](SshPreferences &p) { edit(p.reconnect); });
+                               });
 
     auto *browser = page->addCard(QStringLiteral("File browser"));
     auto *follow = toggle(current.followTerminalFolder);
@@ -2640,8 +2664,8 @@ void PreferencesWindow::buildVncPage()
               current.highDpi, QStringLiteral("hidpi scaling vnc"),
               [](VncOptions &o, int v) { o.highDpi = v; });
     addSwitch(display, QStringLiteral("Full screen uses all monitors"),
-              QStringLiteral("In full screen (Ctrl+Alt+Enter), the window spans every monitor (not "
-                             "on Wayland)."),
+              QStringLiteral("In full screen (Ctrl+Alt+Enter by default), the window spans every "
+                             "monitor (not on Wayland)."),
               current.allMonitors, QStringLiteral("multi monitor vnc"),
               [](VncOptions &o, int v) { o.allMonitors = v; });
 
@@ -2661,19 +2685,46 @@ void PreferencesWindow::buildVncPage()
                              "jump host encrypts any server."),
               vncEncryptionChoices(), current.encryption, QStringLiteral("tls vencrypt security vnc"),
               [](VncOptions &o, const QString &v) { o.encryption = v; });
-    auto *vncReconnect = addSwitch(connection, QStringLiteral("Reconnect automatically"),
-                                   QStringLiteral("When the connection drops (not when the server "
-                                                  "closes the session)."),
-                                   current.autoReconnect, QStringLiteral("reconnect network drop vnc"),
-                                   [](VncOptions &o, int v) { o.autoReconnect = v; });
-    addReconnectTimingRows(connection, vncReconnect, current.reconnectDelay, current.reconnectAttempts,
-                           [update](int v) { update([v](VncOptions &o) { o.reconnectDelay = v; }); },
-                           [update](int v) { update([v](VncOptions &o) { o.reconnectAttempts = v; }); });
+    addReconnectPreferenceRows(connection, current.reconnect,
+                               QStringLiteral("When the connection drops (not when the server closes the session)."),
+                               QStringLiteral("reconnect network drop vnc"), [update](const auto &edit) {
+                                   update([&edit](VncOptions &o) { edit(o.reconnect); });
+                               });
     connection->addRow(QStringLiteral("Per session"),
                        QStringLiteral("Every VNC session can override these in its own settings "
                                       "(Sessions → Edit…), and can also listen for "
                                       "a reverse connection or use an UltraVNC repeater."),
                        nullptr, QStringLiteral("override listen reverse repeater"));
+}
+
+void PreferencesWindow::buildTelnetPage()
+{
+    auto *page = addPage(QStringLiteral("telnet"), QStringLiteral("Telnet"),
+                         QStringLiteral("utilities-terminal"), QStyle::SP_ComputerIcon);
+    const auto current = loadTelnetDefaults();
+    auto update = [](auto change) {
+        auto options = loadTelnetDefaults();
+        change(options);
+        saveTelnetDefaults(options);
+    };
+    auto *reconnect = page->addCard(QStringLiteral("Reconnect"));
+    addReconnectPreferenceRows(reconnect, current.reconnect,
+                               QStringLiteral("After a network error, or a close after 20 s without output: Telnet "
+                                              "cannot tell a logout (which prints something first) from a cut "
+                                              "connection. A dead network is noticed within about a minute."),
+                               QStringLiteral("reconnect network drop telnet"), [update](const auto &edit) {
+                                   update([&edit](TelnetOptions &o) { edit(o.reconnect); });
+                               });
+    reconnect->addRow(QStringLiteral("Per session"),
+                      QStringLiteral("Every Telnet session can override these in its own settings "
+                                     "(Sessions → Edit…)."),
+                      nullptr, QStringLiteral("override"));
+    auto *note = page->addCard(QStringLiteral("Security"));
+    auto *text = new QLabel(QStringLiteral(
+        "Telnet sends everything, passwords included, unencrypted. Use it only on networks you "
+        "trust, for equipment that has nothing better (SSH)."));
+    text->setWordWrap(true);
+    note->addRow(QStringLiteral("Not encrypted"), QString(), text, QStringLiteral("insecure plain"));
 }
 
 void PreferencesWindow::buildRshPage()
@@ -2704,6 +2755,16 @@ void PreferencesWindow::buildRshPage()
     connect(sourcePort, &QComboBox::activated, this, [update, sourcePort] {
         update([&](RshOptions &o) { o.sourcePort = sourcePort->currentData().toString(); });
     });
+    // Rlogin only: RSH runs one command, which reconnecting would run again.
+    auto *reconnect = page->addCard(QStringLiteral("Reconnect (Rlogin)"));
+    addReconnectPreferenceRows(reconnect, current.reconnect,
+                               QStringLiteral("After a network error, or a close after 20 s without output: Rlogin "
+                                              "cannot tell a logout (which prints something first) from a cut "
+                                              "connection. A dead network is noticed within about a minute. Not "
+                                              "for RSH, whose command would run again."),
+                               QStringLiteral("reconnect network drop rlogin"), [update](const auto &edit) {
+                                   update([&edit](RshOptions &o) { edit(o.reconnect); });
+                               });
     auto *note = page->addCard(QStringLiteral("Security"));
     auto *text = new QLabel(QStringLiteral(
         "Rlogin and RSH send everything, passwords included, unencrypted, and trust the source "
@@ -3010,7 +3071,7 @@ void PreferencesWindow::buildRdpPage()
               current.highDpi, QStringLiteral("hidpi retina scaling 4k zoom"),
               [](RdpOptions &o, int v) { o.highDpi = v; });
     addSwitch(display, QStringLiteral("Full screen uses all monitors"),
-              QStringLiteral("In full screen (Ctrl+Alt+Enter), the remote desktop gets one monitor "
+              QStringLiteral("In full screen (Ctrl+Alt+Enter by default), the remote desktop gets one monitor "
                              "per local monitor. Needs a server that allows several monitors; "
                              "not available on Wayland."),
               current.allMonitors, QStringLiteral("multi monitor multimon screens span"),
@@ -3046,14 +3107,11 @@ void PreferencesWindow::buildRdpPage()
                              "Windows usually requires NLA, which needs it up front)."),
               current.askCredentials, QStringLiteral("credentials login logon prompt password"),
               [](RdpOptions &o, int v) { o.askCredentials = v; });
-    auto *rdpReconnect = addSwitch(connection, QStringLiteral("Reconnect automatically"),
-                                   QStringLiteral("When the network drops, it resumes the same "
-                                                  "remote session."),
-                                   current.autoReconnect, QStringLiteral("reconnect network drop resume"),
-                                   [](RdpOptions &o, int v) { o.autoReconnect = v; });
-    addReconnectTimingRows(connection, rdpReconnect, current.reconnectDelay, current.reconnectAttempts,
-                           [update](int v) { update([v](RdpOptions &o) { o.reconnectDelay = v; }); },
-                           [update](int v) { update([v](RdpOptions &o) { o.reconnectAttempts = v; }); });
+    addReconnectPreferenceRows(connection, current.reconnect,
+                               QStringLiteral("When the network drops, it resumes the same remote session."),
+                               QStringLiteral("reconnect network drop resume"), [update](const auto &edit) {
+                                   update([&edit](RdpOptions &o) { edit(o.reconnect); });
+                               });
     addSwitch(connection, QStringLiteral("Administrator session"),
               QStringLiteral("Connects to the server's console session (mstsc /admin)."),
               current.adminSession, QStringLiteral("console admin"),
@@ -3336,6 +3394,13 @@ void PreferencesWindow::buildSecurityPage()
             }
         });
     storage->addWideRow(storeNote, QStringLiteral("keyring libsecret"));
+    auto *offer = toggle(current.offerToSave);
+    storage->addRow(QStringLiteral("Offer to save passwords typed at log-on"),
+                    QStringLiteral("After a saved session logs on with a password you typed (SSH, "
+                                   "SFTP, SCP, RDP, jump hosts), the tab asks whether to keep it in "
+                                   "the session's store. Never for one-time codes."),
+                    offer, QStringLiteral("remember save typed password prompt"));
+    bindToggle(this, offer, update, &SecurityPreferences::offerToSave);
     auto *copies = page->addCard(QStringLiteral("Copy saved passwords"));
     auto *toSystem = new QPushButton(QStringLiteral("Copy to the system store"));
     toSystem->setEnabled(systemAvailable);

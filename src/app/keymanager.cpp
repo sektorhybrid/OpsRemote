@@ -253,7 +253,7 @@ KeyManagerDialog::KeyManagerDialog(SessionChoices sessions, SessionResolver reso
     connect(fromSecurityKey, &QPushButton::clicked, this, &KeyManagerDialog::importFromSecurityKey);
     connect(m_delete, &QPushButton::clicked, this, &KeyManagerDialog::deleteKey);
     connect(folder, &QPushButton::clicked, this, [] {
-        QDir().mkpath(keysFolder());
+        makePrivateFolder(keysFolder());
         QDesktopServices::openUrl(QUrl::fromLocalFile(keysFolder()));
     });
     connect(m_copy, &QPushButton::clicked, this,
@@ -434,9 +434,7 @@ void KeyManagerDialog::createKey()
 
     const QString file = name->text().trimmed();
     const QString path = QDir(keysFolder()).filePath(file);
-    QDir().mkpath(keysFolder());
-    QFile::setPermissions(keysFolder(),
-                          QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
+    makePrivateFolder(keysFolder()); // libssh writes the key into it
     const auto chosen = type->currentData().toString();
     const bool rsa = chosen == QStringLiteral("rsa");
     const auto keyType = rsa ? SSH_KEYTYPE_RSA
@@ -551,7 +549,7 @@ void KeyManagerDialog::importKey()
             return;
         }
     }
-    QDir().mkpath(keysFolder());
+    makePrivateFolder(keysFolder());
     if (!QFile::copy(source, target) || !writePublicKey(target, line)) {
         QFile::remove(target);
         QMessageBox::warning(this, QStringLiteral("Import Key"), QStringLiteral("Could not copy the key."));

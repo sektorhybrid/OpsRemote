@@ -456,8 +456,25 @@ void TerminalPage::createTerminal()
     connect(m_terminal, &QTermWidget::urlActivated, this, [this](const QUrl &url, bool fromMenu) {
         // Ctrl+click opens them unless only the menu should; a session that
         // turns links on while they are off globally uses Ctrl+click.
-        if (m_terminal->linksEnabled() && (fromMenu || Clipboard::preferences().links != QStringLiteral("menu")))
+        if (!m_terminal->linksEnabled() || (!fromMenu && Clipboard::preferences().links == QStringLiteral("menu")))
+            return;
+        const QString target = url.toDisplayString();
+        switch (linkAction(url, isLocal())) {
+        case LinkAction::Open:
             QDesktopServices::openUrl(url);
+            return;
+        case LinkAction::Refuse:
+            emit statusMessage(QStringLiteral("Not opened: %1 points at a file on this computer, and links from a "
+                                              "remote session never open files here.").arg(target));
+            return;
+        case LinkAction::Ask: {
+            std::unique_ptr<QMessageBox> box(openLinkQuestion(url, this));
+            box->exec();
+            if (box->clickedButton() && box->buttonRole(box->clickedButton()) == QMessageBox::AcceptRole)
+                QDesktopServices::openUrl(url);
+            return;
+        }
+        }
     });
     connect(m_terminal, &QTermWidget::bell, this, [this] {
         if (m_behaviour.bell == QStringLiteral("sound")) {
@@ -623,6 +640,9 @@ void TerminalPage::startSsh()
         showLocalText(message + QLatin1Char('\n'));
     });
     connect(m_ssh, &SshSession::hostKeyVerificationRequired, this, &TerminalPage::confirmHostKey);
+    connect(m_ssh, &SshSession::typedPasswordWorked, this, [this](const QString &password, bool replaces) {
+        emit typedPasswordWorked({}, password, replaces);
+    });
     connect(m_ssh, &SshSession::inputRequired, this,
             [this](const QString &instruction, const QStringList &prompts,
                    const QList<bool> &echo) {
@@ -631,7 +651,7 @@ void TerminalPage::startSsh()
     connect(m_ssh, &SshSession::connected, this, [this] {
         m_inputMode = InputMode::Remote;
         m_wasConnected = true;
-        m_reconnectAttempts = 0;
+        m_reconnector.worked();
         emit statusMessage({}); // connected: an earlier disconnect reason is old news
         runLoginScript();
     });
@@ -678,6 +698,7 @@ void TerminalPage::startSsh()
 
     // Through jump hosts: the chain's local port stands in for the server.
     m_jumpChain = new JumpChain(this);
+    connect(m_jumpChain, &JumpChain::typedPasswordWorked, this, &TerminalPage::typedPasswordWorked);
     connect(m_jumpChain, &JumpChain::statusMessage, this, [this](const QString &message) {
         showLocalText(message + QLatin1Char('\n'));
     });
@@ -791,7 +812,7 @@ void TerminalPage::confirmHostKey(SshHostKeyStatus status, const QString &keyTyp
     switch (status) {
     case SshHostKeyStatus::Unknown:
         dialog.setIcon(QMessageBox::Question);
-        dialog.setText(QStringLiteral("The authenticity of %1 can't be established.").arg(host));
+        dialog.setText(QStringLiteral("The authenticity of %1 cannot be established.").arg(host));
         dialog.setInformativeText(
             QStringLiteral("%1\n\nOnly connect if this matches the fingerprint published by the "
                            "server's administrator.").arg(keyDetails));
@@ -966,6 +987,13 @@ TerminalPage::TerminalPage(StreamConnection *connection, const TerminalAppearanc
         runLoginScript();
     });
     connect(m_stream, &StreamConnection::dataReceived, this, [this](const QByteArray &data) {
+        m_streamLastData.start();
+        if (!m_streamWorksNow) {
+            // The server answered: tries start again at the next drop.
+            m_streamWorksNow = m_streamWorked = true;
+            m_reconnector.worked();
+            qInfo("Connection: %s works", qUtf8Printable(m_stream->description()));
+        }
         logOutput(data);
         if (m_automation)
             m_automation->feed(data);
@@ -978,8 +1006,40 @@ TerminalPage::TerminalPage(StreamConnection *connection, const TerminalAppearanc
     startStream();
 }
 
+QMessageBox *TerminalPage::openLinkQuestion(const QUrl &url, QWidget *parent)
+{
+    auto *box = new QMessageBox(QMessageBox::Question, QStringLiteral("Open Link"),
+                                QStringLiteral("Open this %1: link with its program on this computer?")
+                                    .arg(url.scheme().toLower()),
+                                QMessageBox::NoButton, parent);
+    box->setTextFormat(Qt::PlainText);
+    box->setInformativeText(url.toDisplayString());
+    box->addButton(QStringLiteral("Open"), QMessageBox::AcceptRole);
+    box->setDefaultButton(box->addButton(QMessageBox::Cancel));
+    return box;
+}
+
+TerminalPage::LinkAction TerminalPage::linkAction(const QUrl &url, bool localSession)
+{
+    const QString scheme = url.scheme().toLower();
+    if (scheme == QStringLiteral("http") || scheme == QStringLiteral("https") || scheme == QStringLiteral("ftp")
+        || scheme == QStringLiteral("mailto"))
+        return LinkAction::Open;
+    if ((url.isLocalFile() || scheme == QStringLiteral("file")) && !localSession)
+        return LinkAction::Refuse;
+    return LinkAction::Ask;
+}
+
+void TerminalPage::setStreamReconnect(const ReconnectOptions &options)
+{
+    m_streamReconnect = options;
+    if (m_stream && options.autoReconnect == 1)
+        m_stream->setDeadNetworkSeconds(DeadNetworkSeconds);
+}
+
 void TerminalPage::startStream()
 {
+    m_streamWorksNow = false;
     m_inputMode = InputMode::Idle;
     resetTerminalModes(); // nothing left from the last connection
     m_endedBar->hide();
@@ -999,6 +1059,24 @@ void TerminalPage::handleStreamDisconnected(const QString &reason, bool error)
                            error);
     m_endedBar->show();
     emit statusMessage(QStringLiteral("%1: %2").arg(m_stream->description(), reason));
+    // Telnet and Rlogin end a logout the same way as a reset: an error
+    // counts as a drop, and so does a close after a quiet while (a dead
+    // network found by the probes of setStreamReconnect looks like a close
+    // on Windows); a logout's text comes right before its close.
+    const bool quiet = m_streamReconnect.autoReconnect == 1 && !error && m_streamWorksNow && m_streamLastData.isValid()
+                       && m_streamLastData.elapsed() >= QuietCloseSeconds * 1000;
+    qInfo("Connection: %s ended%s: %s", qUtf8Printable(m_stream->description()),
+          error ? " (error)" : quiet ? " (after a quiet while: counted as a drop)" : "", qUtf8Printable(reason));
+    // Only once a connection of this tab worked.
+    const auto &policy = m_streamReconnect;
+    if (policy.autoReconnect != 1 || !(error || quiet) || !m_streamWorked)
+        return;
+    const QString attempt = m_reconnector.retry(policy, this, m_stream->description(), [this] {
+        if (m_inputMode == InputMode::Closed)
+            startStream();
+    });
+    if (!attempt.isEmpty())
+        showLocalText(QStringLiteral("Reconnecting in %1 s (%2)…\n").arg(policy.delay).arg(attempt));
 }
 
 // After a session ended: Enter or the bar's Reconnect button.
@@ -1038,18 +1116,15 @@ void TerminalPage::handleSshDisconnected(const QString &reason, bool error)
 
     // A dropped connection (not a failed login or a clean logout) reconnects
     // by itself when enabled.
-    const auto &ssh = m_sshSettings;
-    if (ssh.autoReconnect && error && m_wasConnected
-        && mayReconnect(m_reconnectAttempts, ssh.reconnectAttempts)) {
-        ++m_reconnectAttempts;
-        showLocalText(QStringLiteral("Reconnecting in %1 s (%2)…\n")
-                          .arg(ssh.reconnectDelay)
-                          .arg(reconnectAttemptText(m_reconnectAttempts, ssh.reconnectAttempts)));
-        QTimer::singleShot(ssh.reconnectDelay * 1000, this, [this] {
-            if (m_inputMode == InputMode::Closed && !m_ssh)
-                startSsh();
-        });
-    }
+    const auto &policy = m_sshSettings.reconnect;
+    if (policy.autoReconnect != 1 || !error || !m_wasConnected)
+        return;
+    const QString attempt = m_reconnector.retry(policy, this, m_sshSettings.host, [this] {
+        if (m_inputMode == InputMode::Closed && !m_ssh)
+            startSsh();
+    });
+    if (!attempt.isEmpty())
+        showLocalText(QStringLiteral("Reconnecting in %1 s (%2)…\n").arg(policy.delay).arg(attempt));
 }
 
 // Starts or stops an asciinema recording of this tab, in the log folder.

@@ -63,14 +63,16 @@ bool askScriptParameters(const SavedScript &script, QHash<QString, QString> *val
 // The body with the {fields} filled in.
 QString filledScript(const SavedScript &script, const QHash<QString, QString> &values);
 
-// For a terminal: a command (run over its own channel) that stores the
-// script in a private temporary file and prints the file's path...
-QString storeScriptCommand(const QString &body);
-// ...and the short line typed into the shell to run it and remove it.
+// The script as the private file it is sent in (SshSession::runCommand's
+// file, never a command line): UTF-8, ending in a line break.
+QByteArray scriptFile(const QString &body);
+// For a terminal, once the file is stored: the short line typed into the
+// shell to run it and remove it.
 QString runStoredScriptLine(const SavedScript &script, const QString &path);
-// For Run on Hosts: one command that stores, runs, and removes the script,
-// with the script's exit status (sudo without asking: sudo -n).
-QString runScriptCommand(const SavedScript &script, const QString &body);
+// For Run on Hosts: the command that runs the stored file
+// (RemoteFilePlaceholder), with the script's exit status (sudo without
+// asking: sudo -n).
+QString runScriptCommand(const SavedScript &script);
 // For a shell where no file can be stored (a container): the script as one
 // here-document for its interpreter, lines ending in CR as typed.
 QString typedScript(const SavedScript &script, const QString &body);

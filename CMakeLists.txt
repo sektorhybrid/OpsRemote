@@ -5,7 +5,7 @@ cmake_minimum_required(VERSION 3.21)
 project(OpsRemote VERSION 0.6.6 LANGUAGES CXX)
 # A pre-release label ("beta.1", "rc.1"; empty for a release): the version
 # is then 0.6.6-beta.1 (About page, archive names, tag v0.6.6-beta.1).
-set(OPSREMOTE_VERSION_LABEL "rc.1")
+set(OPSREMOTE_VERSION_LABEL "rc.2")
 if(OPSREMOTE_VERSION_LABEL)
     set(OPSREMOTE_FULL_VERSION "${PROJECT_VERSION}-${OPSREMOTE_VERSION_LABEL}")
 else()
@@ -81,6 +81,14 @@ qt_add_executable(opsremote
     src/app/main.cpp
     src/app/resources/opsremote.qrc
     src/app/mainwindow.cpp
+    src/app/mainwindow_looks.cpp
+    src/app/mainwindow_p.cpp
+    src/app/mainwindow_p.h
+    src/app/mainwindow_panes.cpp
+    src/app/mainwindow_sessions.cpp
+    src/app/mainwindow_sessionwindow.cpp
+    src/app/mainwindow_tabs.cpp
+    src/app/mainwindow_tools.cpp
     src/app/mainwindow.h
     src/app/session.cpp
     src/app/panebars.cpp
@@ -181,6 +189,7 @@ qt_add_executable(opsremote
     src/app/localresources.cpp
     src/app/localresources.h
     src/platform/systemcredentials.h
+    src/platform/tcpkeepalive.h
     src/app/sftpsync.cpp
     src/app/sftpsync.h
     src/app/iperf.cpp
@@ -233,6 +242,10 @@ qt_add_executable(opsremote
     src/app/rdpclipboard.h
     src/app/rdpoptions.cpp
     src/app/rshoptions.cpp
+    src/app/telnetoptions.cpp
+    src/app/testhooks.cpp
+    src/app/testhooks.h
+    src/app/telnetoptions.h
     src/app/xdmcp.cpp
     src/app/rdpoptions.h
     src/app/rdpsession.cpp
@@ -341,13 +354,15 @@ if(WIN32)
         src/platform/appdirs_windows.cpp
         src/platform/pageant_windows.cpp
         src/platform/processinfo_windows.cpp
-        src/platform/systemcredentials_windows.cpp)
+        src/platform/systemcredentials_windows.cpp
+        src/platform/tcpkeepalive_windows.cpp)
 else()
     target_sources(opsremote PRIVATE
         src/platform/appdirs_unix.cpp
         src/platform/pageant_none.cpp
         src/platform/processinfo_proc.cpp
-        src/platform/systemcredentials_libsecret.cpp)
+        src/platform/systemcredentials_libsecret.cpp
+        src/platform/tcpkeepalive_unix.cpp)
 endif()
 
 # Local terminals on Windows: a pseudo console (ConPTY).

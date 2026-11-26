@@ -64,17 +64,7 @@ constexpr int MaximumListedErrors = 15;
 
 enum Column { NameColumn, SizeColumn, ModifiedColumn };
 
-QString joinRemotePath(const QString &directory, const QString &name)
-{
-    return directory.endsWith(QLatin1Char('/')) ? directory + name
-                                                : directory + QLatin1Char('/') + name;
-}
 
-QString parentRemotePath(const QString &path)
-{
-    const int slash = path.lastIndexOf(QLatin1Char('/'));
-    return slash <= 0 ? QStringLiteral("/") : path.left(slash);
-}
 
 QString formatSize(quint64 bytes)
 {
@@ -529,7 +519,7 @@ void SftpPanel::setStatusText(const QString &text)
 void SftpPanel::showMessage(const QString &text, bool error)
 {
     if (!text.isEmpty())
-        qInfo("SFTP%s: %s", error ? " error" : "", qUtf8Printable(text));
+        qInfo("SFTP: %s%s", error ? "error: " : "", qUtf8Printable(text));
     m_messageLabel->setText(text);
     m_messageLabel->setStyleSheet(error ? QStringLiteral("color: #c62828;")
                                         : QStringLiteral("color: palette(placeholder-text);"));
@@ -552,7 +542,7 @@ void SftpPanel::refresh()
 void SftpPanel::goUp()
 {
     if (!m_currentPath.isEmpty() && m_currentPath != QStringLiteral("/"))
-        navigate(parentRemotePath(m_currentPath));
+        navigate(RemotePaths::parent(m_currentPath));
 }
 
 void SftpPanel::populate(const QString &path, const QList<SftpEntry> &entries,
@@ -595,9 +585,9 @@ void SftpPanel::populate(const QString &path, const QList<SftpEntry> &entries,
         };
         addPlace(QStringLiteral("."), path, QStringLiteral("This folder (%1): open to list it again").arg(path));
         if (path != QStringLiteral("/"))
-            addPlace(QStringLiteral(".."), parentRemotePath(path),
+            addPlace(QStringLiteral(".."), RemotePaths::parent(path),
                      QStringLiteral("The folder above (%1); drop here to move or upload into it")
-                         .arg(parentRemotePath(path)));
+                         .arg(RemotePaths::parent(path)));
     }
     for (const auto &entry : entries) {
         if (entry.name == QStringLiteral(".") || entry.name == QStringLiteral(".."))
@@ -605,7 +595,7 @@ void SftpPanel::populate(const QString &path, const QList<SftpEntry> &entries,
         if (!preferences.showHidden && entry.name.startsWith(QLatin1Char('.')))
             continue;
         auto *item = new SftpItem(m_view);
-        const auto fullPath = joinRemotePath(path, entry.name);
+        const auto fullPath = RemotePaths::join(path, entry.name);
         item->setText(NameColumn, entry.name);
         item->setText(SizeColumn, entry.isDirectory ? QString() : formatSize(entry.size));
         item->setText(ModifiedColumn, QLocale().toString(entry.modified, QLocale::ShortFormat));
@@ -884,7 +874,15 @@ static bool couldRun(const QString &localPath)
         QStringLiteral("lnk"), QStringLiteral("url"), QStringLiteral("hta"), QStringLiteral("cpl"),
         QStringLiteral("jar"), QStringLiteral("reg"), QStringLiteral("inf"), QStringLiteral("msc"),
         QStringLiteral("application"), QStringLiteral("appref-ms"), QStringLiteral("library-ms"),
-        QStringLiteral("settingcontent-ms"), QStringLiteral("scf"),
+        QStringLiteral("settingcontent-ms"), QStringLiteral("scf"), QStringLiteral("chm"),
+        QStringLiteral("hlp"), QStringLiteral("mht"), QStringLiteral("mhtml"), QStringLiteral("ps1xml"),
+        QStringLiteral("ps2"), QStringLiteral("ps2xml"), QStringLiteral("psc1"), QStringLiteral("psc2"),
+        QStringLiteral("msh"), QStringLiteral("msh1"), QStringLiteral("msh2"), QStringLiteral("mshxml"),
+        QStringLiteral("msh1xml"), QStringLiteral("msh2xml"), QStringLiteral("vb"), QStringLiteral("ws"),
+        QStringLiteral("sct"), QStringLiteral("shb"), QStringLiteral("shs"), QStringLiteral("gadget"),
+        QStringLiteral("diagcab"), QStringLiteral("xbap"), QStringLiteral("website"), QStringLiteral("jnlp"),
+        QStringLiteral("pyw"), QStringLiteral("appx"), QStringLiteral("appxbundle"), QStringLiteral("msix"),
+        QStringLiteral("msixbundle"), QStringLiteral("ppkg"), QStringLiteral("xll"),
         // Linux and macOS
         QStringLiteral("desktop"), QStringLiteral("sh"), QStringLiteral("bash"), QStringLiteral("zsh"),
         QStringLiteral("run"), QStringLiteral("bin"), QStringLiteral("appimage"), QStringLiteral("py"),
@@ -994,7 +992,7 @@ void SftpPanel::createFolder()
         showMessage(QStringLiteral("A folder name cannot contain \"/\"."), true);
         return;
     }
-    m_session->makeDirectory(joinRemotePath(m_currentPath, name));
+    m_session->makeDirectory(RemotePaths::join(m_currentPath, name));
 }
 
 void SftpPanel::renameSelected()
@@ -1015,7 +1013,7 @@ void SftpPanel::renameSelected()
         showMessage(QStringLiteral("A name cannot contain \"/\"."), true);
         return;
     }
-    m_session->renamePath(oldPath, joinRemotePath(parentRemotePath(oldPath), newName));
+    m_session->renamePath(oldPath, RemotePaths::join(RemotePaths::parent(oldPath), newName));
 }
 
 // Moves remote files and folders into another folder on the same server.
@@ -1025,13 +1023,13 @@ void SftpPanel::movePaths(const QStringList &paths, const QString &folder)
         return;
     const QString target = folder.size() > 1 && folder.endsWith(QLatin1Char('/')) ? folder.chopped(1) : folder;
     for (const auto &path : paths) {
-        if (parentRemotePath(path) == target)
+        if (RemotePaths::parent(path) == target)
             continue; // already there
         if (target == path || target.startsWith(path + QLatin1Char('/'))) {
             showMessage(QStringLiteral("\"%1\" cannot be moved into itself.").arg(path), true);
             continue;
         }
-        m_session->renamePath(path, joinRemotePath(target, path.section(QLatin1Char('/'), -1)));
+        m_session->renamePath(path, RemotePaths::join(target, path.section(QLatin1Char('/'), -1)));
     }
 }
 
@@ -1051,7 +1049,7 @@ void SftpPanel::moveSelectedDialog()
                             .trimmed();
     if (!accepted || folder.isEmpty())
         return;
-    movePaths(paths, folder.startsWith(QLatin1Char('/')) ? folder : joinRemotePath(m_currentPath, folder));
+    movePaths(paths, folder.startsWith(QLatin1Char('/')) ? folder : RemotePaths::join(m_currentPath, folder));
 }
 
 void SftpPanel::deleteSelected()
@@ -1331,8 +1329,7 @@ QStringList SftpPanel::targetsOf(const RemoteFileSession::Job &job, QStringList 
         QString path;
         bool folder = false;
         if (job.upload) {
-            path = job.destination.endsWith(QLatin1Char('/')) ? job.destination + name
-                                                              : job.destination + QLatin1Char('/') + name;
+            path = RemotePaths::join(job.destination, name);
             folder = QFileInfo(source).isDir();
         } else {
             path = QDir(job.destination).filePath(name);
@@ -1427,7 +1424,7 @@ void SftpPanel::startChecked(const RemoteFileSession::Job &job, std::function<vo
     auto listId = std::make_shared<int>(0);
     *listId = transfers->start(m_ownerPage ? m_ownerPage.data() : this, what, job.upload, [listId] {
         TransferList::instance()->finish(*listId, TransferList::State::Cancelled);
-    }, QStringLiteral("Don't start this transfer"));
+    }, QStringLiteral("Do not start this transfer"));
     transfers->update(*listId, what, 0, 0,
                       stop ? QStringLiteral("Waiting for the other transfer to stop")
                            : QStringLiteral("Waiting for the other transfer of this file"));

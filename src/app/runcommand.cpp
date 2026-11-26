@@ -370,13 +370,15 @@ void RunCommandWindow::connectJob(int index, quint16 viaLocalPort)
         showJob(job);
         const auto preferences = loadRunCommandPreferences();
         auto command = m_command;
+        QByteArray file;
         if (m_script) {
             auto values = m_scriptValues;
             values.insert(QStringLiteral("user"), job.settings.username);
             values.insert(QStringLiteral("host"), job.settings.host);
-            command = runScriptCommand(*m_script, filledScript(*m_script, values));
+            command = runScriptCommand(*m_script);
+            file = scriptFile(filledScript(*m_script, values));
         }
-        ssh->runCommand(command, m_terminal->isChecked(), m_timeout->value(), preferences.outputKb * 1024);
+        ssh->runCommand(command, m_terminal->isChecked(), m_timeout->value(), preferences.outputKb * 1024, file);
     });
     connect(ssh, &SshSession::commandFinished, this,
             [this, index, ssh](int, int exitStatus, const QByteArray &output, bool truncated,

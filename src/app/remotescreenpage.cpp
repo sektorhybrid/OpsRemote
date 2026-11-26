@@ -44,8 +44,8 @@ RemoteScreenPage::RemoteScreenPage(QWidget *parent)
     layout->setContentsMargins(12, 2, 4, 4);
     m_fullScreenText = new QLabel(m_fullScreenBar);
     m_fullScreenText->setTextFormat(Qt::PlainText);
-    auto *leave = new QPushButton(QStringLiteral("Exit Full Screen (Ctrl+Alt+Enter)"),
-                                  m_fullScreenBar);
+    auto *leave = new QPushButton(m_fullScreenBar); // text in showFullScreenBar()
+    m_fullScreenLeave = leave;
     leave->setFocusPolicy(Qt::NoFocus);
     layout->addWidget(m_fullScreenText);
     layout->addWidget(leave);
@@ -109,12 +109,21 @@ void RemoteScreenPage::sendKeyCombination(KeyCombination combination)
     setFocus();
 }
 
+namespace {
+QKeySequence fullScreenKey(Qt::CTRL | Qt::ALT | Qt::Key_Return);
+}
+
+void RemoteScreenPage::setFullScreenKey(const QKeySequence &key)
+{
+    fullScreenKey = key;
+}
+
 bool RemoteScreenPage::handleFullScreenKey(QKeyEvent *event)
 {
-    if ((event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter)
-        && (event->modifiers() & (Qt::ControlModifier | Qt::AltModifier))
-               == (Qt::ControlModifier | Qt::AltModifier)
-        && !event->isAutoRepeat()) {
+    // The keypad's Enter counts as Return, as in mstsc.
+    const auto key = event->key() == Qt::Key_Enter ? Qt::Key_Return : Qt::Key(event->key());
+    const QKeySequence pressed(QKeyCombination(event->modifiers() & ~Qt::KeypadModifier, key));
+    if (!fullScreenKey.isEmpty() && pressed == fullScreenKey && !event->isAutoRepeat()) {
         setFullScreen(!m_fullScreen);
         event->accept();
         return true;
@@ -256,6 +265,10 @@ void RemoteScreenPage::requestClose()
 void RemoteScreenPage::showFullScreenBar()
 {
     m_fullScreenText->setText(m_tabTitle);
+    m_fullScreenLeave->setText(fullScreenKey.isEmpty()
+                                   ? QStringLiteral("Exit Full Screen")
+                                   : QStringLiteral("Exit Full Screen (%1)")
+                                         .arg(fullScreenKey.toString(QKeySequence::NativeText)));
     m_fullScreenBar->adjustSize();
     // Centred on the primary (or only) monitor.
     QRect area = rect();

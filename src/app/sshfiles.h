@@ -94,6 +94,9 @@ private:
     bool readLine(QByteArray *line, QString *error);
     // Reads the one-byte reply of an SCP sink; false (with error) unless 0.
     bool readAck(QString *error);
+    // Why the scp command did not start talking: the server's own words
+    // (its error output), "no scp program" for a missing one, else reason.
+    QString startFailure(const QString &reason);
     void closeChannel();
 
     ssh_session m_session;

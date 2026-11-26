@@ -5,6 +5,8 @@
 
 namespace YAML { class Node; }
 
+#include "reconnect.h"
+
 #include <QByteArray>
 #include <QColor>
 #include <QHash>
@@ -139,9 +141,7 @@ struct SshPreferences
     // before anything that asks).
     QString kerberosOrder = QStringLiteral("first");
     bool kerberosDelegate = false;
-    bool autoReconnect = false;
-    int reconnectDelay = 5; // seconds
-    int reconnectAttempts = 5;
+    ReconnectOptions reconnect = ReconnectOptions::builtIn();
     QString terminalType = QStringLiteral("xterm-256color");
     bool followTerminalFolder = false; // opt-in: the Files pane follows the shell's folder
     bool forwardX11 = false; // remote X11 programs show on this computer (ssh -Y)
@@ -181,6 +181,8 @@ struct SecurityPreferences
     bool unlockAtStartup = false;
     // Where passwords are kept: vault, system, both (see PasswordStore).
     QString passwordStore = QStringLiteral("vault");
+    // After a log-on with a typed password: offer to save it.
+    bool offerToSave = true;
 
     bool operator==(const SecurityPreferences &) const = default;
 };
@@ -382,6 +384,11 @@ PresentationPreferences loadPresentationPreferences();
 void savePresentationPreferences(const PresentationPreferences &preferences);
 BackupPreferences loadBackupPreferences();
 void saveBackupPreferences(const BackupPreferences &preferences);
+// settings.yaml is read once and kept; whoever writes it other than
+// savePreferencesSection() (main() after the migration, a restored backup)
+// calls this so the next read takes the file again. (A change on disk is
+// noticed anyway, by its size and time.)
+void forgetCachedSettings();
 // A top-level section of settings.yaml (an empty map when missing), for
 // modules that keep their own settings.
 YAML::Node loadPreferencesSection(const char *section);
@@ -427,6 +434,8 @@ struct ShortcutDefinition
     QString label;
     QString category;
     QKeySequence defaultKey;
+    // Listed in Preferences for reference only; never changed or saved.
+    bool fixed = false;
 };
 
 const QList<ShortcutDefinition> &shortcutDefinitions();

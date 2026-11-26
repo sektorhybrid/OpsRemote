@@ -324,7 +324,7 @@ LONG WINAPI logCrash(EXCEPTION_POINTERS *exception)
         }
     }
     const auto *record = exception->ExceptionRecord;
-    qCritical().noquote() << QStringLiteral("fault: exception 0x%1 at %2 in thread %3 (%4)%5\n%6")
+    qCritical().noquote() << QStringLiteral("Fault: exception 0x%1 at %2 in thread %3 (%4)%5\n%6")
                                  .arg(qulonglong(record->ExceptionCode), 8, 16, QLatin1Char('0'))
                                  .arg(describe(std::uintptr_t(record->ExceptionAddress)))
                                  .arg(GetCurrentThreadId())
@@ -394,10 +394,10 @@ void watchGuiStalls(QObject *owner)
                 GetModuleFileNameW(modules[index], path, MAX_PATH);
                 names << QString::fromWCharArray(path);
             }
-            qInfo().noquote() << "loaded modules:" << names.join(QStringLiteral("; "));
+            qInfo().noquote() << "Stall watch: loaded modules:" << names.join(QStringLiteral("; "));
         }
     });
-    // For tests, a thread started and ended every 3 s, to tell which kind
+    // OPSREMOTE_TEST_THREADS=kind (tests): a thread started and ended every 3 s, to tell which kind
     // makes the program stall as it ends: 1 a bare Windows thread that does
     // nothing, 2 a QThread (which makes a hidden window for its events), 3 a
     // bare thread that makes and destroys a hidden window, 4 a bare thread
@@ -434,12 +434,13 @@ void watchGuiStalls(QObject *owner)
                 if (HANDLE thread = CreateThread(nullptr, 0, body, nullptr, 0, nullptr))
                     CloseHandle(thread);
             }
-            qInfo("test thread started (kind %d)", kind);
+            qInfo("Stall watch: test thread started (kind %d)", kind);
         });
         churn->start(3000);
     }
 #endif
-    // For tests: blocks the GUI thread that long, two seconds after start.
+    // OPSREMOTE_TEST_STALL_MS=ms (tests): blocks the GUI thread that long, two
+    // seconds after start.
     if (const int stallMs = qEnvironmentVariableIntValue("OPSREMOTE_TEST_STALL_MS"); stallMs > 0)
         QTimer::singleShot(2000, owner, [stallMs] { QThread::msleep(stallMs); });
 }

@@ -414,7 +414,7 @@ void NetworkToolsWindow::toggleDownload()
         const auto error = m_download->error();
         const int status = m_download->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         // For OPSREMOTE_LOG: which protocol the download used (never HTTP/2).
-        qInfo().noquote() << "download: status" << status << "HTTP/2"
+        qInfo().noquote() << "Download: status" << status << "HTTP/2"
                           << m_download->attribute(QNetworkRequest::Http2WasUsedAttribute).toBool();
         if (error == QNetworkReply::OperationCanceledError)
             finishDownload(QStringLiteral("Stopped; the part downloaded is kept for resuming."));
@@ -757,7 +757,16 @@ void NetworkToolsWindow::runCommand(QPointer<QProcess> &process, QPlainTextEdit 
         child->deleteLater();
     });
     start->setText(QStringLiteral("Stop"));
-    child->start(program, arguments);
+    // By its full path from the system's search path, never from the
+    // folder OpsRemote was started in (Windows would look there first).
+    const QString path = QStandardPaths::findExecutable(program);
+    if (path.isEmpty()) {
+        output->appendPlainText(QStringLiteral("Could not start %1: it is not installed.").arg(program));
+        start->setText(QStringLiteral("Start"));
+        child->deleteLater();
+        return;
+    }
+    child->start(path, arguments);
 }
 
 void NetworkToolsWindow::startPing()

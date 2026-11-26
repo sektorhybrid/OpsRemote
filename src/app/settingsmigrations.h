@@ -29,7 +29,7 @@ public:
     {
         m_lock.setStaleLockTime(10000);
         if (!m_lock.tryLock(3000))
-            qWarning("settings: %s is locked by another OpsRemote; saving anyway",
+            qWarning("Settings: %s is locked by another OpsRemote; saving anyway",
                      qUtf8Printable(settingsFile));
     }
 

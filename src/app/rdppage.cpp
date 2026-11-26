@@ -296,6 +296,11 @@ RdpPage::RdpPage(const RdpConnectionSettings &settings, QWidget *parent)
     });
     connect(m_session, &RdpSession::connected, this, [this](int width, int height) {
         m_connected = true;
+        if (!m_typedPassword.isEmpty()) {
+            emit typedPasswordWorked({}, m_typedPassword, m_typedReplaces);
+            m_typedPassword.fill(QChar(0));
+            m_typedPassword.clear();
+        }
         qInfo("RDP: connected to %s, %dx%d, %s, scale %.2f", qUtf8Printable(m_settings.host), width,
               height, m_graphicsMode.isEmpty() ? "bitmap updates" : qUtf8Printable(m_graphicsMode),
               m_connectScale);
@@ -331,6 +336,8 @@ RdpPage::RdpPage(const RdpConnectionSettings &settings, QWidget *parent)
     });
     connect(m_session, &RdpSession::disconnected, this, [this](const QString &reason, bool error) {
         m_connected = false;
+        m_typedPassword.fill(QChar(0));
+        m_typedPassword.clear();
         m_resizeSupported = false;
         m_pressedKeys.clear();
         m_pointerShape = QImage();
@@ -347,7 +354,7 @@ RdpPage::RdpPage(const RdpConnectionSettings &settings, QWidget *parent)
                 box.setIcon(changed ? QMessageBox::Warning : QMessageBox::Question);
                 box.setWindowTitle(QStringLiteral("Remote Desktop Certificate"));
                 box.setText(changed ? QStringLiteral("The certificate of %1 has CHANGED.").arg(host)
-                                    : QStringLiteral("The identity of %1 can't be verified.").arg(host));
+                                    : QStringLiteral("The identity of %1 cannot be verified.").arg(host));
                 box.setInformativeText(
                     QStringLiteral("Subject: %1\nIssuer: %2\nFingerprint: %3\n\n%4")
                         .arg(subject, issuer, fingerprint,
@@ -391,6 +398,12 @@ RdpPage::RdpPage(const RdpConnectionSettings &settings, QWidget *parent)
                     *username = user->text();
                     *password = secret->text();
                     *domain = realm->text();
+                    // The server's own log-on (not the gateway's): offered for
+                    // saving once connected.
+                    if (!gateway) {
+                        m_typedPassword = *password;
+                        m_typedReplaces = !m_settings.password.isEmpty();
+                    }
                 }
             });
     showOverlay(QStringLiteral("Connecting to %1…").arg(m_settings.host), false);
@@ -439,6 +452,7 @@ void RdpPage::start()
     // Through jump hosts: the chain's local port stands in for the server.
     stopJumpChain();
     m_jumpChain = new JumpChain(this);
+    connect(m_jumpChain, &JumpChain::typedPasswordWorked, this, &RdpPage::typedPasswordWorked);
     connect(m_jumpChain, &JumpChain::statusMessage, this, [this](const QString &message) {
         showOverlay(message, false);
     });
@@ -569,7 +583,7 @@ void RdpPage::keyPressEvent(QKeyEvent *event)
         event->accept();
         return;
     }
-    // Ctrl+Alt+Enter enters and leaves full screen, as in mstsc.
+    // The full-screen key (Ctrl+Alt+Enter, as in mstsc) enters and leaves it.
     if (handleFullScreenKey(event))
         return;
     sendKeyEvent(event, true);

@@ -44,6 +44,8 @@ namespace RemotePaths {
 
 QString join(const QString &directory, const QString &name)
 {
+    if (name.isEmpty())
+        return directory;
     return directory.endsWith(QLatin1Char('/')) ? directory + name
                                                 : directory + QLatin1Char('/') + name;
 }

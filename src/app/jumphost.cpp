@@ -94,6 +94,12 @@ void JumpChain::openHop(size_t index, quint16 viaLocalPort)
                 askSshHostKey(m_dialogParent, session, QStringLiteral("jump host %1").arg(host),
                               status, keyType, fingerprint);
             });
+    if (!settings.savedSession.isEmpty()) {
+        connect(session, &SshSession::typedPasswordWorked, this,
+                [this, saved = settings.savedSession](const QString &password, bool replaces) {
+                    emit typedPasswordWorked(saved, password, replaces);
+                });
+    }
     connect(session, &SshSession::inputRequired, this,
             [this, session, host](const QString &instruction, const QStringList &prompts,
                                   const QList<bool> &echo) {
@@ -126,7 +132,7 @@ void askSshHostKey(QWidget *parent, SshSession *session, const QString &server,
     box.setIcon(changed ? QMessageBox::Warning : QMessageBox::Question);
     box.setWindowTitle(QStringLiteral("SSH Host Key"));
     box.setText(changed ? QStringLiteral("The host key of %1 has CHANGED.").arg(server)
-                        : QStringLiteral("The authenticity of %1 can't be established.")
+                        : QStringLiteral("The authenticity of %1 cannot be established.")
                               .arg(server));
     box.setInformativeText(QStringLiteral("%1 key fingerprint:\n%2\n\nOnly connect if this "
                                           "matches the server's published key.")

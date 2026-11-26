@@ -5,6 +5,7 @@
 #include "statusindicators.h"
 
 #include "jumphost.h"
+#include "reconnect.h"
 
 #include "sftppanel.h"
 
@@ -20,6 +21,7 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QSplitter>
+#include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
 
@@ -134,6 +136,18 @@ void FilesPage::ended(const QString &reason, bool error)
     setState(reason, error);
     offerReconnect(true);
     m_panel->setSession(nullptr);
+    // SFTP/SCP: a dropped connection (not a failed log-on or a clean end)
+    // reconnects by itself when the session's SSH settings say so. FTP
+    // reopens its connection itself at the next action (ftpclient.cpp).
+    const auto &policy = m_sshSettings.reconnect;
+    if (m_ftp || policy.autoReconnect != 1 || !error || !m_wasConnected)
+        return;
+    const QString attempt = m_reconnector.retry(policy, this, QStringLiteral("files on %1").arg(m_sshSettings.host), [this] {
+        if (m_reconnectOffered) // not reconnected by hand meanwhile
+            start();
+    });
+    if (!attempt.isEmpty())
+        setState(QStringLiteral("%1 Reconnecting in %2 s (%3)…").arg(reason).arg(policy.delay).arg(attempt), error);
 }
 
 void FilesPage::start()
@@ -166,12 +180,18 @@ void FilesPage::startSsh()
             [this, server](SshHostKeyStatus status, const QString &type, const QString &fingerprint) {
                 askSshHostKey(this, m_sshSession, server, status, type, fingerprint);
             });
+    connect(m_sshSession, &SshSession::typedPasswordWorked, this, [this](const QString &password, bool replaces) {
+        emit typedPasswordWorked({}, password, replaces);
+    });
     connect(m_sshSession, &SshSession::inputRequired, this,
             [this, server](const QString &instruction, const QStringList &prompts,
                            const QList<bool> &echo) {
                 askSshLogOn(this, m_sshSession, server, instruction, prompts, echo);
             });
     connect(m_sshSession, &SshSession::sftpReady, this, [this, server] {
+        m_wasConnected = true;
+        m_reconnector.worked();
+        qInfo("Connection: files on %s work", qUtf8Printable(m_sshSettings.host));
         setState(QStringLiteral("Connected to %1 (files over %2).")
                      .arg(server, m_sshSession ? m_sshSession->fileProtocol() : QString()), false);
         emit statusMessage({}); // connected: an earlier disconnect reason is old news
@@ -188,6 +208,7 @@ void FilesPage::startSsh()
     }
     // Through jump hosts: the chain's local port stands in for the server.
     m_jumpChain = new JumpChain(this);
+    connect(m_jumpChain, &JumpChain::typedPasswordWorked, this, &FilesPage::typedPasswordWorked);
     connect(m_jumpChain, &JumpChain::statusMessage, this, [this](const QString &message) {
         setState(message, false);
     });

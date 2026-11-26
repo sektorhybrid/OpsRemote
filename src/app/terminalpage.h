@@ -5,16 +5,20 @@
 
 #include "automation.h"
 #include "preferences.h"
+#include "reconnect.h"
 #include "sshsession.h"
 #include "terminalappearance.h"
 
+#include <QElapsedTimer>
 #include <QPointer>
+#include <QUrl>
 #include <QRegularExpression>
 #include <QStringDecoder>
 #include <QWidget>
 
 #include <memory>
 
+class QMessageBox;
 class QAction;
 class QMenu;
 class QFile;
@@ -42,6 +46,9 @@ public:
     // Shows a Telnet or serial connection; the page takes ownership.
     TerminalPage(StreamConnection *connection, const TerminalAppearance &appearance,
                  QWidget *parent = nullptr);
+    // Telnet and Rlogin: reconnecting after a dropped connection (the
+    // effective options); set right after creating the page.
+    void setStreamReconnect(const ReconnectOptions &options);
     ~TerminalPage() override;
 
     // The remote file browser for an SSH tab; nullptr for local shells. The
@@ -61,6 +68,14 @@ public:
     // Local files dropped on the terminal: true when handled (uploaded or
     // asked about); false: their paths are to be typed.
     bool dropFiles(const QStringList &files, bool shift);
+    // What a Ctrl+click on a link in the terminal does: web and mail links
+    // open, others are asked about with their exact target (OSC 8 links can
+    // show other text), and files are never opened from a remote session
+    // (a server's output could point at a program here).
+    enum class LinkAction { Open, Ask, Refuse };
+    static LinkAction linkAction(const QUrl &url, bool localSession);
+    // The question for LinkAction::Ask: the scheme, and the whole target.
+    static QMessageBox *openLinkQuestion(const QUrl &url, QWidget *parent);
     // A shell or program on this computer (not SSH, Telnet, serial…).
     bool isLocal() const { return !m_ssh && !m_stream && m_sshSettings.host.isEmpty(); }
     const SshConnectionSettings &sshSettings() const { return m_sshSettings; }
@@ -100,6 +115,9 @@ public:
 
 signals:
     void statusMessage(const QString &message);
+    // A password typed at a log-on prompt worked: this tab's own (savedSession
+    // empty) or that of the jump host from that saved session.
+    void typedPasswordWorked(const QString &savedSession, const QString &password, bool replaces);
     // Output arrived or the bell rang; MainWindow marks the tab if it is not current.
     void activity();
     void bell();
@@ -195,8 +213,12 @@ private:
     AutomationRunner *m_automation = nullptr;
     QStringDecoder m_decoder{QStringDecoder::Utf8};
     bool m_alternateScreen = false;
-    int m_reconnectAttempts = 0;
+    Reconnector m_reconnector; // reconnect.h
     bool m_wasConnected = false;
+    ReconnectOptions m_streamReconnect; // off unless set
+    bool m_streamWorked = false; // some connection of this tab got data
+    bool m_streamWorksNow = false; // this connection did
+    QElapsedTimer m_streamLastData; // since the server last sent something
     SshSession *m_ssh = nullptr;
     StreamConnection *m_stream = nullptr;
     QPointer<JumpChain> m_jumpChain;

@@ -147,6 +147,7 @@ int runFileTransferTest(const QString &spec)
         QObject::connect(ftp, &FtpSession::loginFailed, [](const QString &m) { say(QStringLiteral("login failed: ") + m); });
         QObject::connect(ftp, &FtpSession::statusMessage, [](const QString &m) { say(QStringLiteral("status: ") + m); });
         QObject::connect(ftp, &FtpSession::disconnected, [](const QString &m, bool) { say(QStringLiteral("disconnected: ") + m); });
+        // OPSREMOTE_TEST_FILES_LOG: also the FTP conversation (passwords hidden).
         if (qEnvironmentVariableIsSet("OPSREMOTE_TEST_FILES_LOG"))
             QObject::connect(ftp, &FtpSession::logLine, [](const QString &m) { say(QStringLiteral("  ") + m); });
         ftp->connectToHost(settings);
@@ -952,5 +953,86 @@ int runSshDropTest(const QString &spec)
     page->dropFiles(files, false);
     wait(5000);
     delete page;
+    return 0;
+}
+
+int runRemoteFileTest(const QString &spec)
+{
+    const QUrl url(spec);
+    SshConnectionSettings base;
+    base.host = url.host();
+    base.port = quint16(url.port(22));
+    base.username = url.userName();
+    base.password = url.password();
+    base.tryPublicKeys = false;
+    base.knownHostsPath = QUrlQuery(url).queryItemValue(QStringLiteral("known_hosts"));
+    const QByteArray marker = "opsremote-secret-marker-42";
+    // The marker split, so the grep looking for it never matches itself.
+    const QString look = QStringLiteral("ps -eo args | grep -c 'opsremote-secret-marke[r]'");
+    const auto wait = [](const std::function<bool()> &done, int ms) {
+        QElapsedTimer clock;
+        clock.start();
+        while (!done() && clock.elapsed() < ms)
+            QCoreApplication::processEvents(QEventLoop::WaitForMoreEvents, 50);
+    };
+    // Runs command (openShell off) and returns its output.
+    const auto run = [&](const QString &command, const QByteArray &file, bool keepFile = false) {
+        auto settings = base;
+        settings.openShell = false;
+        SshSession ssh;
+        QByteArray result;
+        bool finished = false;
+        QObject::connect(&ssh, &SshSession::connected, &ssh, [&] { ssh.runCommand(command, false, 20, 65536, file, keepFile); });
+        QObject::connect(&ssh, &SshSession::commandFinished, &ssh,
+                         [&](int, int, const QByteArray &output, bool, const QString &error, int) {
+                             result = output + error.toUtf8();
+                             finished = true;
+                         });
+        ssh.connectToHost(settings);
+        wait([&] { return finished; }, 30000);
+        return QString::fromUtf8(result);
+    };
+    const auto pathIn = [](const QString &output) {
+        static const QRegularExpression path(QStringLiteral("path: (\\S+)"));
+        return path.match(output).captured(1);
+    };
+
+    // A command with a private file.
+    const auto output = run(QStringLiteral("cat %1; echo; echo \"path: $opsremote_file\"; %2")
+                                .arg(RemoteFilePlaceholder, look), marker);
+    const auto lines = output.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+    say(QStringLiteral("command read the file: %1").arg(output.contains(QString::fromUtf8(marker)) ? 1 : 0));
+    say(QStringLiteral("command: processes showing the secret: %1").arg(lines.isEmpty() ? QStringLiteral("?") : lines.last().trimmed()));
+    const auto path = pathIn(output);
+    say(QStringLiteral("command: file after: %1")
+            .arg(path.isEmpty() ? QStringLiteral("?") : run(QStringLiteral("test -e '%1' && echo exists || echo gone").arg(path), {}).trimmed()));
+
+    // Kept for a line typed afterwards (a saved script run in a tab).
+    const auto kept = run(QStringLiteral("echo OPSREMOTE-SCRIPT:") + RemoteFilePlaceholder, marker, true);
+    const auto keptPath = kept.section(QStringLiteral("OPSREMOTE-SCRIPT:"), 1).trimmed();
+    say(QStringLiteral("kept: file after: %1")
+            .arg(keptPath.isEmpty() ? QStringLiteral("?")
+                                    : run(QStringLiteral("cat '%1' && rm -f '%1'").arg(keptPath), {}).trimmed()));
+
+    // A shell session's command (Kubernetes over SSH).
+    auto settings = base;
+    settings.remoteCommand = QStringLiteral("cat %1; echo; echo \"path: $opsremote_file\"; %2").arg(RemoteFilePlaceholder, look);
+    settings.remoteFile = marker;
+    SshSession shell;
+    QByteArray shown;
+    bool ended = false;
+    QObject::connect(&shell, &SshSession::dataReceived, &shell, [&](const QByteArray &data) { shown += data; });
+    QObject::connect(&shell, &SshSession::disconnected, &shell, [&] { ended = true; });
+    shell.connectToHost(settings);
+    wait([&] { return ended; }, 30000);
+    const auto text = QString::fromUtf8(shown).remove(QLatin1Char('\r'));
+    const auto shellLines = text.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+    say(QStringLiteral("session read the file: %1").arg(text.contains(QString::fromUtf8(marker)) ? 1 : 0));
+    say(QStringLiteral("session: processes showing the secret: %1")
+            .arg(shellLines.isEmpty() ? QStringLiteral("?") : shellLines.last().trimmed()));
+    const auto shellPath = pathIn(text);
+    say(QStringLiteral("session: file after: %1")
+            .arg(shellPath.isEmpty() ? QStringLiteral("?")
+                                     : run(QStringLiteral("test -e '%1' && echo exists || echo gone").arg(shellPath), {}).trimmed()));
     return 0;
 }
